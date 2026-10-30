@@ -332,6 +332,8 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
                 s.spawn(move || {
                     let mut part = Partial { groups: vec![Agg::default(); n_groups], names: vec![Vec::new(); n_groups] };
                     parse_records(data, a, b, regions, &mut part);
+                    // Sorted here, while still in cache, so the final stage only merges runs.
+                    part.names.iter_mut().for_each(|entries| entries.sort_unstable());
                     part
                 })
             })
@@ -352,7 +354,7 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
                         .step_by(threads)
                         .map(|g| {
                             let mut entries: Vec<u64> = partials.iter().flat_map(|p| p.names[g].iter().copied()).collect();
-                            entries.sort_unstable();
+                            entries.sort();
                             let mut distinct = 0;
                             for run in entries.chunk_by(|a, b| a >> 32 == b >> 32) {
                                 if run.len() == 1 {
