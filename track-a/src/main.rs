@@ -58,6 +58,40 @@ fn has_zero_byte(v: u64) -> bool {
     v.wrapping_sub(0x0101_0101_0101_0101) & !v & 0x8080_8080_8080_8080 != 0
 }
 
+/// Where the method, endpoint and latency of the line at `line_start` end,
+/// as (endpoint start, endpoint end, latency end). One 64-byte window
+/// starting at the method holds the next four delimiters (the spaces after
+/// the method, the endpoint and the status, and the line feed) for almost
+/// every line; a line too long for it, or too near the end of the data,
+/// takes the byte-wise path.
+#[inline]
+fn split_line(data: &[u8], line_start: usize, end: usize) -> (usize, usize, usize) {
+    use std::arch::x86_64::*;
+    let q = line_start + 28;
+    if q + 64 <= data.len() {
+        // SAFETY: the 64 bytes at `q` are inside `data`; AVX2 is enabled for the build (target-cpu=x86-64-v3).
+        let mut bits = unsafe {
+            let (space, line_feed) = (_mm256_set1_epi8(b' ' as i8), _mm256_set1_epi8(b'\n' as i8));
+            let window = |at: usize| {
+                let v = _mm256_loadu_si256(data.as_ptr().add(at) as *const __m256i);
+                _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, space), _mm256_cmpeq_epi8(v, line_feed))) as u32 as u64
+            };
+            window(q) | window(q + 32) << 32
+        };
+        if bits.count_ones() >= 4 {
+            let mut at = [0usize; 4];
+            for slot in &mut at {
+                *slot = q + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+            }
+            return (at[0] + 1, at[1], at[3]);
+        }
+    }
+    let endpoint_start = find_delim_swar(data, q, end) + 1;
+    let endpoint_end = find_delim_swar(data, endpoint_start, end);
+    (endpoint_start, endpoint_end, find_delim_swar(data, endpoint_end + 5, end))
+}
+
 /// Finds the next space *or* newline at or after `start`, bounded by
 /// `end` — one combined SWAR scan instead of two separate ones. The
 /// original `process_morsel` found the line's newline first (one pass
@@ -205,10 +239,8 @@ fn process_morsel<'a>(
     // endpoint and latency need a delimiter scan.
     while line_start < end {
         let ts = &data[line_start..line_start + 27];
-        let endpoint_start = find_delim_swar(data, line_start + 28, end) + 1;
-        let endpoint_end = find_delim_swar(data, endpoint_start, end);
+        let (endpoint_start, endpoint_end, latency_end) = split_line(data, line_start, end);
         let status = &data[endpoint_end + 1..endpoint_end + 4];
-        let latency_end = find_delim_swar(data, endpoint_end + 5, end);
 
         let hour = hour_bucket_key(ts);
         let slot = morsel.hours.iter().position(|&h| h == hour).unwrap_or_else(|| {

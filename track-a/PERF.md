@@ -27,6 +27,7 @@ that was tried, including the failures, is in
 | 7 | Each hour's output block is written to the file as soon as all earlier hours are, instead of all blocks being held and then written | pending | 0.191 -> 0.177 (11 rounds) | 53 -> 47 | pending |
 | 8 | The morsel's lines are placed by a counting sort over a dense (hour slot x endpoint) table instead of a comparison sort | pending | 0.181 -> 0.160 (11 rounds) | 47 | pending |
 | 9 | Line parsing uses the spec's fixed layout: a 27-byte timestamp and a 3-digit status are sliced by offset, so three delimiter scans per line instead of five (the parser no longer tolerates blank or malformed lines, which the spec rules out) | pending | 0.155 -> 0.130 (13 rounds) | 46 | pending |
+| 10 | One 64-byte AVX2 window per line finds the method, endpoint, status and line-feed delimiters at once (byte-wise path kept for lines near the end of the data), replacing three byte-wise scans | pending | 0.155 -> 0.134 (15 interleaved rounds) | 45 | pending |
 
 Steps 6-9 together, measured the way the board measures (5 runs, mean of the
 middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
@@ -71,6 +72,10 @@ lines from 607 to 434.
   the mapped input from the process: peak 46 vs 45 MB, no effect. The
   pre-warmed `/data` pages are not charged to the run in the first place (the
   run scans a 239 MB mapped file and reports about 44 MiB).
+
+* **Profile-guided build** (a `.profdata` recorded on the public dataset, same
+  rustc and LLVM): board 0.0645 s against 0.0655 s, K +0.4%, inside the noise;
+  reverted.
 
 ## Caveats
 
