@@ -24,6 +24,7 @@ board yet. Everything that was tried, including the failures, is in
 | 4 | Exact distinct names counted by sorting each group's `(hash, name)` pairs and comparing bytes only inside runs of equal hashes, instead of one big hash set per owner | `run-cf24ab5675f5` (commit `db4cc76`) | parse+aggregate phase 234 -> 170 ms (9 interleaved rounds) | 123 -> 141 | 49.44 (board) |
 | 5 | A record leaves one `u64` in its country's list (top 32 bits of the hash of the name, offset of the name field) instead of a 12-byte reference plus a 24-byte `(hash, name)` pair; equal-hash runs are compared by re-reading the field. Hashing is done at parse time, when the name is in cache | pending | 0.265 -> 0.208 (11 rounds) | 140 -> 47 | pending |
 | 6 | Each parse worker sorts its own per-country lists while they are still in cache, so the final stage merges sorted runs instead of sorting from scratch | pending | 0.207 -> 0.190 (13 interleaved rounds) | 47 -> 48 | pending |
+| 7 | Chunk boundaries found by looking a few dozen bytes past each nominal cut for a line feed followed by a digit or a BOM (spec 2.2: names are letters, notes lowercase words), instead of counting every quote in the file first | pending | 0.180 -> 0.169 (15 interleaved rounds) | 48 | pending |
 
 Step 5 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.139 s and 47 MB, against 0.213 s and
@@ -80,6 +81,10 @@ folder still runs them. By the harness's own count this changed the source
 lines from 531 to 474.
 
 ## Caveats
+
+* Step 7 relies on spec 2.2: a line feed inside a quoted field is followed by a
+  letter or a quote, never by a digit or a BOM. The quote-parity scan it
+  replaced did not rely on that.
 
 * Step 5 has not run on the scoring box. Expect the board's T to differ.
 * Offsets are kept in 32 bits, so the input must be under 4 GiB (checked).

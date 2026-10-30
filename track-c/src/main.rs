@@ -276,37 +276,16 @@ fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, part:
 }
 
 /// Record-aligned chunk boundaries over `data[body..]`, `parts` of them
-/// (some possibly empty), via the quote-parity scan described above.
+/// (some possibly empty). Spec 2.2 makes names letters and notes lowercase
+/// words, so a line feed inside a quoted field is followed by a letter or a
+/// quote, while one that ends a record is followed by the next id's digits
+/// or a BOM. The first such line feed after each nominal cut is a boundary,
+/// found by looking at a few dozen bytes instead of counting every quote.
 fn chunk_bounds(data: &[u8], body: usize, parts: usize) -> Vec<usize> {
-    let len = data.len() - body;
-    let nominal: Vec<usize> = (0..=parts).map(|k| body + len * k / parts).collect();
-    let quotes: Vec<usize> = std::thread::scope(|s| {
-        let handles: Vec<_> = nominal
-            .windows(2)
-            .map(|w| s.spawn(move || data[w[0]..w[1]].iter().filter(|&&b| b == b'"').count()))
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("quote counter panicked")).collect()
-    });
-
     let mut bounds = vec![body];
-    let mut parity = 0usize;
     for k in 1..parts {
-        parity += quotes[k - 1];
-        let prev = *bounds.last().unwrap();
-        // The parity is for `nominal[k]`. If the previous boundary already
-        // lies past it, resume there instead: a record boundary is always
-        // outside quotes.
-        let (mut i, mut inside) = if nominal[k] >= prev {
-            (nominal[k], parity % 2 == 1)
-        } else {
-            (prev, false)
-        };
-        while i < data.len() {
-            match data[i] {
-                b'"' => inside = !inside,
-                b'\n' if !inside => break,
-                _ => {}
-            }
+        let mut i = (body + (data.len() - body) * k / parts).max(*bounds.last().unwrap());
+        while i + 1 < data.len() && !(data[i] == b'\n' && (data[i + 1].is_ascii_digit() || data[i + 1] == 0xEF)) {
             i += 1;
         }
         bounds.push((i + 1).min(data.len()));

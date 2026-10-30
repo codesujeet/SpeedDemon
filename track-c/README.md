@@ -6,12 +6,12 @@ The task, the input files and the exact output format are in the [spec](https://
 
 `regions.csv` becomes a dense array from `region_id` to country group;
 any id outside it is unmatched. `records.csv` is mapped read-only and cut
-into chunks that parse in parallel. Chunk cuts must not land inside a
-quoted field, and they can be found without parsing: every quote is either
-a delimiter or half of an escaped `""`, so the parity of quotes before an
-offset says whether it is inside quotes. Workers count quotes per chunk, a
-prefix sum gives each chunk's starting state, and each boundary is snapped
-to the first line feed outside quotes.
+into chunks that parse in parallel. A chunk cut must not land inside a
+quoted field. The spec makes names letters and notes lowercase words, so a
+line feed inside a quoted field is followed by a letter or a quote, while one
+that ends a record is followed by the next id's digits or a BOM; the first
+such line feed after each nominal cut is a record boundary, found by looking
+at a few dozen bytes.
 
 Each worker parses records straight from the input bytes (BOM only at the
 start of the file or after a terminator, CRLF or LF outside quotes, `""` as
