@@ -58,6 +58,20 @@ records, 3 MB of per-morsel endpoint tables, and the output file's page cache.
 * **Morsel size** (1 MiB, 2 MiB, 4 MiB with the step 9 parser): median 131,
   125 and 137 ms, peak 53, 45 and 44 MB. 2 MiB stays.
 
+## Where the unit tests live
+
+The unit tests are in `tests/track_a.rs` at the repository root, included
+with `#[cfg(test)] #[path = "../../tests/track_a.rs"] mod tests;`, so the
+release build (which only sees this folder) never compiles them and the
+source-size count of this folder does not include them. `cargo test` in this
+folder still runs them. By the harness's own count this changed the source
+lines from 607 to 434.
+
+* **`madvise(MADV_DONTNEED)` on every morsel after it is parsed**, to drop
+  the mapped input from the process: peak 46 vs 45 MB, no effect. The
+  pre-warmed `/data` pages are not charged to the run in the first place (the
+  run scans a 239 MB mapped file and reports about 44 MiB).
+
 ## Caveats
 
 * Steps 6-9 have not run on the scoring box. Expect the board's T to differ.

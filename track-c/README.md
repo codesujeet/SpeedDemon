@@ -30,7 +30,8 @@ count is exact whatever the hashes do. Output is sorted by country bytes
 with `_UNMATCHED` last; money is printed from integer cents.
 
 Tests (spec worked example, many thread counts, cents formatting, quoted
-fields that start or end with a quote) are in `src/main.rs`.
+fields that start or end with a quote) are in `tests/track_c.rs` at the repository root, compiled into the
+test build only (`cargo test` in this folder runs them).
 
 ## Dependencies
 

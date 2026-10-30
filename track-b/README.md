@@ -35,7 +35,8 @@ in parallel blocks and written in input order.
 
 Tests (spec worked example, parallel equals single thread, term table vs
 `HashMap`, set operations vs naive versions, repeated-term phrases,
-tokenizer cases) are in `src/main.rs`.
+tokenizer cases) are in `tests/track_b.rs` at the repository root, compiled into the
+test build only (`cargo test` in this folder runs them).
 
 ## Dependencies
 

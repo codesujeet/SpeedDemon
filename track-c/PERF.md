@@ -69,6 +69,15 @@ costs one comparison instead of a wrong answer.
 * **A fingerprint-only distinct count** (not exact): 266 -> 177 ms, only as
   an upper bound for step 4; not kept because it is not exact.
 
+## Where the unit tests live
+
+The unit tests are in `tests/track_c.rs` at the repository root, included
+with `#[cfg(test)] #[path = "../../tests/track_c.rs"] mod tests;`, so the
+release build (which only sees this folder) never compiles them and the
+source-size count of this folder does not include them. `cargo test` in this
+folder still runs them. By the harness's own count this changed the source
+lines from 531 to 474.
+
 ## Caveats
 
 * Step 5 has not run on the scoring box. Expect the board's T to differ.

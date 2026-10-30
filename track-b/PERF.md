@@ -74,6 +74,15 @@ first and writing in place removes the middle one, which takes the peak from
 349 to 273 MB, and removes the join (about 34 ms of copying). The source is
 28 lines shorter (886 against 914, the harness's count).
 
+## Where the unit tests live
+
+The unit tests are in `tests/track_b.rs` at the repository root, included
+with `#[cfg(test)] #[path = "../../tests/track_b.rs"] mod tests;`, so the
+release build (which only sees this folder) never compiles them and the
+source-size count of this folder does not include them. `cargo test` in this
+folder still runs them. By the harness's own count this changed the source
+lines from 886 to 659.
+
 ## Caveats
 
 * Step 5 has not run on the scoring box. Expect the board's T to differ.

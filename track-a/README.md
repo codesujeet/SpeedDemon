@@ -29,7 +29,8 @@ in order as soon as they and all earlier hours are done, so the output is
 never held in memory in full.
 
 Tests (spec worked example, empty input, rank edge cases, morsel boundaries,
-single vs multi thread) are in `src/main.rs`.
+single vs multi thread) are in `tests/track_a.rs` at the repository root, compiled into the
+test build only (`cargo test` in this folder runs them).
 
 ## Assumptions
 
