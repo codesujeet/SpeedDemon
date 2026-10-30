@@ -38,7 +38,8 @@ Answers are written in input order.
 Tests (spec worked example at 1, 4 and 12 threads, a randomized comparison
 against a plain Dijkstra over every pair on small graphs with zero weights,
 huge weights, parallel edges, self-loops and unreachable pairs, heap
-behaviour) are in `src/main.rs`.
+behaviour) are in `tests/track_d.rs` at the repository root, compiled into the
+test build only (`cargo test` in this folder runs them).
 
 ## Dependencies
 

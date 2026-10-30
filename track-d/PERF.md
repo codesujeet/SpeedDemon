@@ -27,6 +27,7 @@ including the failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 | 7 | Relaxations at or above the best meeting distance are skipped | pending | query phase about 436 -> 420, inside the noise | 377 | pending |
 | 8 | Each parse part files its edges under the worker that owns their node range before the CSR is counted and placed, so a worker scans 1/12 of the edges per pass instead of all of them | `run-890f67017a83` (commit `db4cc76`, steps 1-8 together) | original CSR phase 81 -> 56 ms; total 837 -> 780 ms (9 interleaved rounds) | 380 | 48.85 (board) |
 | 9 | Each worker's distance labels are `[u32; 2]` instead of `[u64; 2]` (distance + 1; a distance that does not fit is marked `u32::MAX` and kept exactly in a small per-query table), halving the 12 per-worker arrays | pending | 1.04 -> 0.89 (9 interleaved rounds) | 384 -> 261 | pending |
+| 10 | The parse threads file every edge straight into per-owner buckets for the forward and the reverse graph, so the flat edge list and the separate bucketing copy never exist; the buckets are dropped as soon as each CSR is built. The query phase uses one worker per physical core (6) instead of 12 | pending | about equal (1017 vs 1075 ms median over 11 interleaved rounds) | 261 -> 192 | pending |
 
 Step 9 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.867 s and 262 MB, against 0.964 s and
@@ -68,6 +69,21 @@ throughput-bound, not long-pole-bound.
 * **Dropping the sweep-clear** so that unreached label pages stay
   unmapped: peak memory unchanged (261 MB, the searches touch those pages
   anyway) and slightly slower (942 vs 901 ms median over 9 rounds).
+
+## Where the unit tests live
+
+The unit tests are in `tests/track_d.rs` at the repository root, included
+with `#[cfg(test)] #[path = "../../tests/track_d.rs"] mod tests;`, so the
+release build (which only sees this folder) never compiles them and the
+source-size count of this folder does not include them. `cargo test` in this
+folder still runs them. By the harness's own count this changed the source
+lines from 758 to 582.
+
+* **Query worker count** (12, 8, 6, 4, 3 workers, interleaved): 989, 948,
+  963 (816 in a later run), 832 and 928 ms; the peak was 262 MB for all of
+  12, 8 and 6 workers before step 10, because the peak was in the graph
+  build (edge list, buckets, original CSRs), not the queries. After step 10,
+  6 workers is the best balance; 4 workers saves 12 MB for about 2% time.
 
 ## Caveats
 

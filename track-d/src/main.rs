@@ -48,9 +48,20 @@ const HEAP_ARITY: usize = 4;
 
 type Edge = (u32, u32, u32);
 
-/// Parses every `u v w` triple in `data` (a run of whole lines).
-fn parse_edges(data: &[u8], capacity: usize) -> Vec<Edge> {
-    let mut edges = Vec::with_capacity(capacity);
+/// Edges filed under the worker that will own their node: `[part][worker]`.
+type Buckets = Vec<Vec<Vec<Edge>>>;
+
+/// Parses every `u v w` triple in `data` (a run of whole lines) and files
+/// each edge twice, by its tail for the forward graph and by its head for
+/// the reverse graph, under the worker that owns that node's range (node `x`
+/// belongs to worker `x * workers / n`).
+fn parse_edges(data: &[u8], n: usize, workers: usize, capacity: usize) -> [Vec<Vec<Edge>>; 2] {
+    let per_worker = capacity / workers * 9 / 8 + 16;
+    let mut filed: [Vec<Vec<Edge>>; 2] = [(); 2].map(|_| (0..workers).map(|_| Vec::with_capacity(per_worker)).collect());
+    let mut file = |e: Edge| {
+        filed[0][e.0 as usize * workers / n].push(e);
+        filed[1][e.1 as usize * workers / n].push(e);
+    };
     let mut triple: [u32; 3] = [0, 0, 0];
     let mut triple_idx = 0usize;
     let mut cur: u32 = 0;
@@ -65,20 +76,21 @@ fn parse_edges(data: &[u8], capacity: usize) -> Vec<Edge> {
             cur = 0;
             in_num = false;
             if triple_idx == 3 {
-                edges.push((triple[0], triple[1], triple[2]));
+                file((triple[0], triple[1], triple[2]));
                 triple_idx = 0;
             }
         }
     }
     if in_num && triple_idx == 2 {
-        edges.push((triple[0], triple[1], cur));
+        file((triple[0], triple[1], cur));
     }
-    edges
+    filed
 }
 
 /// Reads the "n m" header, then parses the edge lines in `threads`
-/// line-aligned slices at once; the result keeps one `Vec` per slice.
-fn parse_graph(data: &[u8], threads: usize) -> (u32, Vec<Vec<Edge>>) {
+/// line-aligned slices at once. Returns the node count and the forward and
+/// reverse buckets, one set per slice.
+fn parse_graph(data: &[u8], threads: usize) -> (u32, [Buckets; 2]) {
     let mut nums = [0usize; 2];
     let mut idx = 0;
     let mut i = 0;
@@ -104,18 +116,20 @@ fn parse_graph(data: &[u8], threads: usize) -> (u32, Vec<Vec<Edge>>) {
         cuts.push(p);
     }
     cuts.push(body.len());
+    let (n, workers) = (nums[0], threads.clamp(1, nums[0].max(1)));
     let capacity = nums[1] / threads * 9 / 8 + 16;
-    let parts = std::thread::scope(|s| {
+    let parts: Vec<[Vec<Vec<Edge>>; 2]> = std::thread::scope(|s| {
         let handles: Vec<_> = cuts
             .windows(2)
             .map(|w| {
                 let slice = &body[w[0]..w[1]];
-                s.spawn(move || parse_edges(slice, capacity))
+                s.spawn(move || parse_edges(slice, n, workers, capacity))
             })
             .collect();
         handles.into_iter().map(|h| h.join().expect("parse worker panicked")).collect()
     });
-    (nums[0] as u32, parts)
+    let (forward, reverse) = parts.into_iter().map(|[f, r]| (f, r)).unzip();
+    (n as u32, [forward, reverse])
 }
 
 struct Csr {
@@ -124,36 +138,18 @@ struct Csr {
     adj: Vec<(u32, u32)>,
 }
 
-/// Builds the adjacency of every node, keyed by tail (or by head when
-/// `reverse`). Each worker owns a contiguous range of nodes: it scans all
-/// the edges once to count its nodes' degrees, then once more to place
-/// them into its own disjoint slice of `col`/`weight`, so there is no
-/// sharing and no atomics. Edges keep their input order within a node.
-fn build_csr(node_count: u32, parts: &[Vec<Edge>], reverse: bool, threads: usize) -> Csr {
+/// Builds the adjacency of every node from edges already filed by owner
+/// (see `parse_edges`), keyed by tail (or by head when `reverse`). Each
+/// worker owns a contiguous range of nodes: it counts its nodes' degrees from
+/// its own buckets, then places its edges into its own disjoint slice, so
+/// there is no sharing and no atomics. Edges keep their input order within
+/// a node.
+fn build_csr(node_count: u32, buckets: &Buckets, reverse: bool) -> Csr {
     let n = node_count as usize;
-    let total: usize = parts.iter().map(Vec::len).sum();
-    let workers = threads.clamp(1, n.max(1));
+    let total: usize = buckets.iter().flatten().map(Vec::len).sum();
+    let workers = buckets.first().map_or(1, Vec::len);
     let bounds: Vec<usize> = (0..=workers).map(|w| (n * w).div_ceil(workers)).collect();
     let split = move |&(u, v, w): &Edge| if reverse { (v as usize, u, w) } else { (u as usize, v, w) };
-
-    // Every part files its edges under the worker that owns their key, so
-    // a worker scans its own 1/workers of the edges instead of all of them.
-    let buckets: Vec<Vec<Vec<Edge>>> = std::thread::scope(|s| {
-        let handles: Vec<_> = parts
-            .iter()
-            .map(|part| {
-                s.spawn(move || {
-                    let mut mine = vec![Vec::new(); workers];
-                    for e in part {
-                        mine[split(e).0 * workers / n].push(*e);
-                    }
-                    mine
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("csr worker panicked")).collect()
-    });
-    let buckets = &buckets;
 
     let counts: Vec<Vec<u32>> = std::thread::scope(|s| {
         let handles: Vec<_> = bounds
@@ -546,18 +542,18 @@ fn run(graph_path: &str, queries_path: &str, output_path: &str, threads: usize) 
     }
 
     let graph_data = phase!("map graph", map_file(graph_path)?);
-    let (node_count, edges) = phase!("parse graph", parse_graph(graph_data, threads));
-    let original = phase!("build CSR original", build_csr(node_count, &edges, false, threads));
+    let (node_count, [forward, reverse]) = phase!("parse graph", parse_graph(graph_data, threads));
+    let original = phase!("build CSR original", build_csr(node_count, &forward, false));
+    drop(forward);
     // The BFS is serial; the other cores build the reverse adjacency meanwhile.
     let (rev_original, (new_id, order)) = phase!("bfs reorder + CSR rev", {
         std::thread::scope(|s| {
-            let rev = s.spawn(|| build_csr(node_count, &edges, true, threads.saturating_sub(1).max(1)));
+            let rev = s.spawn(|| build_csr(node_count, &reverse, true));
             let ids = bfs_order(&original);
             (rev.join().expect("csr worker panicked"), ids)
         })
     });
-    // Both CSRs now hold every edge; freeing the list keeps it out of the peak.
-    drop(edges);
+    drop(reverse);
     let fwd = phase!("permute fwd", permute_csr(&original, &order, &new_id, threads));
     drop(original);
     let rev = phase!("permute rev", permute_csr(&rev_original, &order, &new_id, threads));
@@ -573,7 +569,10 @@ fn run(graph_path: &str, queries_path: &str, output_path: &str, threads: usize) 
     );
 
     let query_start = std::time::Instant::now();
-    let answers = answer_queries(&fwd, &rev, &queries, node_count as usize, threads);
+    // One worker per physical core: the two hardware threads of a core share its
+    // caches, and the 14 MB of labels each worker keeps is the largest memory
+    // cost of this phase. Measured no slower than 12 workers.
+    let answers = answer_queries(&fwd, &rev, &queries, node_count as usize, threads.div_ceil(2));
     let mut out: Vec<u8> = Vec::with_capacity(queries.len() * 12);
     for answer in answers {
         match answer {
@@ -614,176 +613,5 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The bidirectional search against a plain O(n^2) Dijkstra on random
-    /// graphs with every awkward feature the spec lists: weight 0, weights
-    /// up to 2^32 - 1 (so sums pass 2^32), parallel edges, duplicate
-    /// lines, self-loops, edgeless nodes, one-way edges and unreachable
-    /// pairs. Checks all (s, t) pairs, with one reused `Scratch` so stale
-    /// epoch state would show up too. This is what guards the choice of
-    /// which side to expand: correctness must not depend on it.
-    #[test]
-    fn bidirectional_matches_plain_dijkstra_on_random_graphs() {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move |bound: u64| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state % bound
-        };
-        for _ in 0..300 {
-            let n = 2 + next(24) as u32;
-            let m = next(4 * n as u64 + 1) as usize;
-            let mut edges: Vec<(u32, u32, u32)> = (0..m)
-                .map(|_| {
-                    let w = match next(5) {
-                        0 => 0,
-                        1 => u32::MAX - next(3) as u32,
-                        _ => 1 + next(20) as u32,
-                    };
-                    (next(n as u64) as u32, next(n as u64) as u32, w)
-                })
-                .collect();
-            if let Some(&e) = edges.first() {
-                edges.push(e); // a duplicate line
-            }
-
-            let mut dist = vec![vec![u64::MAX; n as usize]; n as usize];
-            for (s, d) in dist.iter_mut().enumerate() {
-                d[s] = 0;
-                let mut done = vec![false; n as usize];
-                for _ in 0..n {
-                    let Some(u) = (0..n as usize).filter(|&u| !done[u] && d[u] != u64::MAX).min_by_key(|&u| d[u]) else {
-                        break;
-                    };
-                    done[u] = true;
-                    for &(a, b, w) in &edges {
-                        if a as usize == u && d[u] + (w as u64) < d[b as usize] {
-                            d[b as usize] = d[u] + w as u64;
-                        }
-                    }
-                }
-            }
-
-            let fwd = build_csr(n, &[edges.clone()], false, 3);
-            let rev = build_csr(n, &[edges.clone()], true, 3);
-            let mut scratch = Scratch::new(n as usize);
-            for s in 0..n {
-                for t in 0..n {
-                    let want = (dist[s as usize][t as usize] != u64::MAX).then_some(dist[s as usize][t as usize]);
-                    assert_eq!(bidirectional_dijkstra(&fwd, &rev, s, t, &mut scratch), want, "s={s} t={t} edges={edges:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn dheap_pops_in_ascending_dist_order() {
-        // A pseudo-random-ish sequence, including duplicate dists and
-        // out-of-order pushes/pops interleaved, to exercise both
-        // sift-up (push) and sift-down (pop) across more than one
-        // level of the 4-ary tree (need > 4 elements for a second
-        // level to exist at all).
-        let dists = [50u64, 3, 3, 0, 100, 7, 42, 1, 1, 99, 8, 2, 0, 63, 17];
-        let mut heap = DHeap::new();
-        for (i, &d) in dists.iter().enumerate() {
-            heap.push(State { dist: d, node: i as u32 });
-        }
-        let mut sorted = dists.to_vec();
-        sorted.sort_unstable();
-        let mut popped = Vec::new();
-        while let Some(s) = heap.pop() {
-            popped.push(s.dist);
-        }
-        assert_eq!(popped, sorted);
-    }
-
-    #[test]
-    fn dheap_interleaved_push_pop_stays_a_valid_min_heap() {
-        let mut heap = DHeap::new();
-        for d in [10u64, 5, 20, 1] {
-            heap.push(State { dist: d, node: 0 });
-        }
-        assert_eq!(heap.pop().map(|s| s.dist), Some(1));
-        heap.push(State { dist: 2, node: 0 });
-        assert_eq!(heap.pop().map(|s| s.dist), Some(2));
-        assert_eq!(heap.pop().map(|s| s.dist), Some(5));
-        heap.push(State { dist: 0, node: 0 });
-        assert_eq!(heap.pop().map(|s| s.dist), Some(0));
-        assert_eq!(heap.pop().map(|s| s.dist), Some(10));
-        assert_eq!(heap.pop().map(|s| s.dist), Some(20));
-        assert_eq!(heap.pop(), None);
-    }
-
-    #[test]
-    fn parses_header_and_edges() {
-        let data = b"4 3\n0 1 10\n1 2 20\n2 3 5\n";
-        let (n, parts) = parse_graph(data, 1);
-        assert_eq!(n, 4);
-        assert_eq!(parts.concat(), vec![(0, 1, 10), (1, 2, 20), (2, 3, 5)]);
-        let (_, split) = parse_graph(data, 3);
-        assert_eq!(split.concat(), parts.concat());
-    }
-
-    #[test]
-    fn shortest_path_matches_known_graph() {
-        let data = b"4 4\n0 1 10\n1 2 20\n2 3 5\n0 3 100\n";
-        let (n, parts) = parse_graph(data, 2);
-        let edges = parts.concat();
-        let fwd = build_csr(n, &[edges.clone()], false, 3);
-        let rev = build_csr(n, &[edges.clone()], true, 3);
-        let mut scratch = Scratch::new(n as usize);
-        assert_eq!(bidirectional_dijkstra(&fwd, &rev, 0, 3, &mut scratch), Some(35));
-        assert_eq!(bidirectional_dijkstra(&fwd, &rev, 0, 0, &mut scratch), Some(0));
-        assert_eq!(bidirectional_dijkstra(&fwd, &rev, 3, 0, &mut scratch), None);
-        // Scratch's dist/epoch arrays are never reset between calls (the
-        // epoch counter makes stale entries from a previous query
-        // invisible instead) â€” run several queries in a row, including
-        // repeats and ones with overlapping node sets, and confirm no
-        // cross-query contamination leaks into the answer.
-        assert_eq!(bidirectional_dijkstra(&fwd, &rev, 0, 3, &mut scratch), Some(35));
-        assert_eq!(bidirectional_dijkstra(&fwd, &rev, 1, 2, &mut scratch), Some(20));
-        assert_eq!(bidirectional_dijkstra(&fwd, &rev, 0, 3, &mut scratch), Some(35));
-        assert_eq!(bidirectional_dijkstra(&fwd, &rev, 2, 1, &mut scratch), None);
-    }
-
-    #[test]
-    fn parses_query_pairs() {
-        let data = b"0 3\n1740511 999\n5 5\n";
-        let queries = parse_queries(data);
-        assert_eq!(queries, vec![(0, 3), (1_740_511, 999), (5, 5)]);
-    }
-
-    /// specs/d-traverse.md section 4's worked example, byte for byte: a
-    /// duplicate edge line, parallel edges with the lighter listed second,
-    /// a weight-0 path, a self-loop, a node on no edge line, sums above
-    /// 2^32 - 1, and unreachable pairs both ways.
-    #[test]
-    fn matches_the_spec_worked_example_exactly() {
-        let graph = b"8 12\n0 1 4\n1 2 3\n0 2 9\n2 0 5\n2 1 6\n1 3 0\n3 4 0\n4 4 7\n\
-4 5 4294967295\n2 1 2\n5 6 4294967295\n0 1 4\n";
-        let queries = b"0 2\n2 1\n1 4\n4 4\n7 7\n0 6\n4 5\n6 0\n0 7\n1 0\n2 1\n";
-        let expected = "7\n2\n0\n0\n0\n8589934594\n4294967295\n-1\n-1\n8\n2\n";
-
-        let dir = std::env::temp_dir().join(format!("track-d-spec-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let graph_path = dir.join("graph.txt");
-        let queries_path = dir.join("queries.txt");
-        let out_path = dir.join("distances.txt");
-        std::fs::write(&graph_path, graph).unwrap();
-        std::fs::write(&queries_path, queries).unwrap();
-
-        for threads in [1, 4, 12] {
-            run(graph_path.to_str().unwrap(), queries_path.to_str().unwrap(), out_path.to_str().unwrap(), threads).unwrap();
-            assert_eq!(std::fs::read_to_string(&out_path).unwrap(), expected, "threads={threads}");
-        }
-
-        let output = std::fs::read_to_string(&out_path).unwrap();
-        assert_eq!(output, expected);
-        assert_eq!(output.len(), 42); // the spec states "exactly these 42 bytes"
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+#[path = "../../tests/track_d.rs"]
+mod tests;
