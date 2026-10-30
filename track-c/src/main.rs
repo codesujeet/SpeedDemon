@@ -7,10 +7,12 @@
 //! - Region -> country is a dense array indexed by `region_id`, so the
 //!   join is one bounds-checked array read per record.
 //! - Amounts are integer cents end to end; nothing touches a float.
-//! - `names_distinct` is exact, by byte comparison. Each country belongs
-//!   to one worker; the parse only notes where each record's name is, in
-//!   that worker's bucket, and the owner then counts distinct names per
-//!   country with a set of name slices. No ids, no global table.
+//! - `names_distinct` is exact. A record leaves one `u64` in its country's
+//!   list: the top half of its name's hash and the offset of the name's
+//!   field. Sorting a country's list puts equal names together; only
+//!   entries with equal hashes are compared, byte for byte, by reading the
+//!   field again, so the count is exact and nothing but 8 bytes per record
+//!   is kept.
 //! - The file is parsed in parallel. Every `"` in a well-formed file is
 //!   either a field delimiter or half of a `""` escape, so the parity of
 //!   the quotes before an offset says exactly whether that offset is
@@ -171,24 +173,12 @@ impl Default for Agg {
     }
 }
 
-/// Where one record's unescaped name is: `len` bytes at `at` in the
-/// input, or in the parsing worker's `unescaped` buffer when the raw
-/// name contained `""` escapes.
-#[derive(Clone, Copy)]
-struct NameRef {
-    group: u16,
-    in_unescaped: bool,
-    at: u32,
-    len: u32,
-}
-
 /// One parse worker's result: per-group aggregates (all but
-/// `names_distinct`), its records' names bucketed by the worker that owns
-/// each name's group, and the unescaped copies of names that had `""`.
+/// `names_distinct`) and, per group, one `u64` per record: the top 32 bits
+/// of the hash of the record's name, then the offset of its field.
 struct Partial {
     groups: Vec<Agg>,
-    names: Vec<Vec<NameRef>>,
-    unescaped: Vec<u8>,
+    names: Vec<Vec<u64>>,
 }
 
 // --- Record parsing (spec section 2.1) ----------------------------------
@@ -232,13 +222,13 @@ fn digits_until_comma(data: &[u8], mut i: usize) -> (u64, usize) {
 /// into `part`.
 fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, part: &mut Partial) {
     let unmatched = regions.countries.len();
-    let owners = part.names.len();
     let mut i = start;
     while i < end {
         if data[i..].starts_with(BOM) {
             i += 3;
         }
         let (id, next) = digits_until_comma(data, i);
+        let name_at = next;
         let (ns, ne, npairs, next) = text_field(data, next);
         let (ts, te, tpairs, next) = text_field(data, next);
         let (region, next) = digits_until_comma(data, next);
@@ -279,18 +269,9 @@ fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, part:
         agg.name_bytes += (ne - ns - npairs) as u64;
         agg.note_bytes += (te - ts - tpairs) as u64;
 
-        let name = if npairs == 0 {
-            NameRef { group: g as u16, in_unescaped: false, at: ns as u32, len: (ne - ns) as u32 }
-        } else {
-            let at = part.unescaped.len();
-            let mut k = ns;
-            while k < ne {
-                part.unescaped.push(data[k]);
-                k += if data[k] == b'"' { 2 } else { 1 };
-            }
-            NameRef { group: g as u16, in_unescaped: true, at: at as u32, len: (part.unescaped.len() - at) as u32 }
-        };
-        part.names[g % owners].push(name);
+        // Escaping is one to one, so equal names have equal raw bytes.
+        let hash = FxBuildHasher::default().hash_one(&data[ns..ne]);
+        part.names[g].push(hash & !0xFFFF_FFFF | name_at as u64);
     }
 }
 
@@ -340,6 +321,7 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
     if body >= data.len() {
         return vec![Agg::default(); n_groups];
     }
+    assert!(data.len() <= u32::MAX as usize, "offsets are kept in 32 bits");
     let threads = threads.max(1);
     let bounds = chunk_bounds(data, body, threads);
     let partials: Vec<Partial> = std::thread::scope(|s| {
@@ -348,11 +330,7 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
             .map(|w| {
                 let (a, b) = (w[0], w[1]);
                 s.spawn(move || {
-                    let mut part = Partial {
-                        groups: vec![Agg::default(); n_groups],
-                        names: vec![Vec::new(); threads],
-                        unescaped: Vec::new(),
-                    };
+                    let mut part = Partial { groups: vec![Agg::default(); n_groups], names: vec![Vec::new(); n_groups] };
                     parse_records(data, a, b, regions, &mut part);
                     part
                 })
@@ -361,38 +339,40 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
         handles.into_iter().map(|h| h.join().expect("parse worker panicked")).collect()
     });
 
-    // Distinct names: owner `w` handles the groups with `g % threads == w`,
-    // reading its bucket from every parse worker. A group's names are kept
-    // as (hash, name) pairs and sorted by hash, which stays inside the cache
-    // for a group's few thousand names where one big hash set would not;
-    // only names with equal hashes are compared byte for byte, so the count
-    // is exact.
+    // Distinct names: worker `w` takes the groups with `g % threads == w`,
+    // gathers that group's entries from every parse worker and sorts them.
+    // Only entries with equal hashes can be equal names; those runs are
+    // compared byte for byte.
     let distinct: Vec<(usize, u64)> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|w| {
                 let partials = &partials;
                 s.spawn(move || {
-                    let mut by_group: Vec<Vec<(u64, &[u8])>> = vec![Vec::new(); n_groups.div_ceil(threads)];
-                    for p in partials {
-                        for r in &p.names[w] {
-                            let src: &[u8] = if r.in_unescaped { &p.unescaped } else { data };
-                            let name = &src[r.at as usize..(r.at + r.len) as usize];
-                            by_group[r.group as usize / threads].push((FxBuildHasher::default().hash_one(name), name));
-                        }
-                    }
-                    let mut counts = Vec::new();
-                    for (i, names) in by_group.iter_mut().enumerate() {
-                        names.sort_unstable_by_key(|e| e.0);
-                        let mut distinct = 0;
-                        for run in names.chunk_by(|a, b| a.0 == b.0) {
-                            let mut same: Vec<&[u8]> = run.iter().map(|e| e.1).collect();
-                            same.sort_unstable();
-                            same.dedup();
-                            distinct += same.len() as u64;
-                        }
-                        counts.push((i * threads + w, distinct));
-                    }
-                    counts
+                    (w..n_groups)
+                        .step_by(threads)
+                        .map(|g| {
+                            let mut entries: Vec<u64> = partials.iter().flat_map(|p| p.names[g].iter().copied()).collect();
+                            entries.sort_unstable();
+                            let mut distinct = 0;
+                            for run in entries.chunk_by(|a, b| a >> 32 == b >> 32) {
+                                if run.len() == 1 {
+                                    distinct += 1;
+                                    continue;
+                                }
+                                let mut same: Vec<&[u8]> = run
+                                    .iter()
+                                    .map(|&e| {
+                                        let (from, to, ..) = text_field(data, (e & 0xFFFF_FFFF) as usize);
+                                        &data[from..to]
+                                    })
+                                    .collect();
+                                same.sort_unstable();
+                                same.dedup();
+                                distinct += same.len() as u64;
+                            }
+                            (g, distinct)
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect();
@@ -415,9 +395,7 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
         }
     }
     for (g, n) in distinct {
-        if g < n_groups {
-            out[g].names_distinct = n;
-        }
+        out[g].names_distinct = n;
     }
     out
 }

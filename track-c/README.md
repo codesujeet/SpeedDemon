@@ -18,14 +18,16 @@ start of the file or after a terminator, CRLF or LF outside quotes, `""` as
 one quote), updates its per-country count, id sum, integer-cent amount sum,
 min and max, and the name and note byte lengths after unescaping.
 
-The exact distinct-name count uses ownership and sorting. Each country
-belongs to one worker, and the parse workers hand `(country, name slice)`
-to the owner. The owner collects a country's names as `(hash, name)` pairs
-and sorts them by hash: a country has only a few thousand names, so the
-array stays in cache, where one large hash set over millions of entries did
-not. Names with equal hashes are then compared byte for byte, so the count
-is exact. Output is sorted by country bytes with `_UNMATCHED` last; money
-is printed from integer cents.
+The exact distinct-name count keeps eight bytes per record. While the name
+is still in cache, the worker hashes its raw bytes and appends one `u64` to
+its country's list: the top 32 bits of the hash and the offset of the name
+field in the input. (Escaping is one to one, so equal names have equal raw
+bytes, and nothing needs to be unescaped.) Afterwards each country is taken
+by one worker, which gathers that country's lists from every parse worker
+and sorts them. Only entries with equal hashes can be equal names, so only
+those runs are compared, byte for byte, by reading the fields again; the
+count is exact whatever the hashes do. Output is sorted by country bytes
+with `_UNMATCHED` last; money is printed from integer cents.
 
 Tests (spec worked example, many thread counts, cents formatting, quoted
 fields that start or end with a quote) are in `src/main.rs`.
@@ -36,10 +38,10 @@ None.
 
 ## With another 24 hours
 
-The stage profile is: quote-parity bounds about 14 ms, parallel parse about
-70-90 ms, distinct names about 80 ms. The parse is near its floor (removing
-the name hand-off saves about 13 ms, removing the region lookup about
-17 ms). Hashing each name during the parse, while its bytes are still in
-cache, would avoid cold reads in the distinct pass, but it adds about 40 MB
-of memory, which roughly cancels the gain; I would try a smaller entry
-layout first.
+The memory that is left is the eight bytes per record (about 26 MB) plus the
+growth slack of the per-country lists; sizing them from a first pass over the
+chunk, or writing each chunk's entries to one flat array, would trim that.
+The parse itself is near its floor (removing the region lookup saves about
+17 ms of roughly 90). A shared dictionary of names, so a record would keep
+only a number, was tried and was slower because every record locks a shared
+table (see `PERF.md`).
