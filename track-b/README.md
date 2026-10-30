@@ -18,10 +18,13 @@ preserved for phrases.
 Each document is handled in three tight loops: tokenize into keys, probe
 the term table for all of them, then update the per-term counters. The
 probes are independent of each other, so keeping them together lets the CPU
-overlap their cache misses. Postings lists for the query terms are built in
-two passes per chunk (count into small dense arrays, then fill one flat
-array) and joined in parallel into one CSR layout, one sorted document list
-per term.
+overlap their cache misses. A chunk only counts, per term, the documents that
+contain it. When every chunk is counted, each term's list gets its final place
+in one flat array (CSR layout, one sorted document list per term), and each
+chunk's worker writes its document ids straight into their slots. The slots
+of different chunks are disjoint but interleaved, so the writes go through
+atomic cells with relaxed stores; the only `unsafe` code besides `mmap` is the
+view that turns the zeroed array into those cells.
 
 A boolean query is evaluated strictly left to right with sorted-list
 intersection (switching to binary search when one list is 32x shorter),

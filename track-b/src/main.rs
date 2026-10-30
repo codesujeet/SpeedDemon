@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -335,30 +335,27 @@ impl Corpus {
     }
 }
 
-/// A tokenized chunk plus its own postings, CSR-style over local
-/// offsets: term `t`'s docs in this chunk are `flat[offsets[t]..offsets[t + 1]]`.
+/// A tokenized chunk plus, for every term, how many of its documents
+/// contain it.
 struct ChunkOut {
     chunk: Chunk,
-    offsets: Vec<usize>,
-    flat: Vec<u32>,
+    count: Vec<u32>,
 }
 
-/// Tokenizes one chunk, then builds its postings in two passes instead
-/// of pushing onto one growable `Vec` per term. Pushing meant every
-/// occurrence of a query term touched that term's `Vec` header and the
-/// tail of its heap buffer - two dependent cache misses per token across
-/// ~100k separately growing vectors. Here pass A only bumps a per-term
-/// count in two small dense arrays (`last`, `count`), which stay in
-/// cache; pass B prefix-sums the counts into offsets and re-reads this
-/// chunk's token-id array (sequential) to write each doc id into one
-/// flat array.
+/// Tokenizes one chunk and counts, per term, the documents that contain it.
+/// Counting only bumps two small dense arrays (`last`, `count`), which stay
+/// in cache; pushing each occurrence onto a growable `Vec` per term would
+/// touch the `Vec` header and the tail of its heap buffer, two dependent
+/// cache misses per token across ~100k separately growing vectors. The
+/// postings themselves are written later, once every chunk's counts give
+/// each term list its final place.
 ///
 /// Each line carries its id (`id<TAB>text`) and ids are dense and
 /// ascending (spec 2.1), so only the chunk's first id is parsed.
 fn tokenize_chunk(text: &[u8], table: &TermTable, n_terms: usize) -> ChunkOut {
     let mut chunk = Chunk { first_doc: 0, doc_start: vec![0], ids: Vec::with_capacity(text.len() / 6) };
     let mut last = vec![NONE; n_terms];
-    let mut count = vec![0usize; n_terms];
+    let mut count = vec![0u32; n_terms];
     let mut doc: Option<u32> = None;
     let mut keys: Vec<(u64, u64, usize)> = Vec::new();
     let mut longs: Vec<[u8; MAX_TERM]> = Vec::new();
@@ -402,35 +399,17 @@ fn tokenize_chunk(text: &[u8], table: &TermTable, n_terms: usize) -> ChunkOut {
         chunk.doc_start.push(chunk.ids.len() as u32);
     }
 
-    let mut offsets = Vec::with_capacity(n_terms + 1);
-    let mut total = 0;
-    offsets.push(0);
-    for &c in &count {
-        total += c;
-        offsets.push(total);
-    }
-    let mut cursor = offsets[..n_terms].to_vec();
-    let mut flat = vec![0u32; total];
-    last.fill(NONE);
-    for (i, w) in chunk.doc_start.windows(2).enumerate() {
-        let d = chunk.first_doc + i as u32;
-        for &id in &chunk.ids[w[0] as usize..w[1] as usize] {
-            if id != NONE && last[id as usize] != d {
-                last[id as usize] = d;
-                flat[cursor[id as usize]] = d;
-                cursor[id as usize] += 1;
-            }
-        }
-    }
-    ChunkOut { chunk, offsets, flat }
+    ChunkOut { chunk, count }
 }
 
-/// Splits `docs` into line-aligned chunks, tokenizes them in parallel,
-/// and joins every term's per-chunk lists into one flat array. Chunks
-/// are in file order and ids ascend through the file, so joining in
-/// chunk order keeps each list sorted. The join is parallel too: the
-/// output is term-major, so a contiguous range of terms is a contiguous
-/// range of `flat`, and each worker gets its own disjoint `&mut` slice.
+/// Splits `docs` into line-aligned chunks and tokenizes them in parallel.
+/// Every term's document list is then written straight into its final place
+/// in one flat array: term `t`'s slots are `offsets[t]..offsets[t + 1]`, and
+/// within them the chunks come in file order, each chunk's share starting
+/// where the earlier chunks' shares end. Ids ascend through the file, so each
+/// list ends up sorted. The slots of different chunks are disjoint but
+/// interleaved in memory, so they are written through atomic cells (relaxed
+/// stores, the same instruction as a plain store).
 fn build_corpus(docs: &[u8], table: &TermTable, threads: usize) -> Corpus {
     let n_terms = table.terms.len();
     let threads = threads.max(1);
@@ -458,34 +437,34 @@ fn build_corpus(docs: &[u8], table: &TermTable, threads: usize) -> Corpus {
     let mut total = 0;
     offsets.push(0);
     for t in 0..n_terms {
-        total += parts.iter().map(|p| p.offsets[t + 1] - p.offsets[t]).sum::<usize>();
+        total += parts.iter().map(|p| p.count[t] as usize).sum::<usize>();
         offsets.push(total);
     }
     let mut flat = vec![0u32; total];
-
-    // Term ranges of roughly equal size, one per worker.
-    let mut ranges = vec![0usize];
-    for k in 1..threads {
-        let target = total * k / threads;
-        let t = offsets.partition_point(|&o| o < target).min(n_terms);
-        ranges.push(t.max(*ranges.last().unwrap()));
-    }
-    ranges.push(n_terms);
+    // SAFETY: `AtomicU32` has the size and alignment of `u32`, and `flat` is
+    // not touched through any other path while `cells` is in use.
+    let cells: &[AtomicU32] = unsafe { &*(flat.as_mut_slice() as *mut [u32] as *const [AtomicU32]) };
     std::thread::scope(|s| {
-        let mut rest: &mut [u32] = &mut flat;
-        for r in ranges.windows(2) {
-            let (t0, t1) = (r[0], r[1]);
-            let (mine, tail) = rest.split_at_mut(offsets[t1] - offsets[t0]);
-            rest = tail;
+        for (index, part) in parts.iter().enumerate() {
             let (parts, offsets) = (&parts, &offsets);
             s.spawn(move || {
-                let base = offsets[t0];
-                for (t, &start) in (t0..t1).zip(&offsets[t0..t1]) {
-                    let mut at = start - base;
-                    for p in parts {
-                        let seg = &p.flat[p.offsets[t]..p.offsets[t + 1]];
-                        mine[at..at + seg.len()].copy_from_slice(seg);
-                        at += seg.len();
+                // Where this chunk's share of each term's list starts.
+                let mut cursor = offsets[..n_terms].to_vec();
+                for earlier in &parts[..index] {
+                    for (at, &n) in cursor.iter_mut().zip(&earlier.count) {
+                        *at += n as usize;
+                    }
+                }
+                let chunk = &part.chunk;
+                let mut last = vec![NONE; n_terms];
+                for (i, w) in chunk.doc_start.windows(2).enumerate() {
+                    let d = chunk.first_doc + i as u32;
+                    for &id in &chunk.ids[w[0] as usize..w[1] as usize] {
+                        if id != NONE && last[id as usize] != d {
+                            last[id as usize] = d;
+                            cells[cursor[id as usize]].store(d, Ordering::Relaxed);
+                            cursor[id as usize] += 1;
+                        }
                     }
                 }
             });
