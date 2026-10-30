@@ -13,6 +13,7 @@
 //! BinaryHeap` for better `sift_down` cache locality â€” see
 //! `track-d/PERF.md`'s "round 3" for the measured ~10-12% win.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Maps `path` read-only for the life of the process. The harness
@@ -285,19 +286,21 @@ impl DHeap {
 /// or zeroed per query. `label[v]` holds node `v`'s tentative distance
 /// from the source (`[0]`) and to the target (`[1]`), each stored as
 /// distance + 1 so that 0 means "not reached": a fresh calloc'd array is
-/// valid as is, with no initialisation pass. Pages stay non-resident only
-/// until a search reaches them; one wide search (see `reset`) touches all.
-/// Both directions of a node share a cache line, which is what a
-/// relaxation reads (its own side, then the other side for `best`).
-/// `touched` lists the nodes to clear before the next query.
+/// valid as is, with no initialisation pass. Both directions of a node share
+/// a cache line, which is what a relaxation reads (its own side, then the
+/// other side for `best`). Almost every distance fits 32 bits, which halves
+/// the array that every worker keeps; the few that do not (paths through
+/// the edges of weight near 2^32) are marked `u32::MAX` and held exactly in
+/// `big`. `touched` lists the nodes to clear before the next query.
 struct Scratch {
-    label: Vec<[u64; 2]>,
+    label: Vec<[u32; 2]>,
+    big: HashMap<(u32, usize), u64>,
     touched: Vec<u32>,
     heaps: [DHeap; 2],
 }
 impl Scratch {
     fn new(n: usize) -> Self {
-        Scratch { label: vec![[0; 2]; n], touched: Vec::new(), heaps: [DHeap::new(), DHeap::new()] }
+        Scratch { label: vec![[0; 2]; n], big: HashMap::new(), touched: Vec::new(), heaps: [DHeap::new(), DHeap::new()] }
     }
 
     fn reset(&mut self) {
@@ -309,6 +312,7 @@ impl Scratch {
                 self.label[v as usize] = [0; 2];
             }
         }
+        self.big.clear();
         self.touched.clear();
         self.heaps.iter_mut().for_each(DHeap::clear);
     }
@@ -316,7 +320,11 @@ impl Scratch {
     /// Distance label of `v` on `side`, or `u64::MAX` if unreached.
     #[inline]
     fn get(&self, side: usize, v: u32) -> u64 {
-        self.label[v as usize][side].wrapping_sub(1)
+        match self.label[v as usize][side] {
+            0 => u64::MAX,
+            u32::MAX => self.big[&(v, side)],
+            label => label as u64 - 1,
+        }
     }
 
     #[inline]
@@ -325,7 +333,12 @@ impl Scratch {
         if label[0] | label[1] == 0 {
             self.touched.push(v);
         }
-        label[side] = dist + 1;
+        if dist < u32::MAX as u64 - 1 {
+            label[side] = dist as u32 + 1;
+        } else {
+            label[side] = u32::MAX;
+            self.big.insert((v, side), dist);
+        }
     }
 }
 

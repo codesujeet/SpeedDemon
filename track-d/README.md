@@ -27,9 +27,12 @@ side with the smaller 4-ary heap. The search stops when the two queue tops
 sum to at least the best meeting distance, or as soon as either queue
 empties (that side has settled everything it can reach); relaxations at or
 above the best distance are skipped. Each worker keeps one array of
-`[forward, backward]` labels per node, stored as distance + 1 so a zeroed
-array means "unreached", and clears only the nodes the last query touched.
-Distances are `u64` because sums of full-range `u32` weights pass 2^32.
+`[forward, backward]` labels per node, stored as 32-bit distance + 1 so a
+zeroed array means "unreached", and clears only the nodes the last query
+touched. Distances are `u64` because sums of full-range `u32` weights pass
+2^32; the few that do not fit a 32-bit label (paths through the edges of
+weight near 2^32) are marked in the array and kept exactly in a small
+per-query table, so the arrays that every worker keeps stay half the size.
 Answers are written in input order.
 
 Tests (spec worked example at 1, 4 and 12 threads, a randomized comparison
@@ -45,8 +48,10 @@ None.
 
 The serial BFS (about 200 ms) and the original forward CSR build before it
 are the critical path, and the query phase (about 410-475 ms) is limited by
-memory latency, evenly spread over the workers. Shrinking the per-worker
-label arrays would cut memory, which is mostly those arrays. Packing the
+memory latency, evenly spread over the workers. The 12 per-worker label
+arrays (14 MB each) and the two CSRs (94 MB) are now all of the memory; a
+sparse label table would shrink the arrays but loses the locality of the
+BFS numbering. Packing the
 heap entry into one `u64` was measured and gave 2-3%, which was not worth
 its lines (see `PERF.md`). A landmark or contraction-style preprocessing
 would make queries cheaper still, but the query mix and the 2,000-query
