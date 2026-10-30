@@ -1,2 +1,13 @@
 .out/
 data/
+
+# local only
+/target
+**/target
+Dataset/
+local-data/
+real-spec/
+scratch-*/
+.claude/
+*.log
+.DS_Store
