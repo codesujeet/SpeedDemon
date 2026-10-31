@@ -227,7 +227,7 @@ struct Filed {
     heavy: Vec<Vec<u32>>,  // part -> its heavy weights, in order
 }
 
-const CHUNK: usize = 4096;
+const CHUNK: usize = 1024;
 
 impl Filed {
     fn records(&self, p: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
