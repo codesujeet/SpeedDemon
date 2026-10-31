@@ -26,43 +26,8 @@ const MAX_ENDPOINTS: usize = 1 << 11;
 const SLOTS: usize = 1 << 13;
 /// Bytes after the end of the input that may be read (the vector loads of the last line).
 const PAD: usize = 128;
-
-/// Maps `path` read-only and returns it with at least `PAD` readable zero bytes after the end. The harness
-/// pre-warms `/data` into the page cache, so mapped pages are not charged to this run; `fs::read` would copy.
-#[cfg(unix)]
-fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
-    use std::os::fd::AsRawFd;
-    extern "C" {
-        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    }
-    let file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len() as usize;
-    if len == 0 {
-        return Ok(&[]);
-    }
-    // SAFETY: an anonymous read-only reservation of `len` + one page, then the file mapped over its start (MAP_FIXED
-    // replaces only pages of this reservation); the page after the file is zero, as is the rest of the last file page.
-    let p = unsafe {
-        let anon = mmap(std::ptr::null_mut(), len + 4096, 1, 0x22, -1, 0);
-        if anon as isize == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        mmap(anon, len, 1, 0x12, file.as_raw_fd(), 0)
-    };
-    if p as isize == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `p` points to `len` readable bytes that stay mapped for the life of the process.
-    Ok(unsafe { std::slice::from_raw_parts(p, len) })
-}
-
-#[cfg(not(unix))]
-fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
-    let mut data = std::fs::read(path)?;
-    let len = data.len();
-    data.resize(len + PAD, 0);
-    Ok(&Box::leak(data.into_boxed_slice())[..len])
-}
+/// More than the longest line (177 bytes): how far past its chunk a worker reads to finish the last line.
+const LINE: usize = 256;
 
 /// SAFETY (all raw reads below): `p` and the bytes read are inside the mapped input or its `PAD` zero bytes, which
 /// holds for every line of well-formed input (the spec guarantees it).
@@ -125,7 +90,8 @@ struct Part {
 }
 
 struct Worker {
-    d: &'static [u8],
+    /// The chunk being scanned, with `PAD` zero bytes after the bytes read.
+    d: Vec<u8>,
     /// Endpoint table: `offset of the name in store | length << 32 | number << 40`; 0 is a free slot.
     table: Vec<u64>,
     /// A copy of each name this worker has seen, one after the other (so that the names the lines are compared
@@ -138,10 +104,10 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(d: &'static [u8]) -> Self {
+    fn new(n: usize, buffer: usize) -> Self {
         // A line has at least 40 bytes and takes at most two words.
-        let arena = Vec::with_capacity(d.len() / 20 + 16);
-        Worker { d, table: vec![0; SLOTS], store: vec![0; 32], part: Part { arena, runs: Vec::new() }, key: (0, 0), pos: vec![0; 1016] }
+        let arena = Vec::with_capacity(n / 20 + 16);
+        Worker { d: vec![0; buffer], table: vec![0; SLOTS], store: vec![0; 32], part: Part { arena, runs: Vec::new() }, key: (0, 0), pos: vec![0; 1016] }
     }
 
     /// The number of the endpoint `d[es..ee]`, taken from the shared names the first time this worker sees it.
@@ -168,9 +134,13 @@ impl Worker {
     fn insert(&mut self, es: usize, ee: usize, i: usize, names: &Mutex<Names>) -> u32 {
         let mut shared = names.lock().unwrap();
         let next = shared.list.len() as u32;
-        let id = *shared.ids.entry(&self.d[es..ee]).or_insert(next);
+        let name: &'static [u8] = match shared.ids.get_key_value(&self.d[es..ee]) {
+            Some((&name, _)) => name,
+            None => Box::leak(self.d[es..ee].to_vec().into_boxed_slice()),
+        };
+        let id = *shared.ids.entry(name).or_insert(next);
         if id == next {
-            shared.list.push(&self.d[es..ee]);
+            shared.list.push(name);
         }
         assert!((id as usize) < MAX_ENDPOINTS, "more endpoints than the spec's catalogue of 1,842");
         let off = self.store.len();
@@ -377,13 +347,11 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
     out
 }
 
-/// Scans `d` with `threads` workers taking `chunk`-byte chunks, then formats every hour in parallel and writes
-/// the blocks to `sink` in hour order, each as soon as it and all earlier hours are done. `d` must be followed by
-/// `PAD` readable bytes.
-fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write) -> std::io::Result<()> {
-    let n = d.len();
-    // The first line start at or after `x` (a line start exactly at `x` goes to the chunk before): adjacent chunks agree.
-    let snap = |x: usize| if x >= n { n } else if x == 0 { 0 } else { x + d[x..].iter().position(|&b| b == b'\n').unwrap() + 1 };
+/// Reads the `n` bytes of the input in `chunk`-byte chunks with `threads` workers (`read_at(buffer, offset)` fills a
+/// buffer from the input), then formats every hour in parallel and writes the blocks to `sink` in hour order, each as
+/// soon as it and all earlier hours are done. Each worker reads into its own buffer, which also holds the start of
+/// the next chunk so that its last line is whole.
+fn process(n: usize, read_at: &(impl Fn(&mut [u8], usize) + Sync), threads: usize, chunk: usize, sink: &mut impl Write) -> std::io::Result<()> {
     let (cursor, next, barrier) = (AtomicUsize::new(0), AtomicUsize::new(0), Barrier::new(threads));
     let names = Mutex::new(Names::default());
     let parts: &'static [OnceLock<Part>] = Box::leak((0..threads).map(|_| OnceLock::new()).collect());
@@ -393,13 +361,20 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
         for t in 0..threads {
             let (sender, cursor, next, barrier, names) = (sender.clone(), &cursor, &next, &barrier, &names);
             scope.spawn(move || {
-                let mut worker = Worker::new(d);
+                let mut worker = Worker::new(n, chunk + LINE + PAD);
                 loop {
                     let from = cursor.fetch_add(chunk, Relaxed);
                     if from >= n {
                         break;
                     }
-                    worker.scan(snap(from), snap(from + chunk), names);
+                    let want = (chunk + LINE).min(n - from);
+                    read_at(&mut worker.d[..want], from);
+                    worker.d[want..want + PAD].fill(0);
+                    // The first line start after `from` (a line starting at `from` goes to the chunk before), and
+                    // the same for `from + chunk`: adjacent chunks agree.
+                    let start = if from == 0 { 0 } else { worker.d.iter().position(|&b| b == b'\n').unwrap() + 1 };
+                    let end = if from + chunk >= n { want } else { chunk + worker.d[chunk..].iter().position(|&b| b == b'\n').unwrap() + 1 };
+                    worker.scan(start, end, names);
                 }
                 parts[t].set(worker.part).ok();
                 barrier.wait();
@@ -444,9 +419,22 @@ fn main() {
 }
 
 fn run(input_path: &str, output_path: &str, threads: usize) -> std::io::Result<()> {
-    let data = map_file(input_path)?;
+    let input = std::fs::File::open(input_path)?;
+    let n = input.metadata()?.len() as usize;
+    let read_at = |buf: &mut [u8], at: usize| {
+        #[cfg(unix)]
+        std::os::unix::fs::FileExt::read_exact_at(&input, buf, at as u64).expect("read failed");
+        #[cfg(not(unix))]
+        {
+            let (mut buf, mut at) = (buf, at as u64);
+            while !buf.is_empty() {
+                let got = std::os::windows::fs::FileExt::seek_read(&input, buf, at).expect("read failed");
+                (buf, at) = (&mut buf[got..], at + got as u64);
+            }
+        }
+    };
     let mut file = std::fs::File::create(output_path)?;
-    process(data, threads, 1 << 20, &mut file)
+    process(n, &read_at, threads, 1 << 20, &mut file)
 }
 
 #[cfg(test)]
