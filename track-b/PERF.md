@@ -194,6 +194,7 @@ queries, one thread, `--branch-sim=yes`). Wall times on the shared laptop swung
 | Step | Change | Run ID | Instructions (8 pieces) | Mispredicts |
 |---|---|---|---|---|
 | 11 | The token mask is 32 bytes wide (`u32`), not 64. Joining two 32-bit `movemask`s into one `u64` made LLVM turn the mask into 64 separate bools and rebuild it with `vpinsrb`: about 300 instructions per 64 bytes, 52 M of 580 M instructions. Also the scan loop walks the starts and pairs each with the next end, with no per-token `open` test | pending | 580.1 M -> 533.9 M (-8.0%) | 2.73 M -> 2.84 M |
+| 12 | The serial tail is parallel and shorter: each worker logs its first ten ids into one log per range of queries, each merge thread reads only its own range (it used to scan every log and sort its share), picks the ten smallest by insertion, and renders its own lines; the main thread only writes the chunks. The 2.8 MB `Answer` array, the serial `render` and the "done in" timing print are gone | pending | after the last worker: 18-20 ms -> 6.5-11 ms (merge 11.5 -> 4-6.6, render 5.5 -> 0, write 1.5-5; `Instant` timestamps, Docker harness flags, 8 runs on a loaded laptop) | not measured |
 
 
 <!-- board-runs:begin -->

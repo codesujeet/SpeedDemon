@@ -21,6 +21,7 @@
 //!    intersects its terms' lists, then verifies each candidate document by
 //!    scanning its stored token ids for the exact run.
 
+use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Maps `path` read-only for the life of the process. The harness
@@ -822,13 +823,16 @@ impl Scratch {
     }
 }
 
-/// One worker's answers so far: per query the match count and id sum, and a
-/// log of `query << 32 | id` for the first ten ids it saw per query. A
-/// worker sees ids in ascending order, so those are its ten smallest.
+/// One worker's answers so far: per query the match count and id sum, and
+/// logs of `query << 32 | id` for the first ten ids it saw per query. A
+/// worker sees ids in ascending order, so those are its ten smallest. The
+/// logs are split by range of queries (`per` queries each), so that each
+/// merge thread reads only its own range.
 struct Acc {
     count: Vec<u32>,
     sum: Vec<u64>,
-    log: Vec<u64>,
+    log: Vec<Vec<u64>>,
+    per: usize,
 }
 
 /// `POS_MASK[j]` has the bits whose position has bit `j` set.
@@ -885,15 +889,15 @@ fn answer_piece(pc: &Piece, qs: &Queries, sc: &mut Scratch, acc: &mut Acc, full:
             full_at.fetch_min(pc.base, Ordering::Relaxed);
         }
         let key = (q as u64) << 32 | pc.base as u64;
+        let log = &mut acc.log[q / acc.per];
         match res {
-            Res::List(l) => acc.log.extend(l.iter().take(want).map(|&d| key + d as u64)),
+            Res::List(l) => log.extend(l.iter().take(want).map(|&d| key + d as u64)),
             Res::Map(m) => {
                 let mut left = want;
                 for (w, &x) in m.iter().enumerate() {
                     let mut x = x;
                     while x != 0 && left > 0 {
-                        acc.log
-                            .push(key + (w * 64) as u64 + x.trailing_zeros() as u64);
+                        log.push(key + (w * 64) as u64 + x.trailing_zeros() as u64);
                         (left, x) = (left - 1, x & (x - 1));
                     }
                 }
@@ -927,6 +931,7 @@ fn answer_all(
     let n_pieces = docs.len().div_ceil(piece);
     let next = AtomicUsize::new(0);
     let full: Vec<AtomicU32> = (0..qs.len()).map(|_| AtomicU32::new(u32::MAX)).collect();
+    let per = qs.len().div_ceil(threads.max(1)).max(1);
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads.max(1))
             .map(|_| {
@@ -935,7 +940,8 @@ fn answer_all(
                     let mut acc = Acc {
                         count: vec![0; qs.len()],
                         sum: vec![0; qs.len()],
-                        log: Vec::new(),
+                        log: vec![Vec::new(); qs.len().div_ceil(per)],
+                        per,
                     };
                     loop {
                         let p = next.fetch_add(1, Ordering::Relaxed);
@@ -959,46 +965,50 @@ fn answer_all(
     })
 }
 
-/// One output line's content: `count sum id_1 .. id_m`, m = min(10, count).
-#[derive(Clone, Copy, Default)]
-struct Answer {
-    count: u32,
-    sum: u64,
-    first: [u32; 10],
-}
-
-/// Combines the workers' accumulators, in parallel over ranges of queries:
-/// counts and sums add, and each query's ten smallest ids are the ten
-/// smallest of the workers' logs.
-fn merge(accs: &[Acc], n: usize, threads: usize) -> Vec<Answer> {
-    let mut out = vec![Answer::default(); n];
-    let per = n.div_ceil(threads.max(1)).max(1);
+/// Combines the workers' accumulators and renders the answers, in parallel
+/// over ranges of queries: counts and sums add, and each query's ten smallest
+/// ids are the ten smallest of the workers' logs. Returns each range's output
+/// lines (`count sum id_1 .. id_m`, m = min(10, count)), in query order.
+fn merge(accs: &[Acc], n: usize) -> Vec<Vec<u8>> {
+    let per = accs[0].per;
     std::thread::scope(|s| {
-        for (t, part) in out.chunks_mut(per).enumerate() {
-            s.spawn(move || {
-                let lo = t * per;
-                for (i, a) in part.iter_mut().enumerate() {
-                    a.count = accs.iter().map(|x| x.count[lo + i]).sum();
-                    a.sum = accs.iter().map(|x| x.sum[lo + i]).sum();
-                }
-                let mine = |&&e: &&u64| (lo..lo + part.len()).contains(&((e >> 32) as usize));
-                let mut log: Vec<u64> = accs
-                    .iter()
-                    .flat_map(|x| &x.log)
-                    .filter(mine)
-                    .copied()
-                    .collect();
-                log.sort_unstable();
-                for run in log.chunk_by(|a, b| a >> 32 == b >> 32) {
-                    let a = &mut part[(run[0] >> 32) as usize - lo];
-                    for (slot, &e) in a.first.iter_mut().zip(run) {
-                        *slot = e as u32;
+        let handles: Vec<_> = (0..accs[0].log.len())
+            .map(|r| {
+                s.spawn(move || {
+                    let (lo, hi) = (r * per, ((r + 1) * per).min(n));
+                    let mut first = vec![[u32::MAX; 10]; hi - lo];
+                    for &e in accs.iter().flat_map(|a| &a.log[r]) {
+                        let (f, id) = (&mut first[(e >> 32) as usize - lo], e as u32);
+                        if id < f[9] {
+                            let mut k = 9;
+                            while k > 0 && f[k - 1] > id {
+                                f[k] = f[k - 1];
+                                k -= 1;
+                            }
+                            f[k] = id;
+                        }
                     }
-                }
-            });
-        }
-    });
-    out
+                    let mut out = Vec::with_capacity((hi - lo) * 32);
+                    for q in lo..hi {
+                        let count: u32 = accs.iter().map(|a| a.count[q]).sum();
+                        write_u64(&mut out, count as u64);
+                        out.push(b' ');
+                        write_u64(&mut out, accs.iter().map(|a| a.sum[q]).sum());
+                        for &id in &first[q - lo][..(count as usize).min(10)] {
+                            out.push(b' ');
+                            write_u64(&mut out, id as u64);
+                        }
+                        out.push(b'\n');
+                    }
+                    out
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("merge worker panicked"))
+            .collect()
+    })
 }
 
 // --- Output -------------------------------------------------------------
@@ -1018,21 +1028,6 @@ fn write_u64(out: &mut Vec<u8>, mut v: u64) {
     out.extend_from_slice(&buf[i..]);
 }
 
-fn render(answers: &[Answer]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(answers.len() * 32);
-    for a in answers {
-        write_u64(&mut out, a.count as u64);
-        out.push(b' ');
-        write_u64(&mut out, a.sum);
-        for &id in &a.first[..(a.count as usize).min(10)] {
-            out.push(b' ');
-            write_u64(&mut out, id as u64);
-        }
-        out.push(b'\n');
-    }
-    out
-}
-
 /// Bytes of `docs.txt` per piece. Small enough that a piece's token ids and
 /// postings stay in a core's cache while all 50,000 queries run on it,
 /// large enough that the per-piece cost of running every query is amortised.
@@ -1048,7 +1043,10 @@ fn run(
     let (queries, table) = parse_queries(map_file(queries_path)?);
     let docs = map_file(docs_path)?;
     let accs = answer_all(docs, &queries, &table, threads, piece);
-    std::fs::write(output_path, render(&merge(&accs, queries.len(), threads)))?;
+    let mut out = std::fs::File::create(output_path)?;
+    for chunk in merge(&accs, queries.len()) {
+        out.write_all(&chunk)?;
+    }
 
     // Freeing the tables at exit is pure cost; the OS reclaims them anyway
     // (track-b/PERF.md).
@@ -1066,7 +1064,6 @@ fn main() {
         .map(|n| n.get())
         .unwrap_or(1);
 
-    let start = std::time::Instant::now();
     match run(
         &docs_path,
         &queries_path,
@@ -1074,13 +1071,8 @@ fn main() {
         threads,
         PIECE_BYTES,
     ) {
-        Ok(()) => {
-            eprintln!(
-                "track-b: done in {:.1} ms",
-                start.elapsed().as_secs_f64() * 1000.0
-            ); // Skip the runtime's orderly shutdown: the output is written.
-            std::process::exit(0);
-        }
+        // Skip the runtime's orderly shutdown: the output is written.
+        Ok(()) => std::process::exit(0),
         Err(e) => {
             eprintln!("track-b: failed: {e}");
             std::process::exit(1);
