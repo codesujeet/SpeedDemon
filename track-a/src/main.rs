@@ -247,10 +247,26 @@ fn hour_text(key: (u64, u64)) -> [u8; 13] {
     text
 }
 
-/// Exact nearest-rank percentiles p50, p95 and p99 of `n` sorted values read through `at`: the spec's integer rank
-/// `(p * n + 99) / 100`, 1-based.
-fn percentiles(n: usize, at: impl Fn(usize) -> u32) -> [u32; 3] {
-    [50, 95, 99].map(|p| at((p * n).div_ceil(100) - 1))
+/// Exact nearest-rank percentiles p50, p95 and p99 of `lat` (the spec's
+/// integer rank `(p * n + 99) / 100`, 1-based), by selecting the largest
+/// rank first and the others inside what stays below it.
+fn percentiles(lat: &mut [u32]) -> [u32; 3] {
+    let n = lat.len();
+    if n <= 32 {
+        lat.sort_unstable();
+        return [49, 94, 98].map(|p| lat[((p + 1) * n).div_ceil(100) - 1]);
+    }
+    let at = [49, 94, 98].map(|p| ((p + 1) * n).div_ceil(100) - 1);
+    let (mut out, mut hi) = ([0; 3], n);
+    for k in (0..3).rev() {
+        if k < 2 && at[k] == at[k + 1] {
+            out[k] = out[k + 1];
+        } else {
+            out[k] = *lat[..hi].select_nth_unstable(at[k]).1;
+            hi = at[k];
+        }
+    }
+    out
 }
 
 fn write_u64(buf: &mut [u8; 20], mut v: u64) -> &[u8] {
@@ -269,9 +285,9 @@ fn write_u64(buf: &mut [u8; 20], mut v: u64) -> &[u8] {
 struct Plan {
     /// Each hour's text and its lines, as the slices of every worker's arena that hold that hour.
     hours: Vec<([u8; 13], Vec<&'static [u32]>)>,
-    /// The endpoint names in byte order, and each endpoint number's position in that order.
     names: Vec<&'static [u8]>,
-    rank: Vec<u32>,
+    /// The endpoint numbers by endpoint bytes.
+    order: Vec<u32>,
 }
 
 fn make_plan(parts: &'static [OnceLock<Part>], names: &Mutex<Names>) -> Plan {
@@ -282,54 +298,48 @@ fn make_plan(parts: &'static [OnceLock<Part>], names: &Mutex<Names>) -> Plan {
             by_hour.entry(hour_text((run.0, run.1))).or_default().push(&part.arena[run.2..end]);
         }
     }
-    let mut names = std::mem::take(&mut names.lock().unwrap().list);
+    let names = std::mem::take(&mut names.lock().unwrap().list);
     let mut order: Vec<u32> = (0..names.len() as u32).collect();
     order.sort_unstable_by_key(|&id| names[id as usize]);
-    let mut rank = vec![0; names.len()];
-    for (r, &id) in order.iter().enumerate() {
-        rank[id as usize] = r as u32;
-    }
-    names.sort_unstable();
-    Plan { hours: by_hour.into_iter().collect(), names, rank }
+    Plan { hours: by_hour.into_iter().collect(), names, order }
 }
 
 /// Per-thread buffers reused from hour to hour.
 #[derive(Default)]
 struct Scratch {
     count: Vec<u64>,
-    keys: Vec<u32>,
-    other: Vec<u32>,
-    /// `rank << 32 | latency` of the lines whose latency does not fit a key.
-    big: Vec<u64>,
+    start: Vec<usize>,
+    lat: Vec<u32>,
 }
 
-/// The output lines of one hour of the plan. Every line becomes the key `rank << 20 | latency` (rank: the endpoint's
-/// place in byte order; a latency of 2^20-1 or more is clamped and also listed in `big`), and a radix sort of the keys
-/// puts every group in output order with its latencies ascending.
+/// The output lines of one hour of the plan.
 fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
     let (text, parts) = &plan.hours[hour];
-    let Scratch { count, keys, other, big } = sc;
+    let (count, start, lat) = (&mut sc.count, &mut sc.start, &mut sc.lat);
     count.clear();
     count.resize(plan.names.len(), 0);
-    keys.clear();
-    big.clear();
-    let mut hist = [[0u32; 2048]; 3];
+    let mut lines = 0;
     for part in parts {
         let mut it = part.iter();
         while let Some(&w) = it.next() {
-            let rank = plan.rank[(w >> 21) as usize];
+            count[(w >> 21) as usize] += 1 | u64::from(w >> 20 & 1) << 32;
             if w & LAT_MASK == LAT_MASK {
-                big.push(u64::from(rank) << 32 | u64::from(*it.next().unwrap()));
+                it.next();
             }
-            let key = rank << 20 | (w & LAT_MASK);
-            count[rank as usize] += 1 | u64::from(w >> 20 & 1) << 32;
-            for (pass, h) in hist.iter_mut().enumerate() {
-                h[(key >> (11 * pass) & 2047) as usize] += 1;
-            }
-            keys.push(key);
+            lines += 1;
         }
     }
-    big.sort_unstable();
+    start.clear();
+    start.extend(count.iter().scan(0, |total, &c| Some(std::mem::replace(total, *total + c as u32 as usize))));
+    lat.resize(lines, 0);
+    for part in parts {
+        let mut it = part.iter();
+        while let Some(&w) = it.next() {
+            let at = &mut start[(w >> 21) as usize];
+            lat[*at] = if w & LAT_MASK == LAT_MASK { *it.next().unwrap() } else { w & LAT_MASK };
+            *at += 1;
+        }
+    }
     // The hour's lines are in `lat` now: give the pages of the arenas that hold only this hour back to the system, so
     // the output written so far is paid for by the input freed (the lines are most of the process's memory).
     #[cfg(unix)]
@@ -344,39 +354,19 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
             unsafe { madvise(from as *mut u8, to - from, 4) };
         }
     }
-    other.resize(keys.len(), 0);
-    for (pass, h) in hist.iter_mut().enumerate() {
-        let mut total = 0;
-        for slot in h.iter_mut() {
-            total += std::mem::replace(slot, total);
-        }
-        for &key in keys.iter() {
-            let at = &mut h[(key >> (11 * pass) & 2047) as usize];
-            other[*at as usize] = key;
-            *at += 1;
-        }
-        std::mem::swap(keys, other);
-    }
-    let mut out = Vec::with_capacity(keys.len() * 3 + 4096);
+    let mut out = Vec::with_capacity(lines * 3 + 4096);
     let mut buf = [0u8; 20];
-    let (mut from, mut escaped) = (0, 0);
-    for (rank, &packed) in count.iter().enumerate() {
-        let n = packed as u32 as usize;
+    for &id in &plan.order {
+        let n = count[id as usize] as u32 as usize;
         if n == 0 {
             continue;
         }
-        let (group, errors) = (&keys[from..from + n], packed >> 32);
-        let first = escaped;
-        while big.get(escaped).is_some_and(|b| (b >> 32) as usize == rank) {
-            escaped += 1;
-        }
-        // The clamped latencies sort last in the group, in the order of their entries in `big`.
-        let plain = n - (escaped - first);
-        let [p50, p95, p99] = percentiles(n, |i| if i < plain { group[i] & LAT_MASK } else { big[first + i - plain] as u32 });
-        from += n;
+        let end = start[id as usize];
+        let [p50, p95, p99] = percentiles(&mut lat[end - n..end]);
+        let errors = count[id as usize] >> 32;
         out.extend_from_slice(text);
         out.extend_from_slice(b":00:00Z ");
-        out.extend_from_slice(plan.names[rank]);
+        out.extend_from_slice(plan.names[id as usize]);
         // floor(errors * 1_000_000 / count): integer division already floors.
         for v in [n as u64, p50.into(), p95.into(), p99.into(), errors, errors * 1_000_000 / n as u64] {
             out.push(b' ');

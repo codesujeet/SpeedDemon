@@ -55,15 +55,15 @@ fn parse_latency_reads_one_to_ten_digits() {
 #[test]
 fn percentiles_match_a_full_sort() {
     for n in [1usize, 2, 3, 4, 5, 20, 21, 99, 100, 101, 1000] {
-        let data: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2_654_435_761) % 50).collect();
+        let mut data: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2_654_435_761) % 50).collect();
         let mut sorted = data.clone();
         sorted.sort_unstable();
         let rank = |p: usize| sorted[(p * n).div_ceil(100) - 1];
-        assert_eq!(percentiles(n, |i| sorted[i]), [rank(50), rank(95), rank(99)], "n={n}");
+        assert_eq!(percentiles(&mut data), [rank(50), rank(95), rank(99)], "n={n}");
     }
     // Spec section 3.4: with n = 1 all three equal the single value; with n = 101 the ranks are 51, 96 and 100.
-    assert_eq!(percentiles(1, |_| 42), [42, 42, 42]);
-    assert_eq!(percentiles(101, |i| i as u32 + 1), [51, 96, 100]);
+    assert_eq!(percentiles(&mut [42]), [42, 42, 42]);
+    assert_eq!(percentiles(&mut (1..=101).rev().collect::<Vec<u32>>()), [51, 96, 100]);
 }
 
 #[test]
