@@ -1072,7 +1072,7 @@ fn write_u64(out: &mut Vec<u8>, mut v: u64) {
 /// Bytes of `docs.txt` per piece. Small enough that a piece's token ids and
 /// postings stay in a core's cache while all 50,000 queries run on it,
 /// large enough that the per-piece cost of running every query is amortised.
-const PIECE_BYTES: usize = 1 << 20;
+const PIECE_BYTES: usize = 2 << 20;
 
 fn run(
     docs_path: &str,
