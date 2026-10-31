@@ -86,6 +86,12 @@ fn parse_regions(data: &[u8]) -> Regions {
         .map_or(data.len(), |p| p + 1);
     while at < data.len() {
         let mut id = 0usize;
+        if at + 8 <= data.len() {
+            // Branch-free digit run: the id's length varies, so a byte loop mispredicts.
+            let (v, n) = digits(data, at);
+            id = v as usize;
+            at += n;
+        }
         while data[at] != b',' {
             id = id * 10 + (data[at] - b'0') as usize;
             at += 1;
@@ -104,10 +110,15 @@ fn parse_regions(data: &[u8]) -> Regions {
             spill.insert(id, *slot);
         }
         at += 4;
-        while data[at] != b'\n' {
+        // The common line ends right after the three-letter code.
+        if data[at] == b'\n' {
+            at += 1;
+        } else {
+            while data[at] != b'\n' {
+                at += 1;
+            }
             at += 1;
         }
-        at += 1;
     }
     Regions {
         countries,
