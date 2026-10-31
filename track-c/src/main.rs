@@ -7,22 +7,23 @@
 //! - Region -> country is a dense array indexed by `region_id`, so the
 //!   join is one bounds-checked array read per record.
 //! - Amounts are integer cents end to end; nothing touches a float.
-//! - `names_distinct` is exact. A record leaves one `u64` in its country's
-//!   list: the top half of its name's hash and the offset of the name's
-//!   field. Sorting a country's list puts equal names together; only
-//!   entries with equal hashes are compared, byte for byte, by reading the
-//!   field again, so the count is exact and nothing but 8 bytes per record
-//!   is kept.
-//! - The file is parsed in parallel. Every `"` in a well-formed file is
-//!   either a field delimiter or half of a `""` escape, so the parity of
-//!   the quotes before an offset says exactly whether that offset is
-//!   inside a quoted field. Chunks count their quotes in parallel, the
-//!   parities are prefix-summed, and each chunk boundary then snaps
-//!   forward to the first LF outside quotes - a real record boundary,
-//!   even though notes contain LFs.
+//! - A record is parsed straight from the mapped bytes: digit runs with a
+//!   branch-free SWAR conversion, quoted fields with an AVX2 search for the
+//!   closing quote (a `"` followed by another `"` is an escaped pair).
+//! - `names_distinct` keeps nothing per record. All workers share one
+//!   lock-free table that numbers each distinct name (by a 64-bit hash of
+//!   its raw bytes; escaping is one to one, so equal names have equal raw
+//!   bytes) and one bit per (country, name number). A country's distinct
+//!   count is the popcount of its row.
+//! - The file is parsed in parallel, in many more chunks than threads that
+//!   workers claim from a counter (cores differ in speed). A chunk cut is
+//!   the first LF that is followed by a digit or a BOM, which spec 2.2
+//!   makes a record boundary: names are letters and notes lowercase words.
+//! - The last few KB are copied behind zero padding so the SIMD loads never
+//!   run past the mapping.
 
-use std::collections::HashMap;
-use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::arch::x86_64::{__m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -52,64 +53,6 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     Ok(Box::leak(std::fs::read(path)?.into_boxed_slice()))
 }
 
-// --- FxHash-style hasher (research/track-a-ingest.md) -------------------
-
-const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-
-#[derive(Default)]
-struct FxHasher {
-    hash: u64,
-}
-impl Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, mut bytes: &[u8]) {
-        while bytes.len() >= 8 {
-            let word = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
-            self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
-            bytes = &bytes[8..];
-        }
-        if !bytes.is_empty() {
-            let mut buf = [0u8; 8];
-            buf[..bytes.len()].copy_from_slice(bytes);
-            let word = u64::from_ne_bytes(buf);
-            self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
-        }
-    }
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-type FxBuildHasher = BuildHasherDefault<FxHasher>;
-
-const BOM: &[u8] = b"\xEF\xBB\xBF";
-
-// --- SWAR byte search (research/track-a-ingest.md) ----------------------
-
-#[inline]
-fn has_zero_byte(v: u64) -> bool {
-    v.wrapping_sub(0x0101_0101_0101_0101) & !v & 0x8080_8080_8080_8080 != 0
-}
-
-/// Index of the next `target` at or after `from`, or `data.len()`.
-#[inline]
-fn find(data: &[u8], from: usize, target: u8) -> usize {
-    let n = data.len();
-    let pattern = (target as u64) * 0x0101_0101_0101_0101;
-    let mut i = from;
-    while i + 8 <= n {
-        let chunk = u64::from_ne_bytes(data[i..i + 8].try_into().unwrap());
-        if has_zero_byte(chunk ^ pattern) {
-            break;
-        }
-        i += 8;
-    }
-    while i < n && data[i] != target {
-        i += 1;
-    }
-    i
-}
-
 // --- Regions ------------------------------------------------------------
 
 /// Countries in first-seen order, and `region_id -> group + 1` (0 means
@@ -120,7 +63,8 @@ struct Regions {
 }
 
 fn parse_regions(data: &[u8]) -> Regions {
-    let mut index: HashMap<[u8; 3], u16, FxBuildHasher> = HashMap::default();
+    // Spec 2.3: a code is three bytes `A`-`Z`, so five bits each identify it.
+    let mut index = vec![0u16; 1 << 15];
     let mut countries = Vec::new();
     let mut group_of: Vec<u16> = Vec::new();
     for line in data.split(|&b| b == b'\n').skip(1) {
@@ -132,14 +76,15 @@ fn parse_regions(data: &[u8]) -> Regions {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let g = *index.entry(code).or_insert_with(|| {
+        let slot = &mut index[code.iter().fold(0usize, |a, &c| a << 5 | (c & 31) as usize)];
+        if *slot == 0 {
             countries.push(code);
-            (countries.len() - 1) as u16
-        });
+            *slot = countries.len() as u16;
+        }
         if group_of.len() <= id {
             group_of.resize(id + 1, 0);
         }
-        group_of[id] = g + 1;
+        group_of[id] = *slot;
     }
     Regions { countries, group_of }
 }
@@ -173,94 +118,187 @@ impl Default for Agg {
     }
 }
 
-/// One parse worker's result: per-group aggregates (all but
-/// `names_distinct`) and, per group, one `u64` per record: the top 32 bits
-/// of the hash of the record's name, then the offset of its field.
-struct Partial {
-    groups: Vec<Agg>,
-    names: Vec<Vec<u64>>,
+// --- Distinct names -----------------------------------------------------
+
+/// Shared by all workers. `slots` is an open-addressing table with
+/// `2 << id_bits` entries; an entry is the hash with its low `id_bits`
+/// bits replaced by the name's number (1 up to `1 << id_bits`, 0 = empty),
+/// so the slot index and the stored bits together cover all 64 hash bits.
+/// `bits` holds one bit per (group, number).
+struct Names {
+    slots: Vec<AtomicU64>,
+    bits: Vec<AtomicU64>,
+    issued: AtomicUsize,
+    full: AtomicBool,
+    id_bits: u32,
+}
+
+/// `n` zeroed atomics; the allocator hands back untouched zero pages, so
+/// only the part that is used costs memory.
+fn zeroed(n: usize) -> Vec<AtomicU64> {
+    let mut v = std::mem::ManuallyDrop::new(vec![0u64; n]);
+    // SAFETY: AtomicU64 has the size and alignment of u64, and zero is a valid value.
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast(), v.len(), v.capacity()) }
+}
+
+impl Names {
+    fn new(id_bits: u32, groups: usize) -> Names {
+        Names {
+            slots: zeroed(2 << id_bits),
+            bits: zeroed(groups << (id_bits - 6)),
+            issued: AtomicUsize::new(0),
+            full: AtomicBool::new(false),
+            id_bits,
+        }
+    }
+
+    /// Records that `group` has a name with hash `h`.
+    #[inline]
+    fn add(&self, group: usize, h: u64) {
+        let mask = self.slots.len() - 1;
+        let mut s = h as usize & mask;
+        loop {
+            let mut cur = self.slots[s].load(Relaxed);
+            if cur == 0 {
+                let id = self.issued.fetch_add(1, Relaxed) + 1;
+                if id >= 1 << self.id_bits {
+                    self.full.store(true, Relaxed);
+                    return;
+                }
+                let new = (h >> self.id_bits << self.id_bits) | id as u64;
+                cur = self.slots[s].compare_exchange(0, new, Relaxed, Relaxed).unwrap_or_else(|other| other);
+                if cur == 0 {
+                    cur = new;
+                }
+            }
+            if (cur ^ h) >> self.id_bits == 0 {
+                let id = cur as usize & ((1 << self.id_bits) - 1);
+                self.bits[(group << (self.id_bits - 6)) + id / 64].fetch_or(1 << (id % 64), Relaxed);
+                return;
+            }
+            s = (s + 1) & mask;
+        }
+    }
+
+    fn distinct(&self, group: usize) -> u64 {
+        let row = &self.bits[group << (self.id_bits - 6)..(group + 1) << (self.id_bits - 6)];
+        row.iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()
+    }
+}
+
+#[inline]
+fn mum(a: u64, b: u64) -> u64 {
+    let p = a as u128 * b as u128;
+    p as u64 ^ (p >> 64) as u64
+}
+
+/// 64-bit hash of `data[from..to]`; `data` must extend 32 bytes past `to`.
+#[inline]
+fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
+    let mut h = (to - from) as u64 ^ 0x9E37_79B9_7F4A_7C15;
+    let mut at = from;
+    loop {
+        let left = to.saturating_sub(at);
+        let mut w = [0u64; 4];
+        for (k, w) in w.iter_mut().enumerate() {
+            let n = left.saturating_sub(8 * k).min(8);
+            let x = u64::from_le_bytes(data[at + 8 * k..at + 8 * k + 8].try_into().unwrap());
+            *w = x & ((1u128 << (8 * n)) - 1) as u64;
+        }
+        h = mum(mum(w[0] ^ 0xA076_1D64_78BD_642F, w[1] ^ 0xE703_7ED1_A0B4_28DB) ^ h, mum(w[2] ^ 0x8EBC_6AF0_9C88_C6E3, w[3] ^ 0x5899_65CC_7537_4CC3));
+        at += 32;
+        if at >= to {
+            return h;
+        }
+    }
 }
 
 // --- Record parsing (spec section 2.1) ----------------------------------
 
-/// A `text` field starting at `i`: returns (content start, content end,
+/// Bit mask of the `"` bytes in `data[at..at + 32]`.
+#[inline]
+fn quotes(data: &[u8], at: usize) -> u32 {
+    let block = &data[at..at + 32];
+    // SAFETY: AVX2 is part of the build target (.cargo/config.toml, x86-64-v3)
+    // and `block` is exactly 32 readable bytes.
+    unsafe {
+        let v = _mm256_loadu_si256(block.as_ptr().cast::<__m256i>());
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'"' as i8))) as u32
+    }
+}
+
+/// A `text` field starting at `at`: returns (content start, content end,
 /// number of `""` escapes inside, index just past the field's `,`).
 /// The value is the content with every `""` read as one `"`.
 #[inline]
-fn text_field(data: &[u8], i: usize) -> (usize, usize, usize, usize) {
-    if data.get(i) == Some(&b'"') {
-        let start = i + 1;
-        let mut j = start;
-        let mut pairs = 0;
-        loop {
-            let q = find(data, j, b'"');
-            if data.get(q + 1) == Some(&b'"') {
-                pairs += 1;
-                j = q + 2;
-            } else {
-                // Closing quote; a name or note is always followed by `,`.
-                return (start, q, pairs, q + 2);
-            }
+fn text_field(data: &[u8], at: usize) -> (usize, usize, usize, usize) {
+    if data[at] != b'"' {
+        let c = at + data[at..].iter().position(|&b| b == b',').unwrap_or(data.len() - at - 1);
+        return (at, c, 0, c + 1);
+    }
+    let start = at + 1;
+    let (mut j, mut pairs) = (start, 0);
+    loop {
+        let m = quotes(data, j);
+        if m == 0 {
+            j += 32;
+            continue;
         }
-    } else {
-        let c = find(data, i, b',');
-        (i, c, 0, c + 1)
+        let q = j + m.trailing_zeros() as usize;
+        if data[q + 1] == b'"' {
+            pairs += 1;
+            j = q + 2;
+        } else {
+            // Closing quote; a name or note is always followed by `,`.
+            return (start, q, pairs, q + 2);
+        }
     }
 }
 
+/// The run of ASCII digits at `data[at..]` as (value, length).
 #[inline]
-fn digits_until_comma(data: &[u8], mut i: usize) -> (u64, usize) {
-    let mut v = 0u64;
-    while data[i] != b',' {
-        v = v * 10 + (data[i] - b'0') as u64;
-        i += 1;
+fn digits(data: &[u8], at: usize) -> (u64, usize) {
+    let w = u64::from_le_bytes(data[at..at + 8].try_into().unwrap());
+    let not_digit = (w & 0xF0F0_F0F0_F0F0_F0F0) ^ 0x3030_3030_3030_3030;
+    let mut n = not_digit.trailing_zeros() as usize / 8;
+    // Digits to the top bytes, so the first one lands in the highest decimal place.
+    let w = (w << (64 - 8 * n.max(1)) & 0x0F0F_0F0F_0F0F_0F0F).wrapping_mul(2561) >> 8;
+    let w = ((w & 0x00FF_00FF_00FF_00FF).wrapping_mul(6_553_601)) >> 16;
+    let mut v = ((w & 0x0000_FFFF_0000_FFFF).wrapping_mul(42_949_672_960_001)) >> 32;
+    while n >= 8 && data[at + n].is_ascii_digit() {
+        v = v * 10 + (data[at + n] - b'0') as u64;
+        n += 1;
     }
-    (v, i + 1)
+    (v, n)
 }
 
-/// Parses every record in `data[start..end]` (both record boundaries)
-/// into `part`.
-fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, part: &mut Partial) {
+/// Parses every record in `data[start..end]` (both record boundaries; the
+/// 64 bytes after `end` must be readable) into `groups`.
+fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, names: &Names, groups: &mut [Agg]) {
     let unmatched = regions.countries.len();
     let mut i = start;
     while i < end {
-        if data[i..].starts_with(BOM) {
-            i += 3;
-        }
-        let (id, next) = digits_until_comma(data, i);
-        let name_at = next;
-        let (ns, ne, npairs, next) = text_field(data, next);
+        i += 3 * (data[i] == 0xEF) as usize;
+        let (id, n) = digits(data, i);
+        let (ns, ne, npairs, next) = text_field(data, i + n + 1);
         let (ts, te, tpairs, next) = text_field(data, next);
-        let (region, next) = digits_until_comma(data, next);
-
-        let mut j = next;
+        let (region, n) = digits(data, next);
+        let mut j = next + n + 1;
         let neg = data[j] == b'-';
-        if neg {
-            j += 1;
-        }
-        let mut cents = 0i64;
-        while data[j] != b'.' {
-            cents = cents * 10 + (data[j] - b'0') as i64;
-            j += 1;
-        }
-        cents = cents * 100 + ((data[j + 1] - b'0') as i64) * 10 + (data[j + 2] - b'0') as i64;
-        if neg {
-            cents = -cents;
-        }
-        j += 3;
-        i = match data.get(j) {
-            Some(b'\r') => j + 2,
-            Some(b'\n') => j + 1,
-            _ => j,
-        };
+        j += neg as usize;
+        let (whole, n) = digits(data, j);
+        j += n + 1;
+        let cents = (whole * 100 + (data[j] - b'0') as u64 * 10 + (data[j + 1] - b'0') as u64) as i64;
+        let cents = if neg { -cents } else { cents };
+        j += 2;
+        // CRLF or LF; a missing final terminator ends the loop either way.
+        i = j + 1 + (data[j] == b'\r') as usize;
 
-        let g = regions
-            .group_of
-            .get(region as usize)
-            .copied()
-            .filter(|&g| g != 0)
-            .map_or(unmatched, |g| (g - 1) as usize);
-        let agg = &mut part.groups[g];
+        let g = match regions.group_of.get(region as usize) {
+            Some(&g) if g != 0 => g as usize - 1,
+            _ => unmatched,
+        };
+        let agg = &mut groups[g];
         agg.count += 1;
         agg.id_sum += id;
         agg.amount_sum += cents;
@@ -268,101 +306,64 @@ fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, part:
         agg.amount_max = agg.amount_max.max(cents);
         agg.name_bytes += (ne - ns - npairs) as u64;
         agg.note_bytes += (te - ts - tpairs) as u64;
-
-        // Escaping is one to one, so equal names have equal raw bytes.
-        let hash = FxBuildHasher::default().hash_one(&data[ns..ne]);
-        part.names[g].push(hash & !0xFFFF_FFFF | name_at as u64);
+        names.add(g, hash_name(data, ns, ne));
     }
 }
 
-/// Record-aligned chunk boundaries over `data[body..]`, `parts` of them
-/// (some possibly empty). Spec 2.2 makes names letters and notes lowercase
-/// words, so a line feed inside a quoted field is followed by a letter or a
-/// quote, while one that ends a record is followed by the next id's digits
-/// or a BOM. The first such line feed after each nominal cut is a boundary,
-/// found by looking at a few dozen bytes instead of counting every quote.
-fn chunk_bounds(data: &[u8], body: usize, parts: usize) -> Vec<usize> {
-    let mut bounds = vec![body];
-    for k in 1..parts {
-        let mut i = (body + (data.len() - body) * k / parts).max(*bounds.last().unwrap());
-        while i + 1 < data.len() && !(data[i] == b'\n' && (data[i + 1].is_ascii_digit() || data[i + 1] == 0xEF)) {
-            i += 1;
-        }
-        bounds.push((i + 1).min(data.len()));
+/// First record boundary after `from`: the position after an LF that is
+/// followed by a digit (next id) or a BOM. Spec 2.2 makes names letters and
+/// notes lowercase words, so an LF inside a quoted field is followed by a
+/// letter or a quote.
+fn cut(data: &[u8], from: usize) -> usize {
+    let mut i = from;
+    while i + 1 < data.len() && !(data[i] == b'\n' && (data[i + 1].is_ascii_digit() || data[i + 1] == 0xEF)) {
+        i += 1;
     }
-    bounds.push(data.len());
-    bounds
+    (i + 1).min(data.len())
 }
 
-fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
+/// Bytes at the end of the file that are copied behind padding and parsed
+/// last, so no chunk's SIMD loads can run past the mapping.
+const TAIL: usize = 8192;
+const CHUNKS_PER_THREAD: usize = 8;
+
+fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Names) -> Vec<Agg> {
     let n_groups = regions.countries.len() + 1;
-    let body = find(data, 0, b'\n') + 1; // skip the BOM + header line
-    if body >= data.len() {
-        return vec![Agg::default(); n_groups];
-    }
-    assert!(data.len() <= u32::MAX as usize, "offsets are kept in 32 bits");
-    let threads = threads.max(1);
-    let bounds = chunk_bounds(data, body, threads);
-    let partials: Vec<Partial> = std::thread::scope(|s| {
-        let handles: Vec<_> = bounds
-            .windows(2)
-            .map(|w| {
-                let (a, b) = (w[0], w[1]);
-                s.spawn(move || {
-                    let mut part = Partial { groups: vec![Agg::default(); n_groups], names: vec![Vec::new(); n_groups] };
-                    parse_records(data, a, b, regions, &mut part);
-                    // Sorted here, while still in cache, so the final stage only merges runs.
-                    part.names.iter_mut().for_each(|entries| entries.sort_unstable());
-                    part
+    let tail_at = if data.len() - body > 2 * TAIL { cut(data, data.len() - TAIL) } else { body };
+    let chunks = threads * CHUNKS_PER_THREAD;
+    let bound = |k: usize| match k {
+        0 => body,
+        k if k == chunks => tail_at,
+        k => cut(data, body + (tail_at - body) * k / chunks).min(tail_at),
+    };
+    let next = AtomicUsize::new(0);
+    let mut parts: Vec<Vec<Agg>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut groups = vec![Agg::default(); n_groups];
+                    loop {
+                        let k = next.fetch_add(1, Relaxed);
+                        if k >= chunks {
+                            return groups;
+                        }
+                        parse_records(data, bound(k), bound(k + 1), regions, names, &mut groups);
+                    }
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().expect("parse worker panicked")).collect()
     });
 
-    // Distinct names: worker `w` takes the groups with `g % threads == w`,
-    // gathers that group's entries from every parse worker and sorts them.
-    // Only entries with equal hashes can be equal names; those runs are
-    // compared byte for byte.
-    let distinct: Vec<(usize, u64)> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..threads)
-            .map(|w| {
-                let partials = &partials;
-                s.spawn(move || {
-                    (w..n_groups)
-                        .step_by(threads)
-                        .map(|g| {
-                            let mut entries: Vec<u64> = partials.iter().flat_map(|p| p.names[g].iter().copied()).collect();
-                            entries.sort();
-                            let mut distinct = 0;
-                            for run in entries.chunk_by(|a, b| a >> 32 == b >> 32) {
-                                if run.len() == 1 {
-                                    distinct += 1;
-                                    continue;
-                                }
-                                let mut same: Vec<&[u8]> = run
-                                    .iter()
-                                    .map(|&e| {
-                                        let (from, to, ..) = text_field(data, (e & 0xFFFF_FFFF) as usize);
-                                        &data[from..to]
-                                    })
-                                    .collect();
-                                same.sort_unstable();
-                                same.dedup();
-                                distinct += same.len() as u64;
-                            }
-                            (g, distinct)
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        handles.into_iter().flat_map(|h| h.join().expect("distinct worker panicked")).collect()
-    });
+    let mut tail = data[tail_at..].to_vec();
+    tail.resize(tail.len() + 64, 0);
+    let mut groups = vec![Agg::default(); n_groups];
+    parse_records(&tail, 0, data.len() - tail_at, regions, names, &mut groups);
+    parts.push(groups);
 
     let mut out = vec![Agg::default(); n_groups];
-    for part in &partials {
-        for (dst, src) in out.iter_mut().zip(&part.groups) {
+    for part in &parts {
+        for (dst, src) in out.iter_mut().zip(part) {
             if src.count == 0 {
                 continue;
             }
@@ -375,10 +376,27 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
             dst.note_bytes += src.note_bytes;
         }
     }
-    for (g, n) in distinct {
-        out[g].names_distinct = n;
-    }
     out
+}
+
+fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
+    let n_groups = regions.countries.len() + 1;
+    let body = data.iter().position(|&b| b == b'\n').map_or(data.len(), |p| p + 1); // skip the BOM + header line
+    if body >= data.len() {
+        return vec![Agg::default(); n_groups];
+    }
+    // Names are numbered from a table sized for 100 k distinct names (the
+    // generator's pool); if there are more, start over with a bigger one.
+    let mut id_bits = 17;
+    loop {
+        let names = Names::new(id_bits, n_groups);
+        let mut out = scan(data, body, regions, threads.max(1), &names);
+        if !names.full.load(Relaxed) {
+            out.iter_mut().enumerate().for_each(|(g, a)| a.names_distinct = names.distinct(g));
+            return out;
+        }
+        id_bits += 2;
+    }
 }
 
 // --- Output (spec section 4) --------------------------------------------

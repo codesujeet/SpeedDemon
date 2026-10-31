@@ -67,3 +67,34 @@ fn quoted_fields_starting_or_ending_with_an_escaped_quote() {
     // name `"Q` (2 bytes), note `"hi"` (4 bytes).
     assert_eq!(run_on(records, regions, 1), "AAA 1 1 1.00 1.00 1.00 1 2 4\n");
 }
+
+/// A file big enough for real chunk cuts: the worked example's records
+/// repeated, so every count scales and the distinct counts do not.
+#[test]
+fn many_chunks_match_the_scaled_worked_example() {
+    let header_end = WORKED_RECORDS.iter().position(|&b| b == b'\n').unwrap() + 1;
+    let mut records = WORKED_RECORDS[..header_end].to_vec();
+    for _ in 0..3000 {
+        records.extend_from_slice(&WORKED_RECORDS[header_end..]);
+    }
+    let expected = "AAA 15000 51000 4553250.00 -0.75 1420.00 4 72000 165000\n\
+BBB 3000 12000 -15750.00 -5.25 -5.25 1 45000 105000\n\
+CCC 3000 27000 -150.00 -0.05 -0.05 1 9000 3000\n\
+_UNMATCHED 6000 45000 3000.00 -1.00 2.00 2 63000 3000\n";
+    for threads in [1, 3, 12] {
+        assert_eq!(run_on(&records, WORKED_REGIONS, threads), expected, "threads={threads}");
+    }
+}
+
+/// More distinct names than the name table starts with: the scan restarts
+/// with a bigger one and the count stays exact.
+#[test]
+fn name_table_grows_when_there_are_too_many_names() {
+    let mut records = b"id,name,note,region_id,amount\n".to_vec();
+    for i in 1..=140_000 {
+        records.extend_from_slice(format!("{i},\"n{i}\",\"x\",1,1.00\n").as_bytes());
+    }
+    let out = run_on(&records, b"region_id,country\n1,AAA\n", 4);
+    assert!(out.starts_with("AAA 140000 "), "{out}");
+    assert!(out.contains(" 140000 "), "{out}");
+}
