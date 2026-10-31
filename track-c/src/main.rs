@@ -4,606 +4,666 @@
 //! `regions.csv`, and writes one line of aggregates per country.
 //!
 //! Spec: real-spec/speed-demon-2026/specs/c-join.md. Design notes:
-//! - Both files are mapped; one pool of threads runs every phase, separated
-//!   by barriers: flag the country codes in `regions.csv` (split by lines),
-//!   fill a one-byte-per-id table `region_id -> country`, parse the records,
-//!   count the distinct names of every country.
-//! - Countries are numbered 1..=N in code order (0 is `_UNMATCHED`), so the
-//!   output order is the index order.
-//! - `records.csv` is cut after CRLFs: spec 2.2 puts a CR only at the start
-//!   of a terminator, never inside quotes, so the byte after a CRLF starts a
-//!   record. Pieces are claimed from a counter (cores differ in speed).
-//! - A record is read off 64-byte blocks: bit masks of the quotes, commas
-//!   and LFs, the bytes inside quotes masked out with a carry-less prefix
-//!   XOR (a `""` pair flips it twice, so it changes nothing). Each record's
-//!   four commas and its LF come straight from the mask, with the count of
-//!   quotes before each, so field lengths need no second pass.
-//! - Numbers are decoded eight digits at a time; amounts are integer cents.
-//! - `names_distinct`: names get dense ids from a shared lock-free table
-//!   (escaping is one to one, so equal raw bytes mean equal values), and an
-//!   id is marked in one bitset per country; the count is a popcount. A name
-//!   of up to 16 bytes is its own key (exact). A longer one is keyed by its
-//!   first 8 bytes and a 62-bit hash of the rest.
-//! - Region lookup, name lookup and bit marking each run `LAG` records
-//!   behind the parse, with prefetches issued ahead, so their cache misses
-//!   overlap.
+//! - Region -> country is a dense array indexed by `region_id`, so the
+//!   join is one bounds-checked array read per record.
+//! - Amounts are integer cents end to end; nothing touches a float.
+//! - A record is parsed straight from the mapped bytes: digit runs with a
+//!   branch-free SWAR conversion, quoted fields with an AVX2 search for the
+//!   closing quote (a `"` followed by another `"` is an escaped pair).
+//! - `names_distinct` keeps nothing per record. All workers share one
+//!   lock-free table that numbers each distinct name (by a 64-bit hash of
+//!   its raw bytes; escaping is one to one, so equal names have equal raw
+//!   bytes) and one bit per (country, name number). A country's distinct
+//!   count is the popcount of its row. Lookups are batched and prefetched
+//!   so their cache misses overlap.
+//! - The file is parsed in parallel, in many more chunks than threads that
+//!   workers claim from a counter (cores differ in speed). A chunk cut is
+//!   the first LF that is followed by a digit or a BOM, which spec 2.2
+//!   makes a record boundary: names are letters and notes lowercase words.
+//! - The last few KB are copied behind zero padding so the SIMD loads never
+//!   run past the mapping.
 
-use std::arch::x86_64::*;
-use std::fmt::Write;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize};
-use std::sync::{Barrier, Mutex, OnceLock};
+use std::arch::x86_64::{
+    __m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
+    _mm256_set1_epi8, _mm256_storeu_si256,
+};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
-extern "C" {
-    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
-    fn prctl(option: i32, ...) -> i32;
-}
-
-/// `mmap` of `len` bytes (at `addr` if `fd` is a file, else anywhere, zeroed).
-fn map(addr: *mut u8, len: usize, fd: i32) -> *mut u8 {
-    // PROT_READ | PROT_WRITE (PROT_READ for a file), MAP_PRIVATE | MAP_FIXED or MAP_ANONYMOUS.
-    let (prot, flags) = if fd < 0 { (3, 2 | 0x20) } else { (1, 2 | 0x10) };
-    // SAFETY: a fresh mapping, or one over a mapping of ours.
-    let p = unsafe { mmap(addr, len.max(1), prot, flags, fd, 0) };
-    assert!(p as isize != -1, "mmap failed");
-    p
-}
-
-/// `n` zeroed values of a type for which zero is valid (only atomics and
-/// plain integers are used). Pages are charged only once touched.
-fn zeroed<T>(n: usize) -> &'static [T] {
-    // SAFETY: zero bytes are a valid value of every T used here; the mapping lives forever.
-    unsafe { std::slice::from_raw_parts(map(0 as _, n * std::mem::size_of::<T>(), -1).cast(), n) }
-}
-
-/// A table that every thread writes all over is populated up front, by
-/// `i` of `n` threads each taking its share of the pages in one call:
-/// faulting it in page by page from many threads made them queue on the
-/// kernel's page-table locks. (Without MADV_POPULATE_WRITE the pages are
-/// simply faulted in later.)
-fn populate<T>(t: &[T], i: usize, n: usize) {
-    let pages = std::mem::size_of_val(t).div_ceil(4096);
-    let (from, to) = (pages * i / n, pages * (i + 1) / n);
-    // SAFETY: whole pages of one of our own mappings.
-    unsafe {
-        madvise(
-            (t.as_ptr() as usize + from * 4096) as _,
-            (to - from) * 4096,
-            23,
-        )
-    };
-}
-
-/// Maps `path` read-only, over a spare zero page: the 64 bytes after the
-/// returned slice are readable, so block loads may run past its end. The
-/// harness pre-warms `/data`, so mapped pages add nothing to peak memory.
+/// Maps `path` read-only for the life of the process. The harness
+/// pre-warms `/data` into the page cache before the run, so those pages
+/// are charged outside this run's cgroup and mapping them adds nothing to
+/// peak memory; `fs::read` would copy the whole file into charged heap.
+#[cfg(unix)]
 fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     use std::os::fd::AsRawFd;
+    extern "C" {
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    }
     let file = std::fs::File::open(path)?;
     let len = file.metadata()?.len() as usize;
-    let base = map(0 as _, len + 4096, -1);
-    if len > 0 {
-        map(base, len, file.as_raw_fd());
+    if len == 0 {
+        return Ok(&[]);
     }
-    // SAFETY: `len` bytes of the mapping above.
-    Ok(unsafe { std::slice::from_raw_parts(base, len) })
+    // PROT_READ = 1, MAP_PRIVATE = 2.
+    let p = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
+    if p as isize == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::slice::from_raw_parts(p, len) })
 }
 
-fn load8(p: *const u8) -> u64 {
-    // SAFETY: callers keep the 8 bytes inside the mapping.
-    unsafe { p.cast::<u64>().read_unaligned() }
+#[cfg(not(unix))]
+fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
+    Ok(Box::leak(std::fs::read(path)?.into_boxed_slice()))
 }
 
-fn prefetch<T>(p: *const T) {
-    // SAFETY: a prefetch is a hint; it never faults or changes memory.
-    unsafe { _mm_prefetch::<_MM_HINT_T0>(p.cast()) };
+// --- Regions ------------------------------------------------------------
+
+/// Countries in first-seen order, and `region_id -> group + 1` (0 means
+/// "no such region").
+struct Regions {
+    countries: Vec<[u8; 3]>,
+    /// Group + 1 as one byte, 255 for the rare group beyond the 254th (then see `spill`).
+    group_of: Vec<u8>,
+    spill: std::collections::HashMap<usize, u16>,
 }
 
-/// The value of the last `n` (1 to 8) of the eight digit bytes in `v` (the
-/// first byte is the lowest): reduced to digit values, the bytes before them
-/// masked to leading zeros, then folded in pairs, quads and halves.
-fn fold(v: u64, n: usize) -> u64 {
-    let v = v & 0x0F0F_0F0F_0F0F_0F0F & (!0u64 << (8 * (8 - n)));
-    let v = (v * 10 + (v >> 8)) & 0x00FF_00FF_00FF_00FF;
-    let v = (v * 100 + (v >> 16)) & 0x0000_FFFF_0000_FFFF;
-    (v * 10000 + (v >> 32)) & 0xFFFF_FFFF
-}
-
-/// The value of the 1 to 8 decimal digits in `[s, e)`.
-fn digits(s: *const u8, e: *const u8) -> u64 {
-    fold(load8(e.wrapping_sub(8)), e as usize - s as usize)
-}
-
-/// An amount's value in cents, from its digits `[s, e)` with the dot third
-/// from the end: at most 7 digits (99999.99), so the eight bytes ending at
-/// `e`, with the dot's byte dropped, are one number.
-fn money(s: *const u8, e: *const u8) -> u64 {
-    let w = load8(e.wrapping_sub(8));
-    fold(
-        w << 8 & 0xFFFF_FFFF_FF00 | w & 0xFFFF << 48,
-        e as usize - s as usize - 1,
-    )
-}
-
-/// Bit masks of the 64 bytes at `p`: the quotes, and the commas and LFs.
-#[inline(always)]
-unsafe fn masks(p: usize) -> (u64, u64) {
-    let v = [0, 32].map(|i| _mm256_loadu_si256((p + i) as _));
-    let eq = |c: u8| {
-        let m = |v| _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8)));
-        m(v[0]) as u32 as u64 | (m(v[1]) as u64) << 32
-    };
-    (eq(b'"'), eq(b',') | eq(b'\n'))
-}
-
-/// The commas and LFs outside quotes, in order, from a record start
-/// onwards, each with the number of `"` bytes before it (so a field's quotes
-/// are a difference, with no second pass over its bytes). Addresses are
-/// plain numbers: a block may start before the first record.
-#[derive(Default)]
-struct Scan {
-    block: usize,
-    end: usize,
-    /// Separators of the current block not yet returned.
-    bits: u64,
-    /// All ones when the block ends inside quotes.
-    carry: u64,
-    /// Quote bits of the current block, and the quotes before it.
-    q: u64,
-    before: u64,
-}
-
-impl Scan {
-    /// The next separator, or the end of the file once there is none.
-    #[inline]
-    #[target_feature(enable = "pclmulqdq")]
-    unsafe fn next(&mut self) -> (usize, u64) {
-        while self.bits == 0 {
-            self.block += 64;
-            self.before += self.q.count_ones() as u64;
-            if self.block >= self.end {
-                return (self.end, self.before);
+fn parse_regions(data: &[u8]) -> Regions {
+    // Spec 2.3: a code is three bytes `A`-`Z`, so five bits each identify it.
+    let mut index = vec![0u16; 1 << 15];
+    let mut countries = Vec::new();
+    let mut spill = std::collections::HashMap::new();
+    // Ids ascend, so the last line has the largest; size the table once.
+    let last = data.rsplit(|&b| b == b'\n').nth(1).unwrap_or(&[]);
+    let max_id = last
+        .iter()
+        .take_while(|d| d.is_ascii_digit())
+        .fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
+    let mut group_of = vec![0u8; max_id + 1];
+    let mut at = data
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(data.len(), |p| p + 1);
+    while at < data.len() {
+        let mut id = 0usize;
+        if at + 8 <= data.len() {
+            // Branch-free digit run: the id's length varies, so a byte loop mispredicts.
+            let (v, n) = digits(data, at);
+            id = v as usize;
+            at += n;
+        }
+        while data[at] != b',' {
+            id = id * 10 + (data[at] - b'0') as usize;
+            at += 1;
+        }
+        let code = &data[at + 1..at + 4];
+        let slot = &mut index[code.iter().fold(0usize, |a, &c| a << 5 | (c & 31) as usize)];
+        if *slot == 0 {
+            countries.push([code[0], code[1], code[2]]);
+            *slot = countries.len() as u16;
+        }
+        if id >= group_of.len() {
+            group_of.resize(id + 1, 0);
+        }
+        group_of[id] = (*slot).min(255) as u8;
+        if *slot >= 255 {
+            spill.insert(id, *slot);
+        }
+        at += 4;
+        // The common line ends right after the three-letter code.
+        if data[at] == b'\n' {
+            at += 1;
+        } else {
+            while data[at] != b'\n' {
+                at += 1;
             }
-            let (q, seps) = masks(self.block);
-            self.q = q;
-            // Bit i of the prefix XOR is set between an opening quote and its closing quote.
-            let x = _mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(q as i64), _mm_set1_epi8(-1));
-            let inside = _mm_cvtsi128_si64(x) as u64 ^ self.carry;
-            self.carry = (inside as i64 >> 63) as u64;
-            self.bits = seps & !inside;
+            at += 1;
         }
-        let i = self.bits.trailing_zeros();
-        self.bits &= self.bits - 1;
-        let before = (self.q & ((1u64 << i) - 1)).count_ones() as u64;
-        (self.block + i as usize, self.before + before)
+    }
+    Regions {
+        countries,
+        group_of,
+        spill,
     }
 }
 
-/// A name as the table sees it: `(lo, hi)` are the 16 bytes of a name of up
-/// to 16 bytes (`hi` has no `FLAG`), or the first 8 bytes and a 62-bit hash
-/// of the rest for a longer one, or `(CLAIMED, FLAG | READY)` for the empty
-/// name. Every printable ASCII byte (spec 2.2) has its top bit clear, which
-/// frees `FLAG` (the top bit of `hi`), `CLAIMED` (the top bit of `lo`) and
-/// `READY` (the top bit of the byte in the middle of `hi`).
-#[derive(Clone, Copy, Default)]
-struct Key(u64, u64);
+// --- Aggregation --------------------------------------------------------
 
-const FLAG: u64 = 1 << 63;
-const CLAIMED: u64 = 1 << 63;
-const READY: u64 = 1 << 55;
-const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+#[derive(Clone, Default)]
+struct Agg {
+    count: u64,
+    id_sum: u64,
+    amount_sum: i64,
+    amount_min: i64,
+    amount_max: i64,
+    name_bytes: u64,
+    note_bytes: u64,
+    names_distinct: u64,
+}
 
-impl Key {
-    /// The key of the `len` raw name bytes at `s`.
-    #[inline(always)]
-    fn new(s: *const u8, len: usize) -> Key {
-        if len <= 16 {
-            // SAFETY: names end well inside the padded mapping; the mask drops the bytes after them.
-            let v = unsafe { s.cast::<u128>().read_unaligned() };
-            let v = v & u128::MAX.checked_shr(128 - 8 * len as u32).unwrap_or(0);
-            return Key(
-                v as u64 | CLAIMED,
-                (v >> 64) as u64 | READY | FLAG * (len == 0) as u64,
-            );
+impl Agg {
+    fn new() -> Agg {
+        Agg {
+            amount_min: i64::MAX,
+            amount_max: i64::MIN,
+            ..Agg::default()
         }
-        let mut h = len as u64;
-        for i in (8..len).step_by(8) {
-            let w = load8(s.wrapping_add(i)) & (!0 >> (64 - 8 * (len - i).min(8)));
-            h = (h ^ w).wrapping_mul(GOLDEN);
-            h ^= h >> 32;
-        }
-        Key(load8(s) | CLAIMED, FLAG | READY | h >> 1)
     }
 }
 
-/// Names, interned: a key's slot in the open-addressed table is the name's
-/// id. A slot (16 bytes) is claimed by a compare-and-swap of its `lo` word,
-/// and its `hi` word, which always has `READY` set, is stored right after;
-/// a reader whose `lo` matches waits for `hi`. (A 16-byte compare-and-swap
-/// with a plain 16-byte load for readers lets a reader see half a new key:
-/// seen on hybrid cores under load, it counted a name twice.)
-#[derive(Default)]
+// --- Distinct names -----------------------------------------------------
+
+/// Shared by all workers. `slots` is an open-addressing table with
+/// `2 << id_bits` entries; an entry is the hash with its low `id_bits`
+/// bits replaced by the name's number (1 up to `1 << id_bits`, 0 = empty),
+/// so the slot index and the stored bits together cover all 64 hash bits.
+/// `bits` holds one bit per (group, number).
 struct Names {
-    slots: &'static [[AtomicU64; 2]],
-    bits: u32,
-    claimed: AtomicU32,
-    /// Set when the table has run out of room (the caller retries bigger).
+    slots: Vec<AtomicU64>,
+    bits: Vec<AtomicU64>,
+    issued: AtomicUsize,
     full: AtomicBool,
+    id_bits: u32,
+}
+
+/// `n` zeroed atomics; the allocator hands back untouched zero pages, so
+/// only the part that is used costs memory.
+fn zeroed(n: usize) -> Vec<AtomicU64> {
+    let mut v = std::mem::ManuallyDrop::new(vec![0u64; n]);
+    // SAFETY: AtomicU64 has the size and alignment of u64, and zero is a valid value.
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr().cast(), v.len(), v.capacity()) }
 }
 
 impl Names {
-    fn home(&self, k: &Key) -> usize {
-        let h = k.0.wrapping_mul(GOLDEN) ^ k.1.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        (h >> (64 - self.bits)) as usize
+    fn new(id_bits: u32, groups: usize) -> Names {
+        Names {
+            slots: zeroed(2 << id_bits),
+            bits: zeroed(groups << (id_bits - 6)),
+            issued: AtomicUsize::new(0),
+            full: AtomicBool::new(false),
+            id_bits,
+        }
     }
 
-    /// The id of `k`, assigning the next free slot to a new name; 0 if the
-    /// table is full.
-    fn id(&self, k: &Key) -> u32 {
+    /// The number of the name with hash `h`, assigning the next free one to
+    /// a new name; 0 if the table has run out of numbers.
+    #[inline]
+    fn number(&self, h: u64) -> usize {
         let mask = self.slots.len() - 1;
-        let mut i = self.home(k);
+        let mut s = h as usize & mask;
         loop {
-            let [lo, hi] = &self.slots[i];
-            let mut seen = lo.load(Acquire);
-            if seen == 0 {
-                if self.claimed.load(Relaxed) as usize >= mask - mask / 8 {
+            let mut cur = self.slots[s].load(Relaxed);
+            if cur == 0 {
+                let id = self.issued.fetch_add(1, Relaxed) + 1;
+                if id >= 1 << self.id_bits {
                     self.full.store(true, Relaxed);
                     return 0;
                 }
-                seen = lo
-                    .compare_exchange(0, k.0, Acquire, Acquire)
+                let new = (h >> self.id_bits << self.id_bits) | id as u64;
+                cur = self.slots[s]
+                    .compare_exchange(0, new, Relaxed, Relaxed)
                     .unwrap_or_else(|other| other);
-                if seen == 0 {
-                    hi.store(k.1, Release);
-                    self.claimed.fetch_add(1, Relaxed);
-                    return i as u32;
+                if cur == 0 {
+                    cur = new;
                 }
             }
-            if seen == k.0 {
-                // The slot's claimant stores `hi` right after claiming it.
-                let theirs = std::iter::repeat_with(|| hi.load(Acquire)).find(|&h| h != 0);
-                if theirs == Some(k.1) {
-                    return i as u32;
-                }
+            if (cur ^ h) >> self.id_bits == 0 {
+                return cur as usize & ((1 << self.id_bits) - 1);
             }
-            i = (i + 1) & mask;
+            s = (s + 1) & mask;
         }
     }
-}
 
-/// Which names each country has: one bitset (`words` of 64 ids) per country,
-/// shared by all threads. Most marks are first sightings, so they are
-/// atomic ORs.
-struct Seen {
-    words: usize,
-    bits: &'static [AtomicU64],
-}
-
-impl Seen {
-    fn word(&self, c: u32, id: u32) -> &AtomicU64 {
-        &self.bits[c as usize * self.words + id as usize / 64]
-    }
-
-    /// No test first: the read would fetch the line shared, then the OR
-    /// would have to fetch it again exclusive.
-    fn mark(&self, c: u32, id: u32) {
-        self.word(c, id).fetch_or(1 << (id % 64), Relaxed);
-    }
-
-    fn count(&self, c: usize) -> i64 {
-        let row = &self.bits[c * self.words..][..self.words];
+    fn distinct(&self, group: usize) -> u64 {
+        let row = &self.bits[group << (self.id_bits - 6)..(group + 1) << (self.id_bits - 6)];
         row.iter()
-            .map(|w| w.load(Relaxed).count_ones() as i64)
+            .map(|w| w.load(Relaxed).count_ones() as u64)
             .sum()
     }
 }
 
-/// One country's running aggregates (per thread, summed at the end): count,
-/// id sum, name bytes, note bytes, distinct names, amount sum; amount min, max.
-#[derive(Clone, Copy)]
-struct Totals([i64; 6], i64, i64);
+const BATCH: usize = 16;
 
-const NO_TOTALS: Totals = Totals([0; 6], i64::MAX, i64::MIN);
-
-/// Everything the record workers share once the region codes are known:
-/// 15-bit country code -> index, index - 1 -> code, and the name bitsets.
-struct Tables(Vec<u16>, Vec<u16>, Seen);
-
-/// What all workers share: the records, the name table, and `region_id ->
-/// index` as a byte, 255 for the rare index beyond 254 (then see `spill`)
-/// and 0 for no such region.
-struct Shared<'a> {
-    data: &'a [u8],
-    names: Names,
-    country_of: &'static [AtomicU8],
-    spill: Mutex<std::collections::HashMap<usize, u16>>,
+/// Name sightings on their way into the shared structures. A sighting is
+/// first numbered in the table, and one batch later its bit is set, so the
+/// cache misses of up to `BATCH` lookups overlap (prefetches are issued a
+/// batch ahead) instead of each stalling the parser.
+struct Sightings<'a> {
+    names: &'a Names,
+    seen: [(usize, u64); BATCH],
+    seen_len: usize,
+    bits: [(usize, u64); BATCH],
+    bits_len: usize,
 }
 
-/// A parsed record waiting for its lookups: name key, region, id, name
-/// bytes, note bytes, amount in cents.
-type Pending = (Key, u32, u32, u32, u32, i64);
-
-const LAG: usize = 16;
-
-/// A text field's value length: its bytes, less the delimiting quotes and
-/// one byte per `""` pair when it is quoted (`q` counts every quote in it).
-fn text_length(s: usize, e: usize, q: u64) -> u32 {
-    (e - s - if q != 0 { q as usize / 2 + 1 } else { 0 }) as u32
-}
-
-/// Parses every record that starts in `from..to` (offsets of record starts)
-/// into `totals`. A record's region row and name slot are prefetched when it
-/// is parsed; `LAG` records later its country is read, its sums go to
-/// `totals`, its name is looked up and that name's bitset word prefetched;
-/// `LAG` records after that the name is marked.
-#[target_feature(enable = "pclmulqdq")]
-unsafe fn parse_records(sh: &Shared, seen: &Seen, from: usize, to: usize, totals: &mut [Totals]) {
-    let (base, names, table) = (sh.data.as_ptr() as usize, &sh.names, sh.country_of);
-    let mut pending = [Pending::default(); LAG];
-    let mut marks = [(0, 0); LAG];
-    let (mut n, mut last) = (0, usize::MAX); // records started; all of them once known
-    let mut advance = |n: usize, last: usize, pending: &[Pending; LAG]| {
-        let k = n % LAG;
-        if n >= 2 * LAG && n - 2 * LAG < last {
-            seen.mark(marks[k].0, marks[k].1);
+impl<'a> Sightings<'a> {
+    fn new(names: &'a Names) -> Self {
+        Sightings {
+            names,
+            seen: [(0, 0); BATCH],
+            seen_len: 0,
+            bits: [(0, 0); BATCH],
+            bits_len: 0,
         }
-        if n >= LAG && n - LAG < last {
-            let (key, region, id, name_bytes, note_bytes, cents) = pending[k];
-            let mut c = table.get(region as usize).map_or(0, |c| c.load(Relaxed)) as usize;
-            if c == 255 {
-                c = sh.spill.lock().unwrap()[&(region as usize)] as usize;
+    }
+
+    #[inline]
+    fn push(&mut self, group: usize, h: u64) {
+        let slot = &self.names.slots[h as usize & (self.names.slots.len() - 1)];
+        // SAFETY: a prefetch is a hint; it never faults or changes memory.
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
+                (slot as *const AtomicU64).cast(),
+            )
+        };
+        self.seen[self.seen_len] = (group, h);
+        self.seen_len += 1;
+        if self.seen_len == BATCH {
+            self.flush();
+        }
+    }
+
+    /// Sets the bits numbered by the previous batch, then numbers this one.
+    fn flush(&mut self) {
+        for &(word, bit) in &self.bits[..self.bits_len] {
+            self.names.bits[word].fetch_or(bit, Relaxed);
+        }
+        self.bits_len = 0;
+        for &(group, h) in &self.seen[..self.seen_len] {
+            let id = self.names.number(h);
+            if id != 0 {
+                let word = (group << (self.names.id_bits - 6)) + id / 64;
+                let ptr: *const AtomicU64 = &self.names.bits[word];
+                // SAFETY: a hint to get the line ready for writing; it never faults.
+                unsafe {
+                    std::arch::asm!("prefetchw [{0}]", in(reg) ptr, options(nostack, preserves_flags))
+                };
+                self.bits[self.bits_len] = (word, 1 << (id % 64));
+                self.bits_len += 1;
             }
-            let Totals(sum, min, max) = &mut totals[c];
-            let add = [1, id.into(), name_bytes.into(), note_bytes.into(), 0, cents];
-            sum.iter_mut().zip(add).for_each(|(a, b)| *a += b);
-            (*min, *max) = ((*min).min(cents), (*max).max(cents));
-            marks[k] = (c as u32, names.id(&key));
-            prefetch(seen.word(marks[k].0, marks[k].1));
         }
+        self.seen_len = 0;
+    }
+
+    fn finish(mut self) {
+        self.flush();
+        self.flush();
+    }
+}
+
+#[inline]
+fn mum(a: u64, b: u64) -> u64 {
+    let p = a as u128 * b as u128;
+    p as u64 ^ (p >> 64) as u64
+}
+
+/// `data[at..at + 32]` as four words, the bytes from `left` on zeroed.
+#[inline]
+fn block(data: &[u8], at: usize, left: usize) -> [u64; 4] {
+    // The first `left` bytes of this 64-byte window's 32-byte slice are 0xFF.
+    static EDGE: [u8; 64] = {
+        let mut t = [0u8; 64];
+        let mut i = 0;
+        while i < 32 {
+            t[i] = 0xFF;
+            i += 1;
+        }
+        t
     };
+    let (src, mask) = (&data[at..at + 32], &EDGE[32 - left.min(32)..][..32]);
+    let mut w = [0u64; 4];
+    // SAFETY: AVX2 is part of the build target; `src`, `mask` and `w` are 32 bytes each.
+    unsafe {
+        let v = _mm256_and_si256(
+            _mm256_loadu_si256(src.as_ptr().cast::<__m256i>()),
+            _mm256_loadu_si256(mask.as_ptr().cast::<__m256i>()),
+        );
+        _mm256_storeu_si256(w.as_mut_ptr().cast::<__m256i>(), v);
+    }
+    w
+}
 
-    let mut sep = Scan {
-        block: base + from - 64,
-        end: base + sh.data.len(),
-        ..Scan::default()
+/// 64-bit hash of `data[from..to]`; `data` must extend 32 bytes past `to`.
+#[inline]
+fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
+    let mut h = (to - from) as u64 ^ 0x9E37_79B9_7F4A_7C15;
+    let mut at = from;
+    loop {
+        let w = block(data, at, to.saturating_sub(at));
+        h = mum(
+            mum(w[0] ^ 0xA076_1D64_78BD_642F, w[1] ^ 0xE703_7ED1_A0B4_28DB) ^ h,
+            mum(w[2] ^ 0x8EBC_6AF0_9C88_C6E3, w[3] ^ 0x5899_65CC_7537_4CC3),
+        );
+        at += 32;
+        if at >= to {
+            return h;
+        }
+    }
+}
+
+// --- Record parsing (spec section 2.1) ----------------------------------
+
+/// Bit mask of the `"` bytes in `data[at..at + 32]`.
+#[inline]
+fn quotes(data: &[u8], at: usize) -> u32 {
+    let block = &data[at..at + 32];
+    // SAFETY: AVX2 is part of the build target (.cargo/config.toml, x86-64-v3)
+    // and `block` is exactly 32 readable bytes.
+    unsafe {
+        let v = _mm256_loadu_si256(block.as_ptr().cast::<__m256i>());
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'"' as i8))) as u32
+    }
+}
+
+/// A `text` field starting at `at`: returns (content start, content end,
+/// number of `""` escapes inside, index just past the field's `,`).
+/// The value is the content with every `""` read as one `"`.
+#[inline]
+fn text_field(data: &[u8], at: usize) -> (usize, usize, usize, usize) {
+    if data[at] != b'"' {
+        let c = at
+            + data[at..]
+                .iter()
+                .position(|&b| b == b',')
+                .unwrap_or(data.len() - at - 1);
+        return (at, c, 0, c + 1);
+    }
+    let start = at + 1;
+    let (mut j, mut pairs) = (start, 0);
+    loop {
+        let m = quotes(data, j);
+        if m == 0 {
+            j += 32;
+            continue;
+        }
+        let q = j + m.trailing_zeros() as usize;
+        if data[q + 1] == b'"' {
+            pairs += 1;
+            j = q + 2;
+        } else {
+            // Closing quote; a name or note is always followed by `,`.
+            return (start, q, pairs, q + 2);
+        }
+    }
+}
+
+/// The run of ASCII digits at `data[at..]` as (value, length).
+#[inline]
+fn digits(data: &[u8], at: usize) -> (u64, usize) {
+    let w = u64::from_le_bytes(data[at..at + 8].try_into().unwrap());
+    let not_digit = (w & 0xF0F0_F0F0_F0F0_F0F0) ^ 0x3030_3030_3030_3030;
+    let mut n = not_digit.trailing_zeros() as usize / 8;
+    // Digits to the top bytes, so the first one lands in the highest decimal place.
+    let w = (w << (64 - 8 * n.max(1)) & 0x0F0F_0F0F_0F0F_0F0F).wrapping_mul(2561) >> 8;
+    let w = ((w & 0x00FF_00FF_00FF_00FF).wrapping_mul(6_553_601)) >> 16;
+    let mut v = ((w & 0x0000_FFFF_0000_FFFF).wrapping_mul(42_949_672_960_001)) >> 32;
+    while n >= 8 && data[at + n].is_ascii_digit() {
+        v = v * 10 + (data[at + n] - b'0') as u64;
+        n += 1;
+    }
+    (v, n)
+}
+
+/// Parses every record in `data[start..end]` (both record boundaries; the
+/// 64 bytes after `end` must be readable) into `groups`.
+fn parse_records(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    regions: &Regions,
+    sightings: &mut Sightings,
+    groups: &mut [Agg],
+) {
+    let unmatched = regions.countries.len();
+    let mut i = start;
+    while i < end {
+        // The hardware prefetcher stops at page boundaries; pull the stream in ahead.
+        // SAFETY: a prefetch is a hint; it never faults, even past the mapping.
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
+                data.as_ptr().wrapping_add(i + 1536).cast(),
+            )
+        };
+        i += 3 * (data[i] == 0xEF) as usize;
+        let (id, n) = digits(data, i);
+        let (ns, ne, npairs, next) = text_field(data, i + n + 1);
+        let (ts, te, tpairs, next) = text_field(data, next);
+        let (region, n) = digits(data, next);
+        let mut j = next + n + 1;
+        let neg = data[j] == b'-';
+        j += neg as usize;
+        let (whole, n) = digits(data, j);
+        j += n + 1;
+        let cents =
+            (whole * 100 + (data[j] - b'0') as u64 * 10 + (data[j + 1] - b'0') as u64) as i64;
+        let cents = if neg { -cents } else { cents };
+        j += 2;
+        // CRLF or LF; a missing final terminator ends the loop either way.
+        i = j + 1 + (data[j] == b'\r') as usize;
+
+        let g = match regions.group_of.get(region as usize) {
+            Some(&255) => regions.spill[&(region as usize)] as usize - 1,
+            Some(&g) if g != 0 => g as usize - 1,
+            _ => unmatched,
+        };
+        let agg = &mut groups[g];
+        agg.count += 1;
+        agg.id_sum += id;
+        agg.amount_sum += cents;
+        agg.amount_min = agg.amount_min.min(cents);
+        agg.amount_max = agg.amount_max.max(cents);
+        agg.name_bytes += (ne - ns - npairs) as u64;
+        agg.note_bytes += (te - ts - tpairs) as u64;
+        sightings.push(g, hash_name(data, ns, ne));
+    }
+}
+
+/// First record boundary after `from`: the position after an LF that is
+/// followed by a digit (next id) or a BOM. Spec 2.2 makes names letters and
+/// notes lowercase words, so an LF inside a quoted field is followed by a
+/// letter or a quote.
+fn cut(data: &[u8], from: usize) -> usize {
+    let mut i = from;
+    while i + 1 < data.len()
+        && !(data[i] == b'\n' && (data[i + 1].is_ascii_digit() || data[i + 1] == 0xEF))
+    {
+        i += 1;
+    }
+    (i + 1).min(data.len())
+}
+
+/// Bytes at the end of the file that are copied behind padding and parsed
+/// last, so no chunk's SIMD loads can run past the mapping.
+const TAIL: usize = 8192;
+const CHUNKS_PER_THREAD: usize = 32;
+
+/// Drops this worker's page-table entries for a consumed chunk so process
+/// exit has less to tear down; the pages stay in the page cache.
+#[cfg(unix)]
+fn release(data: &[u8], from: usize, to: usize) {
+    extern "C" {
+        fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    }
+    let base = data.as_ptr() as usize;
+    let (a, b) = ((base + from + 4095) & !4095, (base + to) & !4095);
+    if b > a {
+        // SAFETY: a page-aligned range inside our read-only file mapping that
+        // is never read again; MADV_DONTNEED on it only drops mappings.
+        unsafe { madvise(a as *mut u8, b - a, 4) };
+    }
+}
+
+#[cfg(not(unix))]
+fn release(_: &[u8], _: usize, _: usize) {}
+
+fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Names) -> Vec<Agg> {
+    let n_groups = regions.countries.len() + 1;
+    let tail_at = if data.len() - body > 2 * TAIL {
+        cut(data, data.len() - TAIL)
+    } else {
+        body
     };
-    let mut p = base + from;
-    while p < base + to {
-        let (f1, q1) = sep.next(); // the commas after id, name, note, region
-        let (f2, q2) = sep.next();
-        let (f3, q3) = sep.next();
-        let f4 = sep.next().0;
-        let eol = sep.next().0; // LF, or the end of the file
-        p += 3 * (*(p as *const u8) == 0xEF) as usize; // a byte order mark before the id
-        let id = digits(p as _, f1 as _);
-        let region = digits((f3 + 1) as _, f4 as _);
-        let amount_end = eol - (*(eol as *const u8).sub(1) == b'\r') as usize;
-        let negative = *((f4 + 1) as *const u8) == b'-';
-        let cents = money((f4 + 1 + negative as usize) as _, amount_end as _) as i64;
+    let chunks = threads * CHUNKS_PER_THREAD;
+    let bound = |k: usize| match k {
+        0 => body,
+        k if k == chunks => tail_at,
+        k => cut(data, body + (tail_at - body) * k / chunks).min(tail_at),
+    };
+    let next = AtomicUsize::new(0);
+    let mut parts: Vec<Vec<Agg>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut groups = vec![Agg::new(); n_groups];
+                    let mut sightings = Sightings::new(names);
+                    loop {
+                        let k = next.fetch_add(1, Relaxed);
+                        if k >= chunks {
+                            sightings.finish();
+                            return groups;
+                        }
+                        parse_records(
+                            data,
+                            bound(k),
+                            bound(k + 1),
+                            regions,
+                            &mut sightings,
+                            &mut groups,
+                        );
+                        release(data, bound(k), bound(k + 1));
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("parse worker panicked"))
+            .collect()
+    });
 
-        // Region ids are below 10^7 (fit u32); one past the table means none.
-        let r = region.min(table.len() as u64) as u32;
-        prefetch(table.as_ptr().wrapping_add(r as usize));
-        let quoted = (q2 != q1) as usize;
-        advance(n, last, &pending);
-        let key = Key::new((f1 + 1 + quoted) as _, f2 - f1 - 1 - 2 * quoted);
-        let (name_bytes, note_bytes) = (
-            text_length(f1 + 1, f2, q2 - q1),
-            text_length(f2 + 1, f3, q3 - q2),
-        );
-        pending[n % LAG] = (
-            key,
-            r,
-            id as u32,
-            name_bytes,
-            note_bytes,
-            if negative { -cents } else { cents },
-        );
-        prefetch(&names.slots[names.home(&key)]);
-        n += 1;
-        p = eol + 1;
+    let mut tail = data[tail_at..].to_vec();
+    tail.resize(tail.len() + 64, 0);
+    let mut groups = vec![Agg::new(); n_groups];
+    let mut sightings = Sightings::new(names);
+    parse_records(
+        &tail,
+        0,
+        data.len() - tail_at,
+        regions,
+        &mut sightings,
+        &mut groups,
+    );
+    sightings.finish();
+    parts.push(groups);
+
+    let mut out = vec![Agg::new(); n_groups];
+    for part in &parts {
+        for (dst, src) in out.iter_mut().zip(part) {
+            if src.count == 0 {
+                continue;
+            }
+            dst.count += src.count;
+            dst.id_sum += src.id_sum;
+            dst.amount_sum += src.amount_sum;
+            dst.amount_min = dst.amount_min.min(src.amount_min);
+            dst.amount_max = dst.amount_max.max(src.amount_max);
+            dst.name_bytes += src.name_bytes;
+            dst.note_bytes += src.note_bytes;
+        }
     }
-    last = n;
-    while n < last + 2 * LAG {
-        advance(n, last, &pending);
-        n += 1;
+    out
+}
+
+fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
+    let n_groups = regions.countries.len() + 1;
+    let body = data
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(data.len(), |p| p + 1); // skip the BOM + header line
+    if body >= data.len() {
+        return vec![Agg::new(); n_groups];
+    }
+    // Names are numbered from a table sized for 100 k distinct names (the
+    // generator's pool); if there are more, start over with a bigger one.
+    let mut id_bits = 17;
+    loop {
+        let names = Names::new(id_bits, n_groups);
+        let mut out = scan(data, body, regions, threads.max(1), &names);
+        if !names.full.load(Relaxed) {
+            out.iter_mut()
+                .enumerate()
+                .for_each(|(g, a)| a.names_distinct = names.distinct(g));
+            // The process ends soon; freeing the tables would only cost time.
+            std::mem::forget(names);
+            return out;
+        }
+        id_bits += 2;
     }
 }
 
-/// The `(region id, country code)` of every line of `r` (whole lines, each
-/// `<digits>,<ABC>` and an LF; spec 2.3 allows no other bytes). The code is
-/// 15 bits, five per letter, so numeric order is alphabetical order.
-fn region_lines(r: &[u8]) -> impl Iterator<Item = (usize, usize)> + '_ {
-    let mut at = 0;
-    std::iter::from_fn(move || {
-        let line = r.get(at..).filter(|l| !l.is_empty())?;
-        // The digits (bytes 0x30..=0x39) end at the first byte whose high nibble is not 3.
-        let n = ((load8(line.as_ptr()) ^ 0x3030_3030_3030_3030) & 0xF0F0_F0F0_F0F0_F0F0)
-            .trailing_zeros()
-            / 8;
-        let end = line[n as usize..].as_ptr();
-        let code = line[n as usize + 1..][..3]
-            .iter()
-            .fold(0, |a, &c| a << 5 | (c & 31) as usize);
-        at += n as usize + 5;
-        Some((digits(line.as_ptr(), end) as usize, code))
-    })
-}
-
-/// Piece `k` of `n` of `data[from..]` starts here: just after the first
-/// `delim` at or after the nominal cut, so every piece starts on a record
-/// (or line) boundary and the cuts of different `k` are consistent. Found by
-/// the thread that needs it, so the file's pages are first touched in parallel.
-fn cut(data: &[u8], from: usize, n: usize, delim: &[u8], k: usize) -> usize {
-    if k == 0 {
-        return from;
-    }
-    let at = from + (data.len() - from) * k / n;
-    let hit = data[at..].windows(delim.len()).position(|w| w == delim);
-    hit.map_or(data.len(), |h| at + h + delim.len())
-}
+// --- Output (spec section 4) --------------------------------------------
 
 /// Integer cents as `-?<int>.<2 digits>`; zero is `0.00`, never `-0.00`.
 fn cents(c: i64) -> String {
-    let a = c.unsigned_abs();
-    format!("{}{}.{:02}", if c < 0 { "-" } else { "" }, a / 100, a % 100)
+    format!(
+        "{}{}.{:02}",
+        if c < 0 { "-" } else { "" },
+        c.abs() / 100,
+        c.abs() % 100
+    )
 }
 
-/// The aggregates for the two files, or `None` if a name table of `2^bits`
-/// slots was too small. Both inputs must be followed by 64 readable bytes
-/// (see `map_file`).
-fn run(records: &[u8], regions: &[u8], threads: usize, bits: u32) -> Option<Vec<u8>> {
-    let line = |d: &[u8]| {
-        d.iter()
-            .position(|&b| b == b'\n')
-            .map_or(d.len(), |p| p + 1)
-    };
-    // Ids ascend, so the last line of regions.csv holds the largest.
-    let last = regions.rsplit(|&b| b == b'\n').nth(1).unwrap_or(&[]);
-    let max_id = last
-        .iter()
-        .take_while(|d| d.is_ascii_digit())
-        .fold(0, |a, &d| a * 10 + (d - b'0') as usize);
-    let names = Names {
-        slots: zeroed(1 << bits),
-        bits,
-        ..Names::default()
-    };
-    let sh = Shared {
-        data: records,
-        names,
-        country_of: zeroed(max_id + 1),
-        spill: Mutex::default(),
-    };
-    let (first, start) = (line(regions), line(records));
-    let present: Vec<AtomicU8> = (0..1 << 15).map(|_| AtomicU8::new(0)).collect();
-    let tables = OnceLock::new();
-    let (sync, claim) = (Barrier::new(threads), AtomicUsize::new(0));
-    // Records are cut after CRLFs into pieces claimed in turn.
-    let pieces = 32 * threads;
-
-    let work = |t: usize| {
-        let lines = || {
-            region_lines(
-                &regions[cut(regions, first, threads, b"\n", t)
-                    ..cut(regions, first, threads, b"\n", t + 1)],
-            )
-        };
-        populate(sh.country_of, t, threads);
-        populate(sh.names.slots, t, threads);
-        lines().for_each(|(_, c)| present[c].store(1, Relaxed));
-        sync.wait();
-        let Tables(index_of, codes, seen) = tables.get_or_init(|| {
-            let (mut index_of, mut codes) = (vec![0; 1 << 15], vec![]);
-            for (k, _) in present
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| p.load(Relaxed) != 0)
-            {
-                codes.push(k as u16);
-                index_of[k] = codes.len() as u16;
-            }
-            let words = (1 << bits) / 64;
-            let seen = Seen {
-                words,
-                bits: zeroed((codes.len() + 1) * words),
-            };
-            Tables(index_of, codes, seen)
-        });
-        populate(seen.bits, t, threads);
-        for (id, c) in lines() {
-            sh.country_of[id].store(index_of[c].min(255) as u8, Relaxed);
-            if index_of[c] >= 255 {
-                sh.spill.lock().unwrap().insert(id, index_of[c]);
-            }
-        }
-        sync.wait();
-        let mut totals = vec![NO_TOTALS; codes.len() + 1];
-        while !sh.names.full.load(Relaxed) {
-            let k = claim.fetch_add(1, Relaxed);
-            if k >= pieces {
-                break;
-            }
-            let (from, to) = (
-                cut(records, start, pieces, b"\r\n", k),
-                cut(records, start, pieces, b"\r\n", k + 1),
-            );
-            // SAFETY: PCLMULQDQ is in every CPU the scoring box can have (Raptor Lake).
-            unsafe { parse_records(&sh, seen, from, to, &mut totals) };
-        }
-        sync.wait();
-        for c in (t..totals.len()).step_by(threads) {
-            totals[c].0[4] = seen.count(c);
-        }
-        totals
-    };
-    let parts: Vec<Vec<Totals>> = std::thread::scope(|s| {
-        let handles: Vec<_> = (0..threads).map(|t| s.spawn(move || work(t))).collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    if sh.names.full.load(Relaxed) {
-        return None;
-    }
-
-    let codes = &tables.get().unwrap().1;
-    let mut out = String::new();
-    for i in 1..=codes.len() + 1 {
-        let c = i % (codes.len() + 1); // countries 1..=N, then _UNMATCHED (0)
-        let mut all = NO_TOTALS;
-        for Totals(sum, min, max) in parts.iter().map(|p| p[c]) {
-            all.0.iter_mut().zip(sum).for_each(|(a, b)| *a += b);
-            (all.1, all.2) = (all.1.min(min), all.2.max(max));
-        }
-        let [count, id_sum, name_bytes, note_bytes, distinct, amount_sum] = all.0;
-        if count > 0 {
-            let key = codes
-                .get(c.wrapping_sub(1))
-                .map_or("_UNMATCHED".into(), |&k| {
-                    String::from_utf8(
-                        [k >> 10, k >> 5 & 31, k & 31]
-                            .map(|v| b'@' + v as u8)
-                            .to_vec(),
-                    )
-                    .unwrap()
-                }); // 'A' & 31 is 1
-            let _ = writeln!(
-                out,
-                "{key} {count} {id_sum} {} {} {} {distinct} {name_bytes} {note_bytes}",
-                cents(amount_sum),
-                cents(all.1),
-                cents(all.2)
-            );
-        }
-    }
-    Some(out.into_bytes())
-}
-
-fn main() -> std::io::Result<()> {
-    let var = |name: &str, default: &str| std::env::var(name).unwrap_or(default.into());
-    // With transparent huge pages, a block written only in part can be backed
-    // by a whole 2 MB page; plain pages keep memory to what is written.
-    // SAFETY: PR_SET_THP_DISABLE takes one flag and three zeros.
-    unsafe { prctl(41, 1, 0, 0, 0) };
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let (records, regions) = (
-        map_file(&var("RECORDS_PATH", "/data/records.csv"))?,
-        map_file(&var("REGIONS_PATH", "/data/regions.csv"))?,
+fn write_line(out: &mut Vec<u8>, key: &[u8], a: &Agg) {
+    out.extend_from_slice(key);
+    let (min, max, sum) = (
+        cents(a.amount_min),
+        cents(a.amount_max),
+        cents(a.amount_sum),
     );
-    std::fs::write(
-        var("OUTPUT_PATH", "/out/aggregates.txt"),
-        solve(records, regions, threads),
-    )?;
-    // Skip the destructors and the runtime's teardown.
-    std::process::exit(0)
+    let rest = format!(
+        " {} {} {sum} {min} {max} {} {} {}\n",
+        a.count, a.id_sum, a.names_distinct, a.name_bytes, a.note_bytes
+    );
+    out.extend_from_slice(rest.as_bytes());
 }
 
-/// The contents of `aggregates.txt`; a name table too small for the number
-/// of distinct names is replaced by one twice the size and the run repeated.
-fn solve(records: &[u8], regions: &[u8], threads: usize) -> Vec<u8> {
-    (17..)
-        .find_map(|bits| run(records, regions, threads.max(1), bits))
-        .unwrap()
+fn render(regions: &Regions, groups: &[Agg]) -> Vec<u8> {
+    let mut order: Vec<usize> = (0..regions.countries.len()).collect();
+    order.sort_unstable_by_key(|&g| regions.countries[g]);
+    let mut out = Vec::new();
+    for g in order {
+        if groups[g].count > 0 {
+            write_line(&mut out, &regions.countries[g], &groups[g]);
+        }
+    }
+    // `_` (0x5F) sorts after every `[A-Z]{3}` code, so it is always last.
+    let unmatched = &groups[regions.countries.len()];
+    if unmatched.count > 0 {
+        write_line(&mut out, b"_UNMATCHED", unmatched);
+    }
+    out
+}
+
+fn main() {
+    let var =
+        |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_string());
+    let (records, regions, output) = (
+        var("RECORDS_PATH", "/data/records.csv"),
+        var("REGIONS_PATH", "/data/regions.csv"),
+        var("OUTPUT_PATH", "/out/aggregates.txt"),
+    );
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let result = map_file(&regions).and_then(|regions_data| {
+        let regions = parse_regions(regions_data);
+        let groups = aggregate(map_file(&records)?, &regions, threads);
+        std::fs::write(&output, render(&regions, &groups))
+    });
+    if let Err(e) = result {
+        eprintln!("track-c: failed: {e}");
+        std::process::exit(1);
+    }
+    // Skip the destructors and the runtime's teardown.
+    std::process::exit(0);
 }
 
 #[cfg(test)]

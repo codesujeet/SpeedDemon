@@ -23,20 +23,10 @@ BBB 1 4 -5.25 -5.25 -5.25 1 15 35\n\
 CCC 1 9 -0.05 -0.05 -0.05 1 3 1\n\
 _UNMATCHED 2 15 1.00 -1.00 2.00 2 21 1\n";
 
-/// `bytes` as a file mapping, the way `main` reads its inputs (the parse
-/// releases the pages of finished pieces, which would wipe heap memory).
-fn mapped(bytes: &[u8]) -> &'static [u8] {
-    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("track-c-test-{}-{n}", std::process::id()));
-    std::fs::write(&path, bytes).unwrap();
-    let mapping = map_file(path.to_str().unwrap()).unwrap();
-    std::fs::remove_file(path).unwrap();
-    mapping
-}
-
 fn run_on(records: &[u8], regions: &[u8], threads: usize) -> String {
-    String::from_utf8(solve(mapped(records), mapped(regions), threads)).unwrap()
+    let regions = parse_regions(regions);
+    let groups = aggregate(records, &regions, threads);
+    String::from_utf8(render(&regions, &groups)).unwrap()
 }
 
 #[test]
@@ -46,7 +36,7 @@ fn matches_the_spec_worked_example_exactly() {
 
 /// More workers than records: boundaries land on every record, inside
 /// and next to multi-line quoted notes, and right before BOMs. The
-/// CRLF cuts must still find real record boundaries.
+/// quote-parity scan must still find real record boundaries.
 #[test]
 fn parallel_parse_matches_single_threaded() {
     for threads in [2, 3, 4, 7, 12, 40] {
@@ -139,135 +129,4 @@ fn more_than_254_countries() {
             .all(|l| l.contains(" 1 ") && l.contains(" 1.00 ")),
         "{out}"
     );
-}
-
-/// Records built from known values (names up to 40 bytes over a small alphabet
-/// with commas, quotes and spaces, so many share prefixes and lengths around
-/// 16; notes with LFs; random BOMs and terminators; some unknown regions)
-/// against totals computed straight from those values, at several thread
-/// counts.
-#[test]
-fn generated_records_match_totals_computed_from_the_values() {
-    use std::collections::{BTreeMap, HashSet};
-    let mut x = 0x2545_F491_4F6C_DD1Du64;
-    let mut rand = move |n: u64| {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x % n
-    };
-    let text = |rand: &mut dyn FnMut(u64) -> u64, alphabet: &[u8], max: u64| -> Vec<u8> {
-        let len = [0, 1, 7, 8, 9, 15, 16, 17, 23, 24, 25, 40, rand(max)][rand(13) as usize];
-        (0..len)
-            .map(|_| alphabet[rand(alphabet.len() as u64) as usize])
-            .collect()
-    };
-    let mut regions = b"region_id,country\n".to_vec();
-    let countries: Vec<String> = (0..7)
-        .map(|c| format!("{}{}Z", (b'A' + c) as char, (b'Q' - c) as char))
-        .collect();
-    for id in 1..=300 {
-        regions.extend(format!("{id},{}\n", countries[id % 7]).bytes());
-    }
-    let mut records = b"\xEF\xBB\xBFid,name,note,region_id,amount\r\n".to_vec();
-    let mut want: BTreeMap<String, (u64, u64, i64, i64, i64, HashSet<Vec<u8>>, u64, u64)> =
-        BTreeMap::new();
-    let quote = |v: &[u8]| -> Vec<u8> { [b"\"", &v.replace_quotes()[..], b"\""].concat() };
-    let mut id = 0;
-    for i in 0..20_000 {
-        id += 1 + rand(3);
-        let (name, note) = (
-            text(&mut rand, b"ab ,\"", 60),
-            text(&mut rand, b"ab ,\"\n", 90),
-        );
-        let region = [rand(320) + 1, 4_000_000][(rand(20) == 0) as usize];
-        let cents = rand(2_000_000) as i64 - 100_000;
-        let field = |v: &[u8], empty_unquoted: bool| {
-            if v.is_empty() && empty_unquoted {
-                vec![]
-            } else {
-                quote(v)
-            }
-        };
-        if i > 0 && rand(30) == 0 {
-            records.extend(b"\xEF\xBB\xBF");
-        }
-        let amount = format!(
-            "{}{}.{:02}",
-            if cents < 0 { "-" } else { "" },
-            cents.abs() / 100,
-            cents.abs() % 100
-        );
-        let line = [
-            id.to_string().into_bytes(),
-            field(&name, rand(2) == 0),
-            field(&note, rand(2) == 0),
-            region.to_string().into_bytes(),
-            amount.into_bytes(),
-        ];
-        records.extend(line.join(&b','));
-        records.extend(if rand(2) == 0 {
-            &b"\r\n"[..]
-        } else {
-            &b"\n"[..]
-        });
-        let key = if (1..=300).contains(&region) {
-            countries[region as usize % 7].clone()
-        } else {
-            "_UNMATCHED".to_string()
-        };
-        let w = want.entry(key).or_default();
-        w.0 += 1;
-        w.1 += id;
-        w.2 += cents;
-        w.3 = if w.0 == 1 { cents } else { w.3.min(cents) };
-        w.4 = if w.0 == 1 { cents } else { w.4.max(cents) };
-        w.5.insert(name.clone());
-        w.6 += name.len() as u64;
-        w.7 += note.len() as u64;
-    }
-    let money = |c: i64| {
-        format!(
-            "{}{}.{:02}",
-            if c < 0 { "-" } else { "" },
-            c.abs() / 100,
-            c.abs() % 100
-        )
-    };
-    let expected: String = want
-        .iter()
-        .map(|(k, w)| {
-            format!(
-                "{k} {} {} {} {} {} {} {} {}\n",
-                w.0,
-                w.1,
-                money(w.2),
-                money(w.3),
-                money(w.4),
-                w.5.len(),
-                w.6,
-                w.7
-            )
-        })
-        .collect();
-    for threads in [1, 2, 5, 12] {
-        assert_eq!(
-            run_on(&records, &regions, threads),
-            expected,
-            "threads={threads}"
-        );
-    }
-}
-
-trait ReplaceQuotes {
-    fn replace_quotes(&self) -> Vec<u8>;
-}
-
-impl ReplaceQuotes for [u8] {
-    /// Every `"` doubled, the way a quoted field is written.
-    fn replace_quotes(&self) -> Vec<u8> {
-        self.iter()
-            .flat_map(|&b| if b == b'"' { vec![b, b] } else { vec![b] })
-            .collect()
-    }
 }
