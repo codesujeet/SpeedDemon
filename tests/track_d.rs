@@ -241,3 +241,21 @@ fn region_order_names_every_node_once() {
     assert_eq!(bidirectional_dijkstra(&fwd, &rev, id[900], id[1], &mut scratch), Some(4 * 899));
     assert_eq!(bidirectional_dijkstra(&fwd, &rev, id[900], id[1100], &mut scratch), None);
 }
+
+/// The word-at-a-time number reader agrees with a plain digit loop on numbers of every
+/// length from 1 to 10 digits, next to the end of the data and with other separators.
+#[test]
+fn numbers_of_every_length_parse_exactly() {
+    let mut values: Vec<u32> = vec![0, 1, 9, 10, 99, 1_234_567, 9_999_999, 10_000_000, 99_999_999, 100_000_000, 4_294_967_295];
+    values.extend((0..10).map(|d| 10u32.pow(d)));
+    values.extend((1..10).map(|d| 10u32.pow(d) - 1));
+    let mut text = String::new();
+    for (i, v) in values.iter().enumerate() {
+        text += &format!("{v} {} {}\n", values[(i * 7 + 3) % values.len()], values[i / 2]);
+    }
+    let want: Vec<[u32; 3]> = values.iter().enumerate().map(|(i, &v)| [v, values[(i * 7 + 3) % values.len()], values[i / 2]]).collect();
+    assert_eq!(numbers::<3>(text.as_bytes()).collect::<Vec<_>>(), want);
+    // No trailing newline, and a CR LF line ending, still parse.
+    assert_eq!(numbers::<2>(b"12345 678").collect::<Vec<_>>(), vec![[12345, 678]]);
+    assert_eq!(numbers::<2>(b"1 2\r\n3 4\r\n").collect::<Vec<_>>(), vec![[1, 2], [3, 4]]);
+}
