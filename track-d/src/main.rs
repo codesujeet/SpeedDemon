@@ -153,21 +153,49 @@ impl Csr {
 /// owns their key (worker `w` owns keys `n*w/workers..n*(w+1)/workers`); then
 /// each worker counts and places only its own edges, into its own slice of the
 /// adjacency array, so no counter or slot is shared and nothing is atomic.
+/// A filed edge is one `u64`: key within the worker's range, neighbour and
+/// weight in a field of whatever bits are left. A weight that does not fit
+/// (all ones, or more) is filed whole in the part's short `heavy` list.
 /// `hint` is the expected number of edges a part files per worker.
 fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, parts: usize, hint: usize, scan: impl Fn(usize) -> I + Sync) -> Csr {
-    let filed = par(parts, |p| {
-        let mut owned: Vec<Vec<(u32, u32, u32)>> = (0..workers).map(|_| Vec::with_capacity(hint)).collect();
-        scan(p).for_each(|e| owned[e.0 as usize * workers / n].push(e));
-        owned
-    });
     let bounds = |w: usize| (n * w).div_ceil(workers);
     let layout = Csr::with_nodes(n);
+    let id_bits = 32 - layout.wb;
+    let key_bits = (usize::BITS - n.div_ceil(workers).saturating_sub(1).leading_zeros()).max(1);
+    let weight_bits = 64 - id_bits - key_bits;
+    let (id_mask, weight_mask) = ((1u64 << id_bits) - 1, (1u64 << weight_bits) - 1);
+    let filed = par(parts, |p| {
+        let mut owned: Vec<Vec<u64>> = (0..workers).map(|_| Vec::with_capacity(hint)).collect();
+        let mut heavy = Vec::new();
+        for e in scan(p) {
+            let owner = e.0 as usize * workers / n;
+            let key = (e.0 as usize - bounds(owner)) as u64;
+            owned[owner].push(key << (id_bits + weight_bits) | (e.1 as u64) << weight_bits | (e.2 as u64).min(weight_mask));
+            if e.2 as u64 >= weight_mask {
+                heavy.push(e);
+            }
+        }
+        (owned, heavy)
+    });
+    // Calls `f(key, neighbour, weight)` for each edge worker `w` owns.
+    let each_edge = |w: usize, f: &mut dyn FnMut(usize, u32, u32)| {
+        let lo = bounds(w);
+        for (owned, heavy) in &filed {
+            for &e in &owned[w] {
+                let weight = e & weight_mask;
+                if weight != weight_mask {
+                    f(lo + (e >> (id_bits + weight_bits)) as usize, (e >> weight_bits & id_mask) as u32, weight as u32);
+                }
+            }
+            for &(k, o, wt) in heavy.iter().filter(|e| e.0 as usize * workers / n == w) {
+                f(k as usize, o, wt);
+            }
+        }
+    };
     let degrees = par(workers, |w| {
         let lo = bounds(w);
         let mut degree = vec![0u32; bounds(w + 1) - lo];
-        for e in filed.iter().flat_map(|owned| &owned[w]) {
-            degree[e.0 as usize - lo] += layout.words(e.2);
-        }
+        each_edge(w, &mut |key, _, weight| degree[key - lo] += layout.words(weight));
         degree
     });
     let mut row_offset = vec![0u32; n + 1];
@@ -181,13 +209,13 @@ fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, part
     par(workers, |w| {
         let lo = bounds(w);
         let mut cursor = row_offset[lo..bounds(w + 1)].to_vec();
-        for &(key, other, weight) in filed.iter().flat_map(|owned| &owned[w]) {
-            let c = &mut cursor[key as usize - lo];
+        each_edge(w, &mut |key, other, weight| {
+            let c = &mut cursor[key - lo];
             // SAFETY: the slots of rows [lo, hi) belong to this worker alone, and `*c` walks
             // exactly the words counted for the row.
             unsafe { layout.put_edge(&out, *c as usize, other, weight) };
             *c += layout.words(weight);
-        }
+        });
     });
     Csr { row_offset, adj, ..layout }
 }
