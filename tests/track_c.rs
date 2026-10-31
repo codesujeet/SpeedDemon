@@ -40,17 +40,17 @@ fn matches_the_spec_worked_example_exactly() {
 #[test]
 fn parallel_parse_matches_single_threaded() {
     for threads in [2, 3, 4, 7, 12, 40] {
-        assert_eq!(run_on(WORKED_RECORDS, WORKED_REGIONS, threads), WORKED_OUTPUT, "threads={threads}");
+        assert_eq!(
+            run_on(WORKED_RECORDS, WORKED_REGIONS, threads),
+            WORKED_OUTPUT,
+            "threads={threads}"
+        );
     }
 }
 
 #[test]
 fn cents_format_matches_spec() {
-    let fmt = |c| {
-        let mut v = Vec::new();
-        write_cents(&mut v, c);
-        String::from_utf8(v).unwrap()
-    };
+    let fmt = cents;
     assert_eq!(fmt(-525), "-5.25");
     assert_eq!(fmt(-5), "-0.05");
     assert_eq!(fmt(0), "0.00");
@@ -65,7 +65,10 @@ fn quoted_fields_starting_or_ending_with_an_escaped_quote() {
 1,\"\"\"Q\",\"\"\"hi\"\"\",1,1.00\r\n";
     let regions = b"region_id,country\n1,AAA\n";
     // name `"Q` (2 bytes), note `"hi"` (4 bytes).
-    assert_eq!(run_on(records, regions, 1), "AAA 1 1 1.00 1.00 1.00 1 2 4\n");
+    assert_eq!(
+        run_on(records, regions, 1),
+        "AAA 1 1 1.00 1.00 1.00 1 2 4\n"
+    );
 }
 
 /// A file big enough for real chunk cuts: the worked example's records
@@ -82,7 +85,11 @@ BBB 3000 12000 -15750.00 -5.25 -5.25 1 45000 105000\n\
 CCC 3000 27000 -150.00 -0.05 -0.05 1 9000 3000\n\
 _UNMATCHED 6000 45000 3000.00 -1.00 2.00 2 63000 3000\n";
     for threads in [1, 3, 12] {
-        assert_eq!(run_on(&records, WORKED_REGIONS, threads), expected, "threads={threads}");
+        assert_eq!(
+            run_on(&records, WORKED_REGIONS, threads),
+            expected,
+            "threads={threads}"
+        );
     }
 }
 

@@ -11,7 +11,7 @@ than the scoring box: the version of steps 1-4 (commit `db4cc76`) measured
 **0.135 s, 141 MiB, 543 lines, K 9.75, 49.44 points on the live board**
 (run `run-cf24ab5675f5`) and about 0.21 s, 141 MB on this laptop. The **Run
 ID** column stays *pending* for steps without their own board run, and
-**Points** is only filled from board numbers. Step 5 has not been on the
+**Points** is only filled from board numbers. Steps 5-11 have not been on the
 board yet. Everything that was tried, including the failures, is in
 [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 
@@ -25,6 +25,10 @@ board yet. Everything that was tried, including the failures, is in
 | 5 | A record leaves one `u64` in its country's list (top 32 bits of the hash of the name, offset of the name field) instead of a 12-byte reference plus a 24-byte `(hash, name)` pair; equal-hash runs are compared by re-reading the field. Hashing is done at parse time, when the name is in cache | pending | 0.265 -> 0.208 (11 rounds) | 140 -> 47 | pending |
 | 6 | Each parse worker sorts its own per-country lists while they are still in cache, so the final stage merges sorted runs instead of sorting from scratch | pending | 0.207 -> 0.190 (13 interleaved rounds) | 47 -> 48 | pending |
 | 7 | Chunk boundaries found by looking a few dozen bytes past each nominal cut for a line feed followed by a digit or a BOM (spec 2.2: names are letters, notes lowercase words), instead of counting every quote in the file first | pending | 0.180 -> 0.169 (15 interleaved rounds) | 48 | pending |
+| 8 | No per-record storage for `names_distinct`: all workers share one lock-free open-addressing table that numbers each distinct name (64-bit hash of its raw bytes, CAS to claim a slot) and one bit per (country, name number); a country's distinct count is the popcount of its row. Parse uses a branch-free SWAR digit conversion and an AVX2 search for the closing quote; chunks are 8 per thread, claimed from an atomic counter | pending | about 0.15 -> 0.105 (3 runs each, noisy) | 49 -> 11 | pending |
+| 9 | Name sightings are batched (16): each is looked up in the table, and one batch later its bit is set, with prefetches (`prefetcht0` for the slot, `prefetchw` for the bit) issued a batch ahead so cache misses overlap | pending | 0.194 -> 0.157 median, 0.148 -> 0.106 min (11 interleaved rounds) | 12 -> 12 | pending |
+| 10 | `regions.csv` parsed in one tight loop into a table sized from the last line, codes mapped through a 15-bit table instead of a `HashMap` | pending | parse regions phase 10 -> 3 ms | 12 | pending |
+| 11 | Names hashed from one masked AVX2 load (a 64-byte window of constants supplies the mask) instead of four masked scalar loads | pending | 0.111 -> 0.105 median, cpu 1042 -> 991 ms (7 interleaved rounds) | 12 | pending |
 
 Step 5 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.139 s and 47 MB, against 0.213 s and
@@ -70,6 +74,10 @@ costs one comparison instead of a wrong answer.
   because every record locks a shared table. Dropped for step 5.
 * **A fingerprint-only distinct count** (not exact): 266 -> 177 ms, only as
   an upper bound for step 4; not kept because it is not exact.
+* **Two-stage parse (steps 8-11's parser variant)**: stage 1 finds every `,` and LF outside quotes in 64-byte blocks with a prefix-XOR of the quote mask (carrying the quote count with each position), stage 2 parses each record from its five positions with no search. Output was identical, single-thread parse-only time in a native benchmark was about the same (235 vs 210-245 ms) and the docker A/B was no faster (128 vs 105 ms median, noisy; cpu 889 vs 872 ms min), with more code. Dropped.
+* **`MAP_POPULATE` on the records mapping**: 121 -> 127 ms median (11 rounds), no gain. Dropped.
+* **2 MB-aligned `MADV_HUGEPAGE` tables** for the name table and bitsets: 133 -> 131 ms median (11 rounds), and peak memory rose from 12 to 15-16 MB because of the rounding. Dropped.
+* **Single-thread cost split (native, warm RAM, T=1, noisy)**: parse-only about 235 ms of about 335 ms; the name table and bitset about 100 ms; hashing 16 ms with the SWAR version (about 115 ms with four masked scalar loads, before step 11).
 
 ## Where the unit tests live
 
@@ -86,7 +94,9 @@ lines from 531 to 474.
   letter or a quote, never by a digit or a BOM. The quote-parity scan it
   replaced did not rely on that.
 
-* Step 5 has not run on the scoring box. Expect the board's T to differ.
+* Steps 8-11 have not run on the scoring box. Expect the board's T to differ.
+* `names_distinct` now rests on a 64-bit hash: two different names with the same 64-bit hash (about 3e-10 for 100 000 names) would be counted once. Steps 4-7 compared bytes and were exact whatever the hashes did. If more than about 131 000 distinct names turn up, the table is rebuilt larger and the scan restarts (tested).
+* Local timings in steps 8-11 come from a laptop shared with other jobs; differences under about 10% are inside the noise.
 * Offsets are kept in 32 bits, so the input must be under 4 GiB (checked).
 * Step 1's and the baseline's local timings were not recorded in a form I
   would cite, so those cells are left empty rather than reconstructed.

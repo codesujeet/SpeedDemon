@@ -14,7 +14,8 @@
 //!   lock-free table that numbers each distinct name (by a 64-bit hash of
 //!   its raw bytes; escaping is one to one, so equal names have equal raw
 //!   bytes) and one bit per (country, name number). A country's distinct
-//!   count is the popcount of its row.
+//!   count is the popcount of its row. Lookups are batched and prefetched
+//!   so their cache misses overlap.
 //! - The file is parsed in parallel, in many more chunks than threads that
 //!   workers claim from a counter (cores differ in speed). A chunk cut is
 //!   the first LF that is followed by a digit or a BOM, which spec 2.2
@@ -22,7 +23,10 @@
 //! - The last few KB are copied behind zero padding so the SIMD loads never
 //!   run past the mapping.
 
-use std::arch::x86_64::{__m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8, _mm256_storeu_si256};
+use std::arch::x86_64::{
+    __m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
+    _mm256_set1_epi8, _mm256_storeu_si256,
+};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 /// Maps `path` read-only for the life of the process. The harness
@@ -68,9 +72,15 @@ fn parse_regions(data: &[u8]) -> Regions {
     let mut countries = Vec::new();
     // Ids ascend, so the last line has the largest; size the table once.
     let last = data.rsplit(|&b| b == b'\n').nth(1).unwrap_or(&[]);
-    let max_id = last.iter().take_while(|d| d.is_ascii_digit()).fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
+    let max_id = last
+        .iter()
+        .take_while(|d| d.is_ascii_digit())
+        .fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
     let mut group_of = vec![0u16; max_id + 1];
-    let mut at = data.iter().position(|&b| b == b'\n').map_or(data.len(), |p| p + 1);
+    let mut at = data
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(data.len(), |p| p + 1);
     while at < data.len() {
         let mut id = 0usize;
         while data[at] != b',' {
@@ -93,12 +103,15 @@ fn parse_regions(data: &[u8]) -> Regions {
         }
         at += 1;
     }
-    Regions { countries, group_of }
+    Regions {
+        countries,
+        group_of,
+    }
 }
 
 // --- Aggregation --------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Agg {
     count: u64,
     id_sum: u64,
@@ -110,17 +123,12 @@ struct Agg {
     names_distinct: u64,
 }
 
-impl Default for Agg {
-    fn default() -> Self {
+impl Agg {
+    fn new() -> Agg {
         Agg {
-            count: 0,
-            id_sum: 0,
-            amount_sum: 0,
             amount_min: i64::MAX,
             amount_max: i64::MIN,
-            name_bytes: 0,
-            note_bytes: 0,
-            names_distinct: 0,
+            ..Agg::default()
         }
     }
 }
@@ -174,7 +182,9 @@ impl Names {
                     return 0;
                 }
                 let new = (h >> self.id_bits << self.id_bits) | id as u64;
-                cur = self.slots[s].compare_exchange(0, new, Relaxed, Relaxed).unwrap_or_else(|other| other);
+                cur = self.slots[s]
+                    .compare_exchange(0, new, Relaxed, Relaxed)
+                    .unwrap_or_else(|other| other);
                 if cur == 0 {
                     cur = new;
                 }
@@ -188,7 +198,9 @@ impl Names {
 
     fn distinct(&self, group: usize) -> u64 {
         let row = &self.bits[group << (self.id_bits - 6)..(group + 1) << (self.id_bits - 6)];
-        row.iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()
+        row.iter()
+            .map(|w| w.load(Relaxed).count_ones() as u64)
+            .sum()
     }
 }
 
@@ -208,14 +220,24 @@ struct Sightings<'a> {
 
 impl<'a> Sightings<'a> {
     fn new(names: &'a Names) -> Self {
-        Sightings { names, seen: [(0, 0); BATCH], seen_len: 0, bits: [(0, 0); BATCH], bits_len: 0 }
+        Sightings {
+            names,
+            seen: [(0, 0); BATCH],
+            seen_len: 0,
+            bits: [(0, 0); BATCH],
+            bits_len: 0,
+        }
     }
 
     #[inline]
     fn push(&mut self, group: usize, h: u64) {
         let slot = &self.names.slots[h as usize & (self.names.slots.len() - 1)];
         // SAFETY: a prefetch is a hint; it never faults or changes memory.
-        unsafe { std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>((slot as *const AtomicU64).cast()) };
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
+                (slot as *const AtomicU64).cast(),
+            )
+        };
         self.seen[self.seen_len] = (group, h);
         self.seen_len += 1;
         if self.seen_len == BATCH {
@@ -235,7 +257,9 @@ impl<'a> Sightings<'a> {
                 let word = (group << (self.names.id_bits - 6)) + id / 64;
                 let ptr: *const AtomicU64 = &self.names.bits[word];
                 // SAFETY: a hint to get the line ready for writing; it never faults.
-                unsafe { std::arch::asm!("prefetchw [{0}]", in(reg) ptr, options(nostack, preserves_flags)) };
+                unsafe {
+                    std::arch::asm!("prefetchw [{0}]", in(reg) ptr, options(nostack, preserves_flags))
+                };
                 self.bits[self.bits_len] = (word, 1 << (id % 64));
                 self.bits_len += 1;
             }
@@ -272,7 +296,10 @@ fn block(data: &[u8], at: usize, left: usize) -> [u64; 4] {
     let mut w = [0u64; 4];
     // SAFETY: AVX2 is part of the build target; `src`, `mask` and `w` are 32 bytes each.
     unsafe {
-        let v = _mm256_and_si256(_mm256_loadu_si256(src.as_ptr().cast::<__m256i>()), _mm256_loadu_si256(mask.as_ptr().cast::<__m256i>()));
+        let v = _mm256_and_si256(
+            _mm256_loadu_si256(src.as_ptr().cast::<__m256i>()),
+            _mm256_loadu_si256(mask.as_ptr().cast::<__m256i>()),
+        );
         _mm256_storeu_si256(w.as_mut_ptr().cast::<__m256i>(), v);
     }
     w
@@ -285,7 +312,10 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
     let mut at = from;
     loop {
         let w = block(data, at, to.saturating_sub(at));
-        h = mum(mum(w[0] ^ 0xA076_1D64_78BD_642F, w[1] ^ 0xE703_7ED1_A0B4_28DB) ^ h, mum(w[2] ^ 0x8EBC_6AF0_9C88_C6E3, w[3] ^ 0x5899_65CC_7537_4CC3));
+        h = mum(
+            mum(w[0] ^ 0xA076_1D64_78BD_642F, w[1] ^ 0xE703_7ED1_A0B4_28DB) ^ h,
+            mum(w[2] ^ 0x8EBC_6AF0_9C88_C6E3, w[3] ^ 0x5899_65CC_7537_4CC3),
+        );
         at += 32;
         if at >= to {
             return h;
@@ -313,7 +343,11 @@ fn quotes(data: &[u8], at: usize) -> u32 {
 #[inline]
 fn text_field(data: &[u8], at: usize) -> (usize, usize, usize, usize) {
     if data[at] != b'"' {
-        let c = at + data[at..].iter().position(|&b| b == b',').unwrap_or(data.len() - at - 1);
+        let c = at
+            + data[at..]
+                .iter()
+                .position(|&b| b == b',')
+                .unwrap_or(data.len() - at - 1);
         return (at, c, 0, c + 1);
     }
     let start = at + 1;
@@ -354,7 +388,14 @@ fn digits(data: &[u8], at: usize) -> (u64, usize) {
 
 /// Parses every record in `data[start..end]` (both record boundaries; the
 /// 64 bytes after `end` must be readable) into `groups`.
-fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, sightings: &mut Sightings, groups: &mut [Agg]) {
+fn parse_records(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    regions: &Regions,
+    sightings: &mut Sightings,
+    groups: &mut [Agg],
+) {
     let unmatched = regions.countries.len();
     let mut i = start;
     while i < end {
@@ -368,7 +409,8 @@ fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, sight
         j += neg as usize;
         let (whole, n) = digits(data, j);
         j += n + 1;
-        let cents = (whole * 100 + (data[j] - b'0') as u64 * 10 + (data[j + 1] - b'0') as u64) as i64;
+        let cents =
+            (whole * 100 + (data[j] - b'0') as u64 * 10 + (data[j + 1] - b'0') as u64) as i64;
         let cents = if neg { -cents } else { cents };
         j += 2;
         // CRLF or LF; a missing final terminator ends the loop either way.
@@ -396,7 +438,9 @@ fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, sight
 /// letter or a quote.
 fn cut(data: &[u8], from: usize) -> usize {
     let mut i = from;
-    while i + 1 < data.len() && !(data[i] == b'\n' && (data[i + 1].is_ascii_digit() || data[i + 1] == 0xEF)) {
+    while i + 1 < data.len()
+        && !(data[i] == b'\n' && (data[i + 1].is_ascii_digit() || data[i + 1] == 0xEF))
+    {
         i += 1;
     }
     (i + 1).min(data.len())
@@ -409,7 +453,11 @@ const CHUNKS_PER_THREAD: usize = 8;
 
 fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Names) -> Vec<Agg> {
     let n_groups = regions.countries.len() + 1;
-    let tail_at = if data.len() - body > 2 * TAIL { cut(data, data.len() - TAIL) } else { body };
+    let tail_at = if data.len() - body > 2 * TAIL {
+        cut(data, data.len() - TAIL)
+    } else {
+        body
+    };
     let chunks = threads * CHUNKS_PER_THREAD;
     let bound = |k: usize| match k {
         0 => body,
@@ -421,7 +469,7 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 s.spawn(|| {
-                    let mut groups = vec![Agg::default(); n_groups];
+                    let mut groups = vec![Agg::new(); n_groups];
                     let mut sightings = Sightings::new(names);
                     loop {
                         let k = next.fetch_add(1, Relaxed);
@@ -429,23 +477,40 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
                             sightings.finish();
                             return groups;
                         }
-                        parse_records(data, bound(k), bound(k + 1), regions, &mut sightings, &mut groups);
+                        parse_records(
+                            data,
+                            bound(k),
+                            bound(k + 1),
+                            regions,
+                            &mut sightings,
+                            &mut groups,
+                        );
                     }
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("parse worker panicked")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("parse worker panicked"))
+            .collect()
     });
 
     let mut tail = data[tail_at..].to_vec();
     tail.resize(tail.len() + 64, 0);
-    let mut groups = vec![Agg::default(); n_groups];
+    let mut groups = vec![Agg::new(); n_groups];
     let mut sightings = Sightings::new(names);
-    parse_records(&tail, 0, data.len() - tail_at, regions, &mut sightings, &mut groups);
+    parse_records(
+        &tail,
+        0,
+        data.len() - tail_at,
+        regions,
+        &mut sightings,
+        &mut groups,
+    );
     sightings.finish();
     parts.push(groups);
 
-    let mut out = vec![Agg::default(); n_groups];
+    let mut out = vec![Agg::new(); n_groups];
     for part in &parts {
         for (dst, src) in out.iter_mut().zip(part) {
             if src.count == 0 {
@@ -465,9 +530,12 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
 
 fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
     let n_groups = regions.countries.len() + 1;
-    let body = data.iter().position(|&b| b == b'\n').map_or(data.len(), |p| p + 1); // skip the BOM + header line
+    let body = data
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(data.len(), |p| p + 1); // skip the BOM + header line
     if body >= data.len() {
-        return vec![Agg::default(); n_groups];
+        return vec![Agg::new(); n_groups];
     }
     // Names are numbered from a table sized for 100 k distinct names (the
     // generator's pool); if there are more, start over with a bigger one.
@@ -476,7 +544,9 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
         let names = Names::new(id_bits, n_groups);
         let mut out = scan(data, body, regions, threads.max(1), &names);
         if !names.full.load(Relaxed) {
-            out.iter_mut().enumerate().for_each(|(g, a)| a.names_distinct = names.distinct(g));
+            out.iter_mut()
+                .enumerate()
+                .for_each(|(g, a)| a.names_distinct = names.distinct(g));
             return out;
         }
         id_bits += 2;
@@ -485,52 +555,28 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
 
 // --- Output (spec section 4) --------------------------------------------
 
-#[inline]
-fn write_u64(out: &mut Vec<u8>, mut v: u64) {
-    let mut buf = [0u8; 20];
-    let mut i = 20;
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    out.extend_from_slice(&buf[i..]);
-}
-
 /// Integer cents as `-?<int>.<2 digits>`; zero is `0.00`, never `-0.00`.
-fn write_cents(out: &mut Vec<u8>, cents: i64) {
-    if cents < 0 {
-        out.push(b'-');
-    }
-    let abs = cents.unsigned_abs();
-    write_u64(out, abs / 100);
-    out.push(b'.');
-    out.push(b'0' + (abs % 100 / 10) as u8);
-    out.push(b'0' + (abs % 10) as u8);
+fn cents(c: i64) -> String {
+    format!(
+        "{}{}.{:02}",
+        if c < 0 { "-" } else { "" },
+        c.abs() / 100,
+        c.abs() % 100
+    )
 }
 
 fn write_line(out: &mut Vec<u8>, key: &[u8], a: &Agg) {
     out.extend_from_slice(key);
-    out.push(b' ');
-    write_u64(out, a.count);
-    out.push(b' ');
-    write_u64(out, a.id_sum);
-    out.push(b' ');
-    write_cents(out, a.amount_sum);
-    out.push(b' ');
-    write_cents(out, a.amount_min);
-    out.push(b' ');
-    write_cents(out, a.amount_max);
-    out.push(b' ');
-    write_u64(out, a.names_distinct);
-    out.push(b' ');
-    write_u64(out, a.name_bytes);
-    out.push(b' ');
-    write_u64(out, a.note_bytes);
-    out.push(b'\n');
+    let (min, max, sum) = (
+        cents(a.amount_min),
+        cents(a.amount_max),
+        cents(a.amount_sum),
+    );
+    let rest = format!(
+        " {} {} {sum} {min} {max} {} {} {}\n",
+        a.count, a.id_sum, a.names_distinct, a.name_bytes, a.note_bytes
+    );
+    out.extend_from_slice(rest.as_bytes());
 }
 
 fn render(regions: &Regions, groups: &[Agg]) -> Vec<u8> {
@@ -550,47 +596,23 @@ fn render(regions: &Regions, groups: &[Agg]) -> Vec<u8> {
     out
 }
 
-/// Set `TRACK_C_TIMING=1` to print a per-phase breakdown to stderr.
-fn run(records_path: &str, regions_path: &str, output_path: &str, threads: usize) -> std::io::Result<()> {
-    let verbose = std::env::var("TRACK_C_TIMING").is_ok();
-    macro_rules! phase {
-        ($label:expr, $body:expr) => {{
-            let t = std::time::Instant::now();
-            let v = $body;
-            if verbose {
-                eprintln!("track-c: {} in {:.1}ms", $label, t.elapsed().as_secs_f64() * 1000.0);
-            }
-            v
-        }};
-    }
-
-    let regions_data = phase!("map regions", map_file(regions_path)?);
-    let regions = phase!("parse regions", parse_regions(regions_data));
-    let records = phase!("map records", map_file(records_path)?);
-    let groups = phase!("parse+aggregate", aggregate(records, &regions, threads));
-    let out = phase!("render", render(&regions, &groups));
-    phase!("write output", std::fs::write(output_path, out))?;
-    Ok(())
-}
-
 fn main() {
-    let records_path =
-        std::env::var("RECORDS_PATH").unwrap_or_else(|_| "/data/records.csv".to_string());
-    let regions_path =
-        std::env::var("REGIONS_PATH").unwrap_or_else(|_| "/data/regions.csv".to_string());
-    let output_path =
-        std::env::var("OUTPUT_PATH").unwrap_or_else(|_| "/out/aggregates.txt".to_string());
-    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-
-    let start = std::time::Instant::now();
-    match run(&records_path, &regions_path, &output_path, threads) {
-        Ok(()) => {
-            eprintln!("track-c: done in {:.1} ms", start.elapsed().as_secs_f64() * 1000.0);
-        }
-        Err(e) => {
-            eprintln!("track-c: failed: {e}");
-            std::process::exit(1);
-        }
+    let var =
+        |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_string());
+    let (records, regions, output) = (
+        var("RECORDS_PATH", "/data/records.csv"),
+        var("REGIONS_PATH", "/data/regions.csv"),
+        var("OUTPUT_PATH", "/out/aggregates.txt"),
+    );
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let result = map_file(&regions).and_then(|regions_data| {
+        let regions = parse_regions(regions_data);
+        let groups = aggregate(map_file(&records)?, &regions, threads);
+        std::fs::write(&output, render(&regions, &groups))
+    });
+    if let Err(e) = result {
+        eprintln!("track-c: failed: {e}");
+        std::process::exit(1);
     }
 }
 
