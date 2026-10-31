@@ -12,10 +12,8 @@ fn padded(data: &[u8]) -> &'static [u8] {
 
 /// Runs the scan and the output phase on `data` and returns the output bytes.
 fn summarize(data: &[u8], threads: usize, chunk: usize) -> Vec<u8> {
-    let path = std::env::temp_dir().join(format!("track-a-summarize-{}-{:?}", std::process::id(), std::thread::current().id()));
-    process(padded(data), threads, chunk, &File::create(&path).unwrap());
-    let out = std::fs::read(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
+    let mut out = Vec::new();
+    process(padded(data), threads, chunk, &mut out).unwrap();
     out
 }
 

@@ -9,14 +9,13 @@
 //! found in a private table that stores the offset of the first occurrence and
 //! verifies it byte for byte. After a barrier, workers take one hour at a time:
 //! count per endpoint, place the latencies in one run per endpoint, select the
-//! percentiles, format, and write the block into the output file at its offset
-//! (the sum of the sizes of the earlier hours) as soon as those sizes are known.
+//! percentiles, format, and hand the block to the main thread, which writes
+//! the blocks in hour order.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::num::NonZeroUsize;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
-use std::sync::{Barrier, OnceLock};
+use std::sync::{mpsc, Barrier, OnceLock};
 
 /// A stored line is `endpoint << 21 | error << 20 | latency`; a latency that does not fit 20 bits is stored as
 /// `LAT_MASK` and followed by a whole `u32` holding the latency.
@@ -309,8 +308,6 @@ struct Plan {
     names: Vec<&'static [u8]>,
     /// The endpoint numbers by endpoint bytes.
     order: Vec<u32>,
-    /// The byte size of each hour's output block, 0 until it is formatted.
-    sizes: Vec<AtomicUsize>,
 }
 
 fn make_plan(d: &'static [u8], parts: &'static [OnceLock<Part>], names: &Names) -> Plan {
@@ -328,7 +325,7 @@ fn make_plan(d: &'static [u8], parts: &'static [OnceLock<Part>], names: &Names) 
     let names = list;
     let mut order: Vec<u32> = (0..names.len() as u32).collect();
     order.sort_unstable_by_key(|&id| names[id as usize]);
-    Plan { sizes: (0..by_hour.len()).map(|_| AtomicUsize::new(0)).collect(), hours: by_hour.into_iter().collect(), names, order }
+    Plan { hours: by_hour.into_iter().collect(), names, order }
 }
 
 /// Per-thread buffers reused from hour to hour.
@@ -419,9 +416,10 @@ unsafe fn drop_pages(from: usize, to: usize) {
 #[cfg(not(unix))]
 unsafe fn drop_pages(_: usize, _: usize) {}
 
-/// Scans `d` with `threads` workers taking `chunk`-byte chunks, then formats every hour in parallel; each worker
-/// writes its hours' blocks to `out` at their final offsets, as soon as the sizes of the earlier hours are known. `d` must be followed by `PAD` readable bytes.
-fn process(d: &'static [u8], threads: usize, chunk: usize, out: &File) {
+/// Scans `d` with `threads` workers taking `chunk`-byte chunks, then formats every hour in parallel and writes
+/// the blocks to `sink` in hour order, each as soon as it and all earlier hours are done. `d` must be followed by
+/// `PAD` readable bytes.
+fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write) -> std::io::Result<()> {
     let n = d.len();
     // The first line start at or after `x` (a line start exactly at `x` goes to the chunk before): adjacent chunks agree.
     let snap = |x: usize| if x >= n { n } else if x == 0 { 0 } else { x + d[x..].iter().position(|&b| b == b'\n').unwrap() + 1 };
@@ -429,10 +427,10 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, out: &File) {
     let names = Names { slots: (0..SLOTS).map(|_| AtomicU64::new(0)).collect(), next: AtomicUsize::new(0) };
     let parts: &'static [OnceLock<Part>] = Box::leak((0..threads).map(|_| OnceLock::new()).collect());
     let plan: &'static OnceLock<Plan> = Box::leak(Box::default());
-    let written = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
     std::thread::scope(|scope| {
         for t in 0..threads {
-            let (cursor, next, barrier, names, written) = (&cursor, &next, &barrier, &names, &written);
+            let (sender, cursor, next, barrier, names) = (sender.clone(), &cursor, &next, &barrier, &names);
             scope.spawn(move || {
                 let mut worker = Worker::new(d);
                 loop {
@@ -450,47 +448,34 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, out: &File) {
                 barrier.wait();
                 let plan = plan.get_or_init(|| make_plan(d, parts, names));
                 let mut scratch = Scratch::default();
-                let mut held: Vec<(usize, Vec<u8>)> = Vec::new();
                 loop {
                     let hour = next.fetch_add(1, Relaxed);
-                    if hour < plan.hours.len() {
-                        let block = format_hour(plan, hour, &mut scratch);
-                        plan.sizes[hour].store(block.len(), Release);
-                        held.push((hour, block));
-                    } else if held.is_empty() {
+                    if hour >= plan.hours.len() {
                         return;
-                    } else {
-                        std::thread::yield_now();
                     }
-                    // A block goes to its place in the file as soon as the sizes of all earlier hours are known.
-                    held.retain(|(hour, block)| {
-                        let sum = plan.sizes[..*hour].iter().try_fold(0, |at, s| Some(at + NonZeroUsize::new(s.load(Acquire))?.get()));
-                        let Some(at) = sum else { return true };
-                        write_at(out, block, at as u64).expect("cannot write the output");
-                        if written.fetch_add(1, AcqRel) + 1 == plan.hours.len() && EXIT_WHEN_DONE.load(Relaxed) {
-                            // The output is complete: leave without joining the workers (their stacks and buffers would be unmapped).
-                            std::process::exit(0);
-                        }
-                        false
-                    });
+                    sender.send((hour, format_hour(plan, hour, &mut scratch))).expect("writer stopped");
                 }
             });
         }
-    });
-}
-
-#[cfg(unix)]
-fn write_at(file: &File, block: &[u8], at: u64) -> std::io::Result<()> {
-    std::os::unix::fs::FileExt::write_all_at(file, block, at)
-}
-
-#[cfg(not(unix))]
-fn write_at(file: &File, block: &[u8], at: u64) -> std::io::Result<()> {
-    let mut done = 0;
-    while done < block.len() {
-        done += std::os::windows::fs::FileExt::seek_write(file, &block[done..], at + done as u64)?;
-    }
-    Ok(())
+        drop(sender);
+        let mut waiting: Vec<Option<Vec<u8>>> = Vec::new();
+        let mut written = 0;
+        for (index, block) in receiver {
+            if waiting.len() <= index {
+                waiting.resize(index + 1, None);
+            }
+            waiting[index] = Some(block);
+            while let Some(block) = waiting.get_mut(written).and_then(Option::take) {
+                sink.write_all(&block)?;
+                written += 1;
+                if EXIT_WHEN_DONE.load(Relaxed) && written == plan.get().map_or(0, |p| p.hours.len()) {
+                    // The output is complete: leave without joining the workers (their stacks and buffers would be unmapped).
+                    std::process::exit(0);
+                }
+            }
+        }
+        Ok(())
+    })
 }
 
 fn main() {
@@ -508,8 +493,8 @@ fn main() {
 
 fn run(input_path: &str, output_path: &str, threads: usize) -> std::io::Result<()> {
     let data = map_file(input_path)?;
-    process(data, threads, 1 << 20, &File::create(output_path)?);
-    Ok(())
+    let mut file = std::fs::File::create(output_path)?;
+    process(data, threads, 1 << 20, &mut file)
 }
 
 #[cfg(test)]
