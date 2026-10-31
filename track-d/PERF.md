@@ -178,6 +178,30 @@ worker pools) is below the noise on its own.
   real road network and has been removed from this log.
 * Source size is the weak axis: the reference is 43 code lines.
 
+## Replacement by an alternative implementation (not yet on the board)
+
+`src/main.rs` was replaced by a different implementation drafted with
+ChatGPT by the project owner (per-part bucketed CSR build, blob BFS
+renumbering, bidirectional Dijkstra with 4-ary heaps and paged distances). It
+was reviewed and tested here and is not part of the step table above, whose
+rows describe the earlier code.
+
+Local comparison against the previous version (this laptop, Docker with the
+board's run flags, full public dataset, 15 interleaved rounds, hash checked
+every run): median wall 321 ms against 455 ms, `memory.peak` median 67.2 MiB
+against 93.7 MiB. Source: about 520 code lines after `rustfmt` (Dockerfile
+included) against about 680, because the unit tests are gone. Also correct on
+the generated datasets of seeds 2, 3 and 7 (10 runs each, no failure), on the
+tiny and sample scales, and on the whole edge-case suite (66 cases with LF
+line endings). Review found a panic: a prefetch indexed the edge array at the
+offset of a node with no out-edges when that node is the last in id order
+(probability about 2e-5 per dataset on the public graph's 42 sinks); it is
+fixed (the prefetch uses a wrapping pointer) and checked on a graph made to
+trigger it. `cargo clippy -D warnings` is clean after four small changes.
+Points are estimated, not measured: scaling the last board result by these
+ratios gives about 69 against 63; a board run will replace this estimate.
+
+
 <!-- board-runs:begin -->
 ## Board runs
 

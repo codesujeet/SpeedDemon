@@ -205,6 +205,27 @@ search in `union` and `difference` (453.4 M -> 453.5 M); bitmap threshold
 478.6 M, 480.7 M, 488.3 M, 547.1 M, so the existing `w` stays (k = 2 is within
 0.3%); a ratio of 4, 8, 16 or 32 for the binary search: 453.0-453.7 M, flat.
 
+## Replacement by an alternative implementation (not yet on the board)
+
+`src/main.rs` was replaced by a different implementation drafted with
+ChatGPT by the project owner (a full scan of `docs.txt` with query terms only,
+phrases checked at their rarest term while the text is in cache, bitmaps for
+common BOOL terms, 16-bit posting lists). It was reviewed and tested here
+and is not part of the step table above, whose rows describe the earlier code.
+
+Local comparison against the previous version (this laptop, Docker with the
+board's run flags, full public dataset, 15 interleaved rounds, hash checked
+every run): median wall 495 ms against 555 ms, `memory.peak` median 49.6 MiB
+against 58.4 MiB. Source: about 610 code lines after `rustfmt` (Dockerfile
+included) against about 880, because the unit tests are gone. Also correct on
+the generated datasets of seeds 2, 3 and 7 (10 runs each, no failure), on the
+tiny and sample scales, and on the edge-case suite apart from inputs outside
+the spec (empty query file, a corpus of a few bytes, more than 393,000
+documents). `cargo clippy -D warnings` is clean after changing one statement.
+Points are estimated, not measured: scaling the last board result by these
+ratios gives about 69 against 66; a board run will replace this estimate.
+
+
 <!-- board-runs:begin -->
 ## Board runs
 

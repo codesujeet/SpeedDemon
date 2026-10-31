@@ -4,66 +4,54 @@ The task, the input files and the exact output format are in the [spec](https://
 
 ## Approach
 
-The queries are read first and every distinct term in them (about 76,000)
-is interned into a bucketed table that stores each key inline: the first and
-last eight bytes of the term plus its length. A lookup is one hash and one
-64-byte bucket of three entries, compared without branches (terms longer
-than 16 bytes are also compared against the stored bytes).
+**Provenance.** This `src/main.rs` replaced the earlier piece-based version.
+It was drafted with ChatGPT by the project owner and then reviewed and
+tested here (hash checks on four generated full-size datasets, repeated
+runs, the edge-case suite, `cargo clippy -D warnings`); two lines were
+changed to satisfy clippy. The earlier implementation, its unit tests
+(`tests/track_b.rs`, which target that implementation and are no longer
+compiled) and its PERF history are in git history.
 
-`docs.txt` is mapped and cut at line boundaries into 1 MB pieces. A pool of
-workers (one per core) takes pieces from a shared counter and does everything
-for a piece before moving on, so the whole index never exists at once:
+The queries are read first and only their terms are looked for. Each term
+(at most 32 bytes) is a 32-byte lowercase, zero-padded key in an
+open-addressing table. `docs.txt` is mapped over a spare zero page so a
+32-byte load past any byte of it stays inside the mapping, and it is cut at
+line boundaries into 12 shares, one per thread.
 
-1. **Tokenize.** AVX2 builds a 64-bit mask of token bytes (`a-z`, `A-Z`,
-   `0-9`; everything else, including every byte of a multi-byte UTF-8
-   sequence, separates tokens, as the spec defines), and token starts and
-   ends come from bit tricks on that mask. The first token of a line is the
-   document id and opens a document. A token's key is built branch-free
-   (loads of its first and last 8 bytes, `| 0x20` to fold case, a mask for
-   its length) and its bucket is prefetched; the lookups run per document
-   over those keys. A token no query uses maps to a reserved id, so
-   positions are preserved for phrases.
-2. **Postings.** Per document the distinct term ids are collected, then each
-   term gets a sorted list of piece-local document numbers (u16, a piece
-   holds at most 65,536 documents). Terms present in at least `ndocs/64`
-   documents of the piece also get a bitmap.
-3. **Queries.** Every query runs on the piece. A presence bitset first rules
-   out queries that cannot match the piece. A BOOL query is evaluated
-   strictly left to right on sorted lists (a plain merge) and bitmaps (word operations, filters when mixed). A PHRASE
-   intersects its terms' lists from the rarest, then scans each surviving
-   document's id array for the run around the rarest term, which also handles
-   repeated terms.
-4. **Accumulate.** Each worker keeps, per query, a match count, an id sum and
-   a log of its first ten ids. A worker sees pieces in ascending order, so
-   its first ten are its ten smallest; a shared marker per query stops
-   workers from logging ids that cannot be among the ten smallest overall.
-   The workers' accumulators are merged in parallel at the end.
+1. **Sample.** Each thread counts, for every query term, the documents that
+   hold it in the first 1/32 of its share. A BOOL term in more than 1/32 of
+   the documents is kept as a bitmap; each phrase's rarest term (by that
+   sample) becomes its anchor.
+2. **Scan.** Terms are renumbered by role (bitmaps, lists, anchors, terms
+   only phrases read) so a token's role is read off its id. Tokens are found
+   from AVX2 class masks of 64-byte windows, with the hash-table slot of each
+   token prefetched eight tokens ahead. Every phrase is checked wherever its
+   anchor occurs, while the text is in cache, by comparing the neighbouring
+   tokens. A BOOL term in a document sets a bit in a bitmap or files a 16-bit
+   unit under a bucket of its term; a thread's buckets are then scattered
+   into one run of 16-bit document offsets per term.
+3. **Answer.** BOOL queries run strictly left to right on sorted lists and
+   bitmaps (merge, binary search when one list is much longer, word
+   operations for bitmaps); phrase answers come from the matches found in the
+   scan. 64 queries at a time go to each thread, and the output is joined in
+   input order.
 
-Peak memory is the workers' piece buffers (a few MB each), the accumulators
-and the query table, about 70 MB.
+Assumptions: a document id is at the start of each line and ids are dense
+and ascending; terms are at most 32 bytes (a longer corpus token never
+matches); at most 32,767 documents per thread share (the full corpus of
+250,000 documents gives about 20,800) and at most 131,072 distinct query
+terms (the public data has about 76,000); both are asserted. The build
+targets x86-64-v3 (AVX2), as `.cargo/config.toml` sets. The thread count is
+fixed at 12. Inputs outside the spec (an empty query file, a corpus of a few
+bytes, more than 393,000 documents) abort instead of answering.
 
-Assumptions taken from the spec: ids are dense and ascending, so only a
-piece's first id is parsed; terms are at most 32 bytes; a corpus token longer
-than 32 bytes keeps its position and matches nothing; the build targets
-x86-64-v3 (AVX2), as `.cargo/config.toml` sets.
-
-Tests (spec worked example, pieces and workers do not change answers, the
-document cap of a piece, term table vs `HashMap`, set operations vs naive
-versions, random queries vs a brute-force evaluator, repeated-term phrases,
-tokenizer and scanner cases) are in `tests/track_b.rs` at the repository
-root, compiled into the test build only (`cargo test` in this folder runs
-them).
+There are no unit tests for this implementation; it is checked against the
+published hash, generated datasets and the edge-case suite (see `PERF.md`).
 
 ## Dependencies
 
 None.
 
-## With another 24 hours
+## Dependencies
 
-Every query still runs on every piece (12.5 M presence checks, 3.9 M real
-evaluations). Grouping queries by an anchor term and visiting only the
-queries whose anchor is present in the piece would remove most of that; the
-anchor needs global term counts, which one or two sample pieces could
-estimate. The query file is parsed serially before any worker starts (one SIMD
-pass, see `PERF.md`), which could be split across the workers. I would keep
-either only if an interleaved A/B shows it (see `PERF.md`).
+None.
