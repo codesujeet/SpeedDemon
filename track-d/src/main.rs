@@ -100,15 +100,51 @@ fn split_graph(data: &[u8], parts: usize) -> (usize, Vec<&[u8]>) {
     (n, cuts.windows(2).map(|w| &body[w[0]..w[1]]).collect())
 }
 
+/// Adjacency in CSR form with 4-byte edges. An edge is one word holding the
+/// neighbour in its high bits and the weight in its low `wb` bits, where
+/// `wb` is what is left of 32 after the bits a node id needs (11 for the
+/// full graph). A weight that does not fit (all ones in the field, or more)
+/// puts the all-ones marker in the word and the exact weight in the word after
+/// it, so any `u32` weight is exact. `row_offset` counts words.
 struct Csr {
     row_offset: Vec<u32>,
-    /// `(neighbour, weight)` of every edge, grouped by node.
-    adj: Vec<(u32, u32)>,
+    adj: Vec<u32>,
+    wb: u32,
 }
 
 impl Csr {
-    fn row(&self, u: u32) -> &[(u32, u32)] {
-        &self.adj[self.row_offset[u as usize] as usize..self.row_offset[u as usize + 1] as usize]
+    /// Layout for a graph of `n` nodes: `wb` weight bits, no rows yet.
+    fn with_nodes(n: usize) -> Self {
+        let id_bits = (usize::BITS - n.saturating_sub(1).leading_zeros()).max(1);
+        Csr { row_offset: Vec::new(), adj: Vec::new(), wb: 32 - id_bits }
+    }
+
+    /// Words an edge of weight `w` takes.
+    fn words(&self, w: u32) -> u32 {
+        1 + u32::from(w >= (1 << self.wb) - 1)
+    }
+
+    /// Writes the edge to `other` at word `at` (`self.words(w)` words).
+    ///
+    /// # Safety
+    /// The words `at..at + self.words(w)` must be in bounds and written by no other thread.
+    unsafe fn put_edge(&self, out: &Disjoint<u32>, at: usize, other: u32, w: u32) {
+        let mask = (1 << self.wb) - 1;
+        out.put(at, other << self.wb | w.min(mask));
+        if w >= mask {
+            out.put(at + 1, w);
+        }
+    }
+
+    /// `(neighbour, weight)` of every edge of `u`.
+    fn edges(&self, u: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let mask = (1 << self.wb) - 1;
+        let mut words = self.adj[self.row_offset[u as usize] as usize..self.row_offset[u as usize + 1] as usize].iter();
+        std::iter::from_fn(move || {
+            let e = *words.next()?;
+            let w = e & mask;
+            Some((e >> self.wb, if w == mask { *words.next()? } else { w }))
+        })
     }
 }
 
@@ -125,11 +161,12 @@ fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, part
         owned
     });
     let bounds = |w: usize| (n * w).div_ceil(workers);
+    let layout = Csr::with_nodes(n);
     let degrees = par(workers, |w| {
         let lo = bounds(w);
         let mut degree = vec![0u32; bounds(w + 1) - lo];
         for e in filed.iter().flat_map(|owned| &owned[w]) {
-            degree[e.0 as usize - lo] += 1;
+            degree[e.0 as usize - lo] += layout.words(e.2);
         }
         degree
     });
@@ -139,7 +176,7 @@ fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, part
             row_offset[bounds(w) + i + 1] = row_offset[bounds(w) + i] + d;
         }
     }
-    let mut adj = vec![(0u32, 0u32); row_offset[n] as usize];
+    let mut adj = vec![0u32; row_offset[n] as usize];
     let out = Disjoint(adj.as_mut_ptr());
     par(workers, |w| {
         let lo = bounds(w);
@@ -147,12 +184,12 @@ fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, part
         for &(key, other, weight) in filed.iter().flat_map(|owned| &owned[w]) {
             let c = &mut cursor[key as usize - lo];
             // SAFETY: the slots of rows [lo, hi) belong to this worker alone, and `*c` walks
-            // exactly the `degree` slots of the row.
-            unsafe { out.put(*c as usize, (other, weight)) };
-            *c += 1;
+            // exactly the words counted for the row.
+            unsafe { layout.put_edge(&out, *c as usize, other, weight) };
+            *c += layout.words(weight);
         }
     });
-    Csr { row_offset, adj }
+    Csr { row_offset, adj, ..layout }
 }
 
 /// The reverse of `g`. Its edges are in local order after the renaming, so
@@ -164,8 +201,8 @@ fn transpose(g: &Csr, parts: usize) -> Csr {
     let rows = |p: usize| (n * p / parts) as u32..(n * (p + 1) / parts) as u32;
     let degree: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
     par(parts, |p| {
-        for &(v, _) in rows(p).flat_map(|u| g.row(u)) {
-            degree[v as usize + 1].fetch_add(1, Relaxed);
+        for (v, w) in rows(p).flat_map(|u| g.edges(u)) {
+            degree[v as usize + 1].fetch_add(g.words(w), Relaxed);
         }
     });
     let mut row_offset: Vec<u32> = degree.into_iter().map(AtomicU32::into_inner).collect();
@@ -173,17 +210,17 @@ fn transpose(g: &Csr, parts: usize) -> Csr {
         row_offset[i + 1] += row_offset[i];
     }
     let cursor: Vec<AtomicU32> = row_offset.iter().map(|&o| AtomicU32::new(o)).collect();
-    let mut adj = vec![(0u32, 0u32); row_offset[n] as usize];
+    let mut adj = vec![0u32; row_offset[n] as usize];
     let out = Disjoint(adj.as_mut_ptr());
     par(parts, |p| {
         for u in rows(p) {
-            for &(v, w) in g.row(u) {
-                // SAFETY: each edge claims its own slot of row `v`, which has one slot per edge counted.
-                unsafe { out.put(cursor[v as usize].fetch_add(1, Relaxed) as usize, (u, w)) };
+            for (v, w) in g.edges(u) {
+                // SAFETY: each edge claims its own words of row `v`, which has room for every edge counted.
+                unsafe { g.put_edge(&out, cursor[v as usize].fetch_add(g.words(w), Relaxed) as usize, u, w) };
             }
         }
     });
-    Csr { row_offset, adj }
+    Csr { row_offset, adj, wb: g.wb }
 }
 
 /// New node order (`order[new] = old`) that puts neighbours close together.
@@ -213,7 +250,7 @@ fn region_order(g: &Csr, workers: usize) -> Vec<u32> {
                 let mut region = vec![seed];
                 let mut head = 0;
                 while head < region.len() && region.len() < REGION {
-                    for &(v, _) in g.row(region[head]) {
+                    for (v, _) in g.edges(region[head]) {
                         if region.len() < REGION && claim(v) {
                             region.push(v);
                         }
@@ -239,19 +276,19 @@ fn permute_csr(g: &Csr, order: &[u32], new_id: &[u32], workers: usize) -> Csr {
     for (i, &old) in order.iter().enumerate() {
         row_offset[i + 1] = row_offset[i] + g.row_offset[old as usize + 1] - g.row_offset[old as usize];
     }
-    let mut adj = vec![(0u32, 0u32); g.adj.len()];
+    let mut adj = vec![0u32; g.adj.len()];
     let out = Disjoint(adj.as_mut_ptr());
     par(workers, |w| {
         let mut at = row_offset[n * w / workers] as usize;
         for &old in &order[n * w / workers..n * (w + 1) / workers] {
-            for &(v, weight) in g.row(old) {
-                // SAFETY: new rows [lo, hi) of worker `w` occupy exactly the slots it walks.
-                unsafe { out.put(at, (new_id[v as usize], weight)) };
-                at += 1;
+            for (v, weight) in g.edges(old) {
+                // SAFETY: new rows [lo, hi) of worker `w` occupy exactly the words it walks.
+                unsafe { g.put_edge(&out, at, new_id[v as usize], weight) };
+                at += g.words(weight) as usize;
             }
         }
     });
-    Csr { row_offset, adj }
+    Csr { row_offset, adj, wb: g.wb }
 }
 
 /// Reads the graph and returns `(node count, forward CSR, reverse CSR, new_id)`,
@@ -454,7 +491,7 @@ fn bidirectional_dijkstra(fwd: &Csr, rev: &Csr, source: u32, target: u32, s: &mu
         if dist > s.get(at, node, side) {
             continue;
         }
-        for &(v, w) in graphs[side].row(node) {
+        for (v, w) in graphs[side].edges(node) {
             let nd = dist + w as u64;
             if nd >= best {
                 continue;
