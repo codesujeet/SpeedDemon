@@ -108,3 +108,19 @@ lines from 531 to 474.
 * Offsets are kept in 32 bits, so the input must be under 4 GiB (checked).
 * Step 1's and the baseline's local timings were not recorded in a form I
   would cite, so those cells are left empty rather than reconstructed.
+
+<!-- board-runs:begin -->
+## Board runs
+
+Each row is one scored run of the named commit on the live board, copied from the public board feed (`board.json`). The feed keeps only each track's latest and best run, so runs before these cannot be listed; earlier steps in the table above stay local measurements. Board timing varies by about 1-2 ms between runs of identical code: every push re-runs all four tracks, so a row whose change names another track measured this track's unchanged code and shows that noise.
+
+| Commit | Change | Run ID | T (s) | M (MiB) | S | Points |
+|---|---|---|---|---|---|---|
+| `32f54ce` | Track A: the writer thread exits the process after the last block (agent-a4 d262378) | `run-6e20c9b0c201` | 0.0482 | 9.6 | 542 | 72.30 |
+| `b67a992` | Track A: link the C runtime statically (skips dynamic loading at start-up) | `run-e9f7a7608016` | 0.0483 | 10.2 | 542 | 72.00 |
+| `f299e99` | Track B: parse the queries in one SIMD token pass with leaner term interning (agent-b 8537 | `run-3faf0553d35d` | 0.0521 | 10.6 | 542 | 71.01 |
+| `33b8455` | Track B: postings fill uses the term offset as its own cursor (agent-b d49c673) | `run-7fc38643a6b0` | 0.0475 | 9.4 | 542 | 72.52 |
+| `b208288` | Track A: workers write their own hour block at its final offset; no writer thread (agent-a | `run-020190d2999d` | 0.0482 | 10.3 | 542 | 71.97 |
+| `cd4c35e` | Revert "Track A: workers write their own hour block at its final offset; no writer thread  | `run-c4635c6dc06f` | 0.0474 | 10.3 | 542 | 72.16 |
+
+<!-- board-runs:end -->

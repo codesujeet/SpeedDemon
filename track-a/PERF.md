@@ -122,3 +122,19 @@ lines from 607 to 434.
 * **Dropping the input's page table entries after the barrier, by every worker but the first, while worker 0 makes the plan** (so that the plan's name reads are not faulted again): the plan took 4-7 M cycles instead of 2.4-3 because the 11 `madvise` calls' TLB shootdowns interrupt it; A/B of 12 runs total time 124-203 vs 110-157 M cycles; not kept.
 * **Dropping each chunk's entries right after it is scanned** (239 `madvise` calls instead of 12): total time no better than the 12-call version on 3 interleaved rounds, more shootdowns; not kept.
 * **Branch-free output formatting** (SWAR digits, 64-byte name copy; callgrind 999.8 M -> 974.0 M instructions, 2.90 M -> 2.13 M mispredicts): board 0.0314 s against 0.0307 s with 12 more lines, so the formatting is not on the critical path; reverted.
+
+<!-- board-runs:begin -->
+## Board runs
+
+Each row is one scored run of the named commit on the live board, copied from the public board feed (`board.json`). The feed keeps only each track's latest and best run, so runs before these cannot be listed; earlier steps in the table above stay local measurements. Board timing varies by about 1-2 ms between runs of identical code: every push re-runs all four tracks, so a row whose change names another track measured this track's unchanged code and shows that noise.
+
+| Commit | Change | Run ID | T (s) | M (MiB) | S | Points |
+|---|---|---|---|---|---|---|
+| `32f54ce` | Track A: the writer thread exits the process after the last block (agent-a4 d262378) | `run-39a9b4e1b49e` | 0.0259 | 23.1 | 508 | 79.88 |
+| `b67a992` | Track A: link the C runtime statically (skips dynamic loading at start-up) | `run-15fd92907080` | 0.0281 | 23.4 | 508 | 78.92 |
+| `f299e99` | Track B: parse the queries in one SIMD token pass with leaner term interning (agent-b 8537 | `run-f4e75da5bc9d` | 0.0271 | 27.7 | 508 | 78.57 |
+| `33b8455` | Track B: postings fill uses the term offset as its own cursor (agent-b d49c673) | `run-aba44205a125` | 0.0289 | 26.8 | 508 | 78.02 |
+| `b208288` | Track A: workers write their own hour block at its final offset; no writer thread (agent-a | `run-f6f7bcc42a1c` | 0.0254 | 27.4 | 516 | 79.29 |
+| `cd4c35e` | Revert "Track A: workers write their own hour block at its final offset; no writer thread  | `run-5156e7ee3367` | 0.0272 | 23.7 | 508 | 79.22 |
+
+<!-- board-runs:end -->

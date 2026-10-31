@@ -184,3 +184,19 @@ pieces can estimate.
 * Step 5 has not run on the scoring box. Expect the board's T to differ.
 * The tokenizer is deliberately byte-based (spec 2.2): anything above 0x7F
   separates tokens. A Unicode-aware tokenizer fails the hash.
+
+<!-- board-runs:begin -->
+## Board runs
+
+Each row is one scored run of the named commit on the live board, copied from the public board feed (`board.json`). The feed keeps only each track's latest and best run, so runs before these cannot be listed; earlier steps in the table above stay local measurements. Board timing varies by about 1-2 ms between runs of identical code: every push re-runs all four tracks, so a row whose change names another track measured this track's unchanged code and shows that noise.
+
+| Commit | Change | Run ID | T (s) | M (MiB) | S | Points |
+|---|---|---|---|---|---|---|
+| `32f54ce` | Track A: the writer thread exits the process after the last block (agent-a4 d262378) | `run-67ca8f767f8d` | 0.3209 | 61.0 | 869 | 64.13 |
+| `b67a992` | Track A: link the C runtime statically (skips dynamic loading at start-up) | `run-9a0f2cb22439` | 0.3393 | 61.4 | 869 | 63.49 |
+| `f299e99` | Track B: parse the queries in one SIMD token pass with leaner term interning (agent-b 8537 | `run-0185f7fa29f3` | 0.3143 | 60.9 | 860 | 64.40 |
+| `33b8455` | Track B: postings fill uses the term offset as its own cursor (agent-b d49c673) | `run-604a4ee5a8cd` | 0.3165 | 56.8 | 864 | 64.61 |
+| `b208288` | Track A: workers write their own hour block at its final offset; no writer thread (agent-a | `run-322d9de18375` | 0.3117 | 57.3 | 864 | 64.73 |
+| `cd4c35e` | Revert "Track A: workers write their own hour block at its final offset; no writer thread  | `run-531bf965b055` | 0.3175 | 57.7 | 864 | 64.50 |
+
+<!-- board-runs:end -->
