@@ -477,8 +477,8 @@ impl Piece {
     }
 
     /// Tokenizes the whole documents at the front of `text` (at most
-    /// `MAX_DOCS`), whose first line is document `first`'s... and builds their
-    /// postings. Returns the number of bytes used.
+    /// `MAX_DOCS`; its first line starts a document) and builds their
+    /// postings and bitmaps. Returns the number of bytes used.
     fn build(&mut self, text: &[u8], table: &TermTable) -> usize {
         let nt = table.terms.len() + 1;
         self.last.resize(nt, 0);

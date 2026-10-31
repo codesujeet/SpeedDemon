@@ -11,7 +11,7 @@ than the scoring box: the version of steps 1-4 (commit `db4cc76`) measured
 **0.426 s, 362 MiB, 905 lines, K 11.58, 53.19 points on the live board** (run
 `run-c4d559ad6869`) and about 0.8-1.0 s, 350 MB on this laptop. The **Run ID**
 column stays *pending* for steps without their own board run, and **Points**
-is only filled from board numbers. Step 5 has not been on the board yet.
+is only filled from board numbers. Steps 5-7 have not been on the board yet.
 Everything that was tried, including the failures, is in
 [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 
@@ -23,8 +23,21 @@ Everything that was tried, including the failures, is in
 | 3 | `mmap` the corpus and the queries | pending | 2.04 -> 1.85 (5 rounds) | 593 -> 349 | pending |
 | 4 | The per-document token loop is split into three tight loops (tokenize into keys, probe the term table for all of them, update the counters) so the independent table probes overlap their cache misses; no `unsafe`, no prefetch instruction | `run-c4d559ad6869` (commit `db4cc76`, steps 1-4 together) | 0.97 -> 0.84 (9 interleaved rounds) | 349 | 53.19 (board) |
 | 5 | Each chunk counts, per term, the documents that contain it; once every chunk is counted the global offsets are known, and each chunk's worker writes its document ids straight into their final slots in one flat array (relaxed atomic stores through a small, documented `unsafe` view), instead of building per-chunk postings and joining them afterwards | pending | about equal (988 vs 1019 ms median over 15 interleaved rounds); the join step is gone | 349 -> 273 | pending |
+| 6 | Rebuild around **pieces**: the corpus is cut into 4 MB line-aligned pieces; a worker tokenizes a piece (AVX2 token mask, branch-free key, bucketed term table with prefetch), builds u16 piece-local postings, runs all 50,000 queries on it, and folds each answer into per-worker count / sum / first-ten accumulators merged at the end. No global token array and no global postings. | pending | 1,479 -> 968 ms (7 interleaved rounds, loaded laptop) | 274 -> 118 | pending |
+| 7 | 1 MB pieces; terms in at least `ndocs/64` documents of a piece also get a bitmap (word-wise AND/OR/NOT, six masked popcounts for a bitmap answer's sum); a presence bitset skips queries that cannot match the piece; a shared per-query marker stops logging ids that cannot be among the ten smallest | pending | 1,438 -> 901 ms vs the step-5 base (9 interleaved rounds); 845 -> 796 vs step 6 (7 rounds). Harness replica (5 runs): 0.664 s | 274 -> 70 | pending |
 
-## What the time is now
+Source lines (the harness's count) went from 659 to 924: the AVX2 scanner, the
+bucketed table, bitmaps and the merge cost 265 lines.
+
+## What the time is now (steps 6-7)
+
+Per-thread CPU on the laptop, single thread, full data: tokenize and build
+about 1.9 s, of which the term lookup is about 40%; answering 50,000 queries
+on 250 pieces about 1.5 s (the per-query-per-piece floor is 12.5 M presence
+checks, about 0.45 s; 3.9 M of them survive and cost about 1 s, 85% BOOL).
+Parse queries is serial and about 0.02-0.04 s.
+
+## What the time was before step 6
 
 Full data, 250,000 documents, 36.3 M tokens: parse queries about 0.04 s,
 tokenize and build postings about 0.55-0.85 s depending on machine load,
@@ -82,6 +95,50 @@ release build (which only sees this folder) never compiles them and the
 source-size count of this folder does not include them. `cargo test` in this
 folder still runs them. By the harness's own count this changed the source
 lines from 886 to 659.
+
+## Why steps 6 and 7
+
+Memory was the big lever: 145 MB of token ids plus 119 MB of postings only
+exist so that queries can be answered later. Answering every query on each
+piece right after tokenizing it lets a worker's token ids and postings live
+in a few MB (1 MB of text is about 145 k tokens), reused for the next piece,
+so the peak is just 12 workers x a few MB plus the accumulators. The merge is
+exact because a worker takes pieces in ascending order: its first ten ids per
+query are its ten smallest, and a shared per-query marker (`full[q]`, the
+base of a piece after which some worker already holds ten ids) lets the
+others skip logging ids that cannot be among the ten smallest.
+
+Measured, single thread, 1 MB pieces: a query-piece pair costs about 37 ns
+just to test presence, and the ~3.9 M surviving evaluations about 270 ns
+each. A branch-free term lookup (`key`, a 3-way bucket compared without
+branches, one rarely-taken slow path) cut scan + key from 154 to 61 ms per
+64 MB; an explicit prefetch of the bucket when the key is made cut the lookup
+from about 25 to about 15 ns per token.
+
+## Tried and dropped (steps 6-7)
+
+* **Piece size** 1, 2, 4 MB: native wall times were within noise (535-767 ms);
+  1 MB chosen for memory (118 -> 76 MB at the same speed).
+* **The presence prefilter alone** (before bitmaps): answer phase 1.7-2.0 s ->
+  1.6 s single thread; only 31% of query-piece pairs survive, but the
+  survivors, not the 12.5 M checks, are most of the cost.
+* **Bitmap answers with the sum-of-positions popcount trick**: did not move
+  the answer phase (1.53 s vs 1.56 s); the surviving evaluations spend most
+  of their time outside the merges (about 180 cycles per operation, but
+  500-800 per evaluation).
+* **Per-query rdtsc / atomic profiling** perturbs the loop by about 70 cycles
+  per query; phase-level differences (skip a query kind) were more reliable.
+* **Parallel merge of the logs**: 33 -> 17 ms, kept; the log itself dropped
+  from 1.46 M to 0.67 M entries with the `full[q]` marker.
+
+## Most promising next step
+
+The 12.5 M presence checks and 3.9 M evaluations per run are the floor of
+"every query on every piece". Group queries by an anchor term (the rarest of a
+phrase's terms, the first term of a BOOL's AND prefix) and visit only the
+queries whose anchor is present in the piece: that removes the 37 ns floor and
+most evaluations. The anchor needs global term counts, which one or two sample
+pieces can estimate.
 
 ## Caveats
 
