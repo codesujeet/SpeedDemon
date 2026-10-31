@@ -33,7 +33,7 @@ board yet. Everything that was tried, including the failures, is in
 | 12 | Region table is one byte per region id (2 MB -> 1 MB, so it stays in L2); the rare group beyond the 254th goes to a spill map | pending | 0.123 -> 0.106 median, cpu 1126 -> 992 ms (13 interleaved rounds) | 11 -> 10 | pending |
 | 14 | Each worker `madvise(MADV_DONTNEED)`s the page-aligned interior of a chunk it has finished, so the page-table teardown at exit (counted in T) happens in parallel while parsing | pending | ~85 -> ~74 ms median, 7 of 8 interleaved docker rounds faster (noisy laptop) | 10 | pending |
 | 15 | `parse_regions` (serial, before any worker starts): the region id is read with the branch-free SWAR digit run and the common line end is checked first. callgrind on a 8 MB slice: mispredicts 422k -> 224k in total (all 198k of the regions loop gone), instructions 76.5M -> 70.3M. Serial regions phase was ~4 of ~100 ms on the laptop | pending | wall not resolvable on the laptop | 10 | pending |
-| 16 | Software prefetch of the input stream (`_MM_HINT_T0`, 1536 bytes ahead) once per record, since the hardware prefetcher stops at page boundaries | pending | laptop ~84 -> ~76 ms median, 6 of 10 interleaved rounds faster (noisy) | 10 | pending |
+| 16 | Software prefetch of the input stream (`_MM_HINT_T0`, 3072 bytes ahead (was 1536: 9 of 12 interleaved laptop rounds faster, ~89 -> ~82 ms median)) once per record, since the hardware prefetcher stops at page boundaries | pending | laptop ~84 -> ~76 ms median, 6 of 10 interleaved rounds faster (noisy) | 10 | pending |
 
 Step 5 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.139 s and 47 MB, against 0.213 s and

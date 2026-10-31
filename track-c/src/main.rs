@@ -421,7 +421,7 @@ fn parse_records(
         // SAFETY: a prefetch is a hint; it never faults, even past the mapping.
         unsafe {
             std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
-                data.as_ptr().wrapping_add(i + 1536).cast(),
+                data.as_ptr().wrapping_add(i + 3072).cast(),
             )
         };
         i += 3 * (data[i] == 0xEF) as usize;
