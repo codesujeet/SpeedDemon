@@ -369,6 +369,7 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
 /// `PAD` readable bytes.
 fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write) -> std::io::Result<()> {
     let n = d.len();
+    let t0 = std::time::Instant::now();
     // The first line start at or after `x` (a line start exactly at `x` goes to the chunk before): adjacent chunks agree.
     let snap = |x: usize| if x >= n { n } else if x == 0 { 0 } else { x + d[x..].iter().position(|&b| b == b'\n').unwrap() + 1 };
     let (cursor, next, barrier) = (AtomicUsize::new(0), AtomicUsize::new(0), Barrier::new(threads));
@@ -390,6 +391,9 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
                 }
                 parts[t].set(worker.part).ok();
                 barrier.wait();
+                if t == 0 && std::env::var("TRACK_A_TIMING").is_ok() {
+                    eprintln!("track-a: scan done at {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+                }
                 let plan = plan.get_or_init(|| make_plan(parts, names));
                 let mut scratch = Scratch::default();
                 loop {
