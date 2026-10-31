@@ -13,7 +13,7 @@ scanned from a zero-padded copy so the 64-byte vector loads stay inside the data
 The spec fixes the line layout, so the 27-byte timestamp and the 3-digit
 status are read by offset and only the method, endpoint and latency need a
 delimiter scan (one 64-byte AVX2 window finds the four delimiters of almost
-every line). Each line becomes one packed `u64` (endpoint number, error flag,
+every line). Each line becomes one packed `u32` (endpoint number, error flag,
 latency, parsed with SWAR) that is appended to the worker's own list for the
 line's hour, found by comparing the 13 timestamp bytes `YYYY-MM-DDTHH`. A
 worker keeps one endpoint table for the whole run (open addressing, names
@@ -46,7 +46,7 @@ None.
 
 ## With another 24 hours
 
-Memory is now mostly the packed lines (25 MB) and the output file's page
+Memory is now mostly the packed lines (12 MB) and the output file's page
 cache; 6-byte lines or 2-byte latencies with an escape would shrink the first.
 The scan itself would gain from finding all delimiters of a whole 64-byte
 block at once instead of line by line.

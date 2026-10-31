@@ -103,6 +103,30 @@ fn a_full_catalogue_of_similar_endpoints() {
 }
 
 #[test]
+fn endpoints_that_differ_in_one_byte_stay_apart() {
+    // Same length, one different byte, at every position that matters for the 32-byte compares.
+    let mut data = Vec::new();
+    for len in [1usize, 2, 8, 9, 31, 32, 33, 64, 65, 96, 97, 124, 125] {
+        for pos in [0, len / 2, len.saturating_sub(1)] {
+            for variant in 0..3u8 {
+                let mut name = vec![b'a'; len];
+                name[0] = b'/';
+                if pos > 0 {
+                    name[pos] = b'b' + variant;
+                }
+                for i in 0..4u32 {
+                    data.extend_from_slice(b"2026-10-30T18:00:00.000000Z GET ");
+                    data.extend_from_slice(&name);
+                    data.extend_from_slice(format!(" 200 {}
+", i + 10 * u32::from(variant)).as_bytes());
+                }
+            }
+        }
+    }
+    assert_eq!(summarize(&data, 3, 1000), reference(&data));
+}
+
+#[test]
 fn files_shorter_than_one_window_work() {
     for n in 1..4 {
         let data: Vec<u8> = (0..n).flat_map(|i| format!("2026-10-30T18:00:00.000000Z GET /a{i} 200 {i}\n").into_bytes()).collect();
