@@ -3,11 +3,17 @@
 
 use super::*;
 
+/// The input followed by `PAD` zero bytes, as `process` requires.
+fn padded(data: &[u8]) -> &'static [u8] {
+    let mut v = data.to_vec();
+    v.resize(data.len() + PAD, 0);
+    &Box::leak(v.into_boxed_slice())[..data.len()]
+}
+
 /// Runs the scan and the output phase on `data` and returns the output bytes.
-fn summarize(data: &[u8], threads: usize, morsel: usize) -> Vec<u8> {
-    let (workers, names) = scan_parallel(Box::leak(data.to_vec().into_boxed_slice()), threads, morsel);
+fn summarize(data: &[u8], threads: usize, chunk: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    write_hours(&workers, &names, threads, &mut out).unwrap();
+    process(padded(data), threads, chunk, &mut out).unwrap();
     out
 }
 
@@ -41,7 +47,8 @@ fn parse_latency_reads_one_to_ten_digits() {
     for v in [0u64, 7, 10, 99, 123, 4096, 99_999, 1_000_000, 12_345_678, 99_999_999, 100_000_000, 987_654_321, 4_294_967_295] {
         let line = format!("2026-10-30T18:00:00.000000Z GET /x 200 {v}\n");
         let s = line.find("200 ").unwrap() + 4;
-        assert_eq!(parse_latency(line.as_bytes(), s, line.len() - 1), v);
+        // SAFETY: the digits are inside `line`, which is longer than eight bytes before them.
+        assert_eq!(unsafe { parse_latency(line.as_ptr(), s, line.len() - 1) }, v as u32);
     }
 }
 
@@ -85,10 +92,12 @@ fn any_thread_count_and_morsel_size_gives_the_reference_output() {
 }
 
 #[test]
-fn more_endpoints_than_the_first_table_holds() {
+fn a_full_catalogue_of_similar_endpoints() {
+    // 2,000 names that share their first and last eight bytes, so their table slots collide, with lengths from 25 to 125.
     let mut data = Vec::new();
     for i in 0..30_000u32 {
-        data.extend_from_slice(format!("2026-10-30T18:00:00.000000Z PUT /ep/{}/x {} {i}\n", i % 5000, 200 + i % 400).as_bytes());
+        let (k, pad) = (i % 2000, "p".repeat(i as usize % 2000 % 100));
+        data.extend_from_slice(format!("2026-10-30T18:00:00.000000Z PUT /endpoint/{pad}/{k}/last/x {} {i}\n", 200 + i % 400).as_bytes());
     }
     assert_eq!(summarize(&data, 3, 1 << 14), reference(&data));
 }

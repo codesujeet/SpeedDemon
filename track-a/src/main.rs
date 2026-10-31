@@ -2,25 +2,34 @@
 //! nearest-rank p50/p95/p99 latency and 5xx counts from a space-delimited
 //! log (`ts method endpoint status latency_us`), as in specs/a-ingest.md.
 //!
-//! The input is mapped and cut into morsels that workers take from an atomic
-//! cursor. A worker turns each line into one packed `u64` (endpoint number,
-//! error flag, latency) and appends it to its own list for the line's hour;
-//! endpoint numbers come from a table the worker keeps for the whole run,
-//! backed by one shared table that hands out the numbers. When the scan is
-//! done, workers take one hour at a time: they count its lines per endpoint
-//! (the packed values of all workers for that hour), place the latencies in
-//! one run per endpoint, select the percentiles and format the lines, which
-//! are written in hour order as they complete.
+//! One pass over the mapped input and nothing else is shared in the hot loop:
+//! workers take 1 MiB chunks from an atomic cursor and turn each line into one
+//! `u32` (endpoint number, error flag, 20-bit latency; a longer latency is
+//! followed by its full value) appended to a private arena. The endpoint is
+//! found in a private table that stores the offset of the first occurrence and
+//! verifies it byte for byte. After a barrier, workers take one hour at a time:
+//! count per endpoint, place the latencies in one run per endpoint, select the
+//! percentiles, format, and hand the block to the main thread, which writes
+//! the blocks in hour order.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::{mpsc, Barrier, Mutex, OnceLock};
 
-/// Maps `path` read-only for the life of the process. The harness
-/// pre-warms `/data` into the page cache before the run, so those pages
-/// are charged outside this run's cgroup and mapping them adds nothing to
-/// peak memory; `fs::read` would copy the whole file into charged heap.
+/// A stored line is `endpoint << 21 | error << 20 | latency`; a latency that does not fit 20 bits is stored as
+/// `LAT_MASK` and followed by a whole `u32` holding the latency.
+const LAT_MASK: u32 = (1 << 20) - 1;
+const ERR: u32 = 1 << 20;
+/// The spec gives every seed a catalogue of exactly 1,842 endpoints, so 11 bits of endpoint number are enough.
+const MAX_ENDPOINTS: usize = 1 << 11;
+/// Slots of a worker's endpoint table (at most a quarter used).
+const SLOTS: usize = 1 << 13;
+/// Bytes after the end of the input that may be read (the vector loads of the last line).
+const PAD: usize = 128;
+
+/// Maps `path` read-only and returns it with at least `PAD` readable zero bytes after the end. The harness
+/// pre-warms `/data` into the page cache, so mapped pages are not charged to this run; `fs::read` would copy.
 #[cfg(unix)]
 fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     use std::os::fd::AsRawFd;
@@ -32,8 +41,15 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     if len == 0 {
         return Ok(&[]);
     }
-    // SAFETY: a fresh read-only private mapping of `len` bytes of an open file; it is never unmapped.
-    let p = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
+    // SAFETY: an anonymous read-only reservation of `len` + one page, then the file mapped over its start (MAP_FIXED
+    // replaces only pages of this reservation); the page after the file is zero, as is the rest of the last file page.
+    let p = unsafe {
+        let anon = mmap(std::ptr::null_mut(), len + 4096, 1, 0x22, -1, 0);
+        if anon as isize == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        mmap(anon, len, 1, 0x12, file.as_raw_fd(), 0)
+    };
     if p as isize == -1 {
         return Err(std::io::Error::last_os_error());
     }
@@ -43,46 +59,51 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
 
 #[cfg(not(unix))]
 fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
-    Ok(Box::leak(std::fs::read(path)?.into_boxed_slice()))
+    let mut data = std::fs::read(path)?;
+    let len = data.len();
+    data.resize(len + PAD, 0);
+    Ok(&Box::leak(data.into_boxed_slice())[..len])
 }
 
-#[inline]
-fn load8(d: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(d[at..at + 8].try_into().unwrap())
+/// SAFETY (all raw reads below): `p` and the bytes read are inside the mapped input or its `PAD` zero bytes, which
+/// holds for every line of well-formed input (the spec guarantees it).
+#[inline(always)]
+unsafe fn load8(p: *const u8) -> u64 {
+    p.cast::<u64>().read_unaligned()
 }
 
-/// Bit i is set when byte `at + i` is a space or a line feed.
-#[inline]
-fn delimiters(d: &[u8], at: usize) -> u64 {
+/// Bit i is set when byte `p + i` is a space or a line feed (the only bytes of a line below `!`).
+#[inline(always)]
+unsafe fn delimiters(p: *const u8) -> u64 {
     use std::arch::x86_64::*;
-    assert!(at + 64 <= d.len());
-    // SAFETY: the 64 bytes at `at` are inside `d` (asserted); AVX2 is enabled for the build (target-cpu=x86-64-v3).
-    unsafe {
-        let (space, line_feed) = (_mm256_set1_epi8(b' ' as i8), _mm256_set1_epi8(b'\n' as i8));
-        let window = |o: usize| {
-            let v = _mm256_loadu_si256(d.as_ptr().add(at + o) as *const __m256i);
-            _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, space), _mm256_cmpeq_epi8(v, line_feed))) as u32 as u64
-        };
-        window(0) | window(32) << 32
-    }
+    let bang = _mm256_set1_epi8(0x21);
+    let half = |o: usize| _mm256_movemask_epi8(_mm256_cmpgt_epi8(bang, _mm256_loadu_si256(p.add(o).cast()))) as u32 as u64;
+    half(0) | half(32) << 32
 }
 
-/// (endpoint start, endpoint end, line feed) of the line at `ls`. The 27-byte
-/// timestamp is skipped; the next four delimiters (after the method, the
-/// endpoint, the status, and the line feed) are almost always in the first
-/// 64-byte window, and longer lines take further windows.
-#[inline]
-fn split(d: &[u8], ls: usize) -> (usize, usize, usize) {
+/// (endpoint start, endpoint end, line feed) of the line at `ls`. The 27-byte timestamp is skipped; the next four
+/// delimiters (after the method, the endpoint, the status, and the line feed) are almost always in one 64-byte window.
+#[inline(always)]
+unsafe fn split(base: *const u8, ls: usize) -> (usize, usize, usize) {
+    let mut m = delimiters(base.add(ls + 28));
+    let a = m.trailing_zeros();
+    m &= m.wrapping_sub(1);
+    let b = m.trailing_zeros();
+    m &= m.wrapping_sub(1);
+    m &= m.wrapping_sub(1);
+    let c = m.trailing_zeros();
+    if c < 64 {
+        return (ls + 29 + a as usize, ls + 28 + b as usize, ls + 28 + c as usize);
+    }
+    split_long(base, ls)
+}
+
+/// `split` for a line whose delimiters do not all fit in the first window (an endpoint over about 45 bytes).
+#[inline(never)]
+unsafe fn split_long(base: *const u8, ls: usize) -> (usize, usize, usize) {
     let (mut at, mut found, mut n) = (ls + 28, [0usize; 4], 0);
     loop {
-        let mut bits = delimiters(d, at);
-        if n == 0 && bits.count_ones() >= 4 {
-            for slot in &mut found {
-                *slot = at + bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-            }
-            return (found[0] + 1, found[1], found[3]);
-        }
+        let mut bits = delimiters(base.add(at));
         while bits != 0 && n < 4 {
             found[n] = at + bits.trailing_zeros() as usize;
             bits &= bits - 1;
@@ -95,23 +116,36 @@ fn split(d: &[u8], ls: usize) -> (usize, usize, usize) {
     }
 }
 
-/// The decimal number in `d[s..e]` (1 to 10 digits): the last eight digits
-/// by SWAR on one 8-byte load that ends at `e`, the others one by one.
-#[inline]
-fn parse_latency(d: &[u8], s: usize, e: usize) -> u64 {
-    let len = e - s;
-    let n = len.min(8);
+/// The decimal number at `s..e` (1 to 10 digits): the last eight digits by SWAR on one 8-byte load that ends at `e`.
+#[inline(always)]
+unsafe fn parse_latency(base: *const u8, s: usize, e: usize) -> u32 {
+    let n = (e - s).min(8);
     // The digits are the top `n` bytes of the load; the bytes below are cleared, which reads as leading zeros.
-    let w = load8(d, e - 8) & 0x0F0F_0F0F_0F0F_0F0F & (u64::MAX << (64 - 8 * n));
+    let w = load8(base.add(e - 8)) & 0x0F0F_0F0F_0F0F_0F0F & (u64::MAX << (64 - 8 * n));
     let w = w * 10 + (w >> 8);
-    let mut v = ((w & 0x0000_00FF_0000_00FF) * 0x000F_4240_0000_0064
-        + ((w >> 16) & 0x0000_00FF_0000_00FF) * 0x0000_2710_0000_0001)
-        >> 32;
-    if len > 8 {
-        let high = d[s..e - 8].iter().fold(0, |a, &c| a * 10 + u64::from(c - b'0'));
+    let mut v = ((w & 0x0000_00FF_0000_00FF) * 0x000F_4240_0000_0064 + ((w >> 16) & 0x0000_00FF_0000_00FF) * 0x0000_2710_0000_0001) >> 32;
+    if e - s > 8 {
+        let high = (s..e - 8).fold(0, |a, i| a * 10 + u64::from(*base.add(i) - b'0'));
         v += high * 100_000_000;
     }
-    v & 0xFFFF_FFFF
+    v as u32
+}
+
+/// Whether the `len` bytes at `p` and `q` are equal (`len` >= 1): one masked 32-byte compare, or 32-byte
+/// blocks plus one that ends at the last byte.
+#[inline(always)]
+unsafe fn same(p: *const u8, q: *const u8, len: usize) -> bool {
+    use std::arch::x86_64::*;
+    let eq = |o: usize| _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p.add(o).cast()), _mm256_loadu_si256(q.add(o).cast()))) as u32;
+    if len <= 32 {
+        let want = u32::MAX >> (32 - len);
+        return eq(0) & want == want;
+    }
+    let mut ok = eq(len - 32) == u32::MAX;
+    for o in (0..len - 32).step_by(32) {
+        ok &= eq(o) == u32::MAX;
+    }
+    ok
 }
 
 /// The endpoint numbers handed out so far and the names that go with them.
@@ -121,149 +155,101 @@ struct Names {
     list: Vec<&'static [u8]>,
 }
 
-/// One slot of a worker's endpoint table: where an occurrence of the name
-/// is in the worker's input, and its number. `len == 0` marks a free slot.
-#[derive(Clone, Copy, Default)]
-struct Slot {
-    start: usize,
-    len: u32,
-    id: u32,
+/// What one worker found: all its lines in scan order, and where the hour (`YYYY-MM-DDTHH` as two overlapping
+/// 8-byte loads) changes: `(first load, second load, index in arena)`.
+struct Part {
+    arena: Vec<u32>,
+    runs: Vec<(u64, u64, usize)>,
 }
 
-/// What one worker found: for each hour it saw, the packed lines of that hour
-/// (`endpoint << 33 | error << 32 | latency`).
 struct Worker {
     d: &'static [u8],
-    table: Vec<Slot>,
-    used: usize,
-    hours: Vec<((u64, u64), Vec<u64>)>,
-    cur_key: (u64, u64),
-    cur: usize,
+    /// Endpoint table: `offset of first occurrence | length << 32 | number << 40`; 0 is a free slot.
+    table: Vec<u64>,
+    part: Part,
+    key: (u64, u64),
 }
 
 impl Worker {
     fn new(d: &'static [u8]) -> Self {
-        Worker { d, table: vec![Slot::default(); 4096], used: 0, hours: Vec::new(), cur_key: (0, 0), cur: 0 }
+        // A line has at least 40 bytes and takes at most two words.
+        let arena = Vec::with_capacity(d.len() / 20 + 16);
+        Worker { d, table: vec![0; SLOTS], part: Part { arena, runs: Vec::new() }, key: (0, 0) }
     }
 
-    /// Table position at which the name `d[s..e]` starts probing.
-    #[inline]
-    fn home(&self, s: usize, e: usize) -> usize {
-        let (d, len) = (self.d, e - s);
-        let (a, b, c) = if len >= 8 {
-            (load8(d, s), load8(d, e - 8), load8(d, s + (len - 8) / 2))
-        } else {
-            (load8(d, s) & ((1u64 << (8 * len)) - 1), 0, 0)
-        };
-        let h = (a ^ b.rotate_left(21) ^ c.rotate_left(42) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        (h >> 32) as usize & (self.table.len() - 1)
-    }
-
-    /// The number of the endpoint `d[s..e]`, taken from the shared table the
-    /// first time this worker sees it.
-    #[inline]
-    fn endpoint(&mut self, s: usize, e: usize, names: &Mutex<Names>) -> u32 {
-        let d = self.d;
-        let mask = self.table.len() - 1;
-        let mut i = self.home(s, e);
-        while self.table[i].len != 0 {
-            let slot = self.table[i];
-            if slot.len as usize == e - s && d[slot.start..slot.start + slot.len as usize] == d[s..e] {
-                return slot.id;
+    /// The number of the endpoint `d[es..ee]`, taken from the shared names the first time this worker sees it.
+    #[inline(always)]
+    unsafe fn endpoint(&mut self, es: usize, ee: usize, names: &Mutex<Names>) -> u32 {
+        let (base, len) = (self.d.as_ptr(), ee - es);
+        let bits = 8 * len.min(8) as u32;
+        let a = load8(base.add(es)) & (u64::MAX >> (64 - bits));
+        let b = load8(base.add(ee - 8)) & (u64::MAX << (64 - bits));
+        let mut i = ((a ^ b.rotate_left(29) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 51) as usize;
+        loop {
+            let slot = *self.table.get_unchecked(i);
+            if slot == 0 {
+                return self.insert(es, ee, i, names);
             }
-            i = (i + 1) & mask;
+            if (slot >> 32) as u8 as usize == len && same(base.add(es), base.add(slot as u32 as usize), len) {
+                return (slot >> 40) as u32;
+            }
+            i = (i + 1) % SLOTS;
         }
+    }
+
+    #[cold]
+    fn insert(&mut self, es: usize, ee: usize, i: usize, names: &Mutex<Names>) -> u32 {
         let mut shared = names.lock().unwrap();
         let next = shared.list.len() as u32;
-        let id = *shared.ids.entry(&d[s..e]).or_insert(next);
+        let id = *shared.ids.entry(&self.d[es..ee]).or_insert(next);
         if id == next {
-            shared.list.push(&d[s..e]);
+            shared.list.push(&self.d[es..ee]);
         }
-        drop(shared);
-        self.table[i] = Slot { start: s, len: (e - s) as u32, id };
-        self.used += 1;
-        if self.used * 2 > self.table.len() {
-            let bigger = vec![Slot::default(); self.table.len() * 2];
-            let old = std::mem::replace(&mut self.table, bigger);
-            for slot in old.into_iter().filter(|s| s.len != 0) {
-                let mut j = self.home(slot.start, slot.start + slot.len as usize);
-                while self.table[j].len != 0 {
-                    j = (j + 1) & (self.table.len() - 1);
-                }
-                self.table[j] = slot;
-            }
-        }
+        assert!((id as usize) < MAX_ENDPOINTS, "more endpoints than the spec's catalogue of 1,842");
+        self.table[i] = es as u64 | ((ee - es) as u64) << 32 | u64::from(id) << 40;
         id
     }
 
     /// Parses the lines that start in `[start, end)`.
     fn scan(&mut self, start: usize, end: usize, names: &Mutex<Names>) {
-        let d = self.d;
-        let mut ls = start;
-        while ls < end {
-            let (es, ee, nl) = split(d, ls);
-            let id = self.endpoint(es, ee, names);
-            let error = u64::from(d[ee + 1] >= b'5');
-            let latency = parse_latency(d, ee + 5, nl);
-            let key = (load8(d, ls), load8(d, ls + 5));
-            if key != self.cur_key {
-                self.cur_key = key;
-                self.cur = self.hours.iter().position(|h| h.0 == key).unwrap_or_else(|| {
-                    self.hours.push((key, Vec::with_capacity(8192)));
-                    self.hours.len() - 1
-                });
+        let base = self.d.as_ptr();
+        let first = self.part.arena.as_mut_ptr();
+        // SAFETY: the arena has room for two words per line of the whole input; see `PAD` for the reads.
+        unsafe {
+            let mut w = first.add(self.part.arena.len());
+            let mut ls = start;
+            while ls < end {
+                let (es, ee, nl) = split(base, ls);
+                let id = self.endpoint(es, ee, names);
+                let error = u32::from(*base.add(ee + 1) >= b'5');
+                let latency = parse_latency(base, ee + 5, nl);
+                let key = (load8(base.add(ls)), load8(base.add(ls + 5)));
+                if key != self.key {
+                    self.key = key;
+                    self.part.runs.push((key.0, key.1, w.offset_from(first) as usize));
+                }
+                let line = id << 21 | error << 20;
+                if latency < LAT_MASK {
+                    *w = line | latency;
+                    w = w.add(1);
+                } else {
+                    *w = line | LAT_MASK;
+                    *w.add(1) = latency;
+                    w = w.add(2);
+                }
+                ls = nl + 1;
             }
-            self.hours[self.cur].1.push(u64::from(id) << 33 | error << 32 | latency);
-            ls = nl + 1;
+            self.part.arena.set_len(w.offset_from(first) as usize);
         }
     }
 }
 
-/// `YYYY-MM-DDTHH`, the 13 bytes that make an hour, from its two overlapping loads.
+/// The text of an hour (`YYYY-MM-DDTHH`) from its two overlapping loads.
 fn hour_text(key: (u64, u64)) -> [u8; 13] {
     let mut text = [0u8; 13];
     text[..8].copy_from_slice(&key.0.to_le_bytes());
     text[8..].copy_from_slice(&key.1.to_le_bytes()[3..]);
     text
-}
-
-/// Morsel-driven scan: a shared atomic cursor over nominal byte offsets, each
-/// snapped forward to the next line start, so adjacent morsels agree on the
-/// split point without coordination. The last few hundred bytes are scanned
-/// from a zero-padded copy, so the 64-byte loads never run past the data.
-fn scan_parallel(data: &'static [u8], threads: usize, morsel: usize) -> (Vec<Worker>, Vec<&'static [u8]>) {
-    let n = data.len();
-    let snap = |nominal: usize, limit: usize| match nominal {
-        0 => 0,
-        x if x >= limit => limit,
-        x => x + data[x..limit].iter().position(|&b| b == b'\n').unwrap() + 1,
-    };
-    let split_at = snap(n.saturating_sub(512), n);
-    let (cursor, names) = (AtomicUsize::new(0), Mutex::new(Names::default()));
-    let mut workers = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut worker = Worker::new(data);
-                    loop {
-                        let nominal = cursor.fetch_add(morsel, Ordering::Relaxed);
-                        if nominal >= split_at {
-                            return worker;
-                        }
-                        worker.scan(snap(nominal, split_at), snap(nominal + morsel, split_at), &names);
-                    }
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().expect("worker thread panicked")).collect::<Vec<_>>()
-    });
-    let mut padded = data[split_at..].to_vec();
-    let tail = padded.len();
-    padded.resize(tail + 128, 0);
-    let mut last = Worker::new(Box::leak(padded.into_boxed_slice()));
-    last.scan(0, tail, &names);
-    workers.push(last);
-    (workers, names.into_inner().unwrap().list)
 }
 
 /// Exact nearest-rank percentiles p50, p95 and p99 of `lat` (the spec's
@@ -296,47 +282,27 @@ fn write_u64(buf: &mut [u8; 20], mut v: u64) -> &[u8] {
     }
 }
 
-/// The output lines of one hour, given the packed lines of every worker for
-/// that hour. `order` lists the endpoint numbers by endpoint bytes.
-fn format_hour(text: &[u8; 13], parts: &[&[u64]], names: &[&[u8]], order: &[u32], scratch: &mut Scratch) -> Vec<u8> {
-    let (count, start, lat) = (&mut scratch.count, &mut scratch.start, &mut scratch.lat);
-    count.clear();
-    count.resize(names.len(), 0);
-    for &line in parts.iter().copied().flatten() {
-        count[(line >> 33) as usize] += 1 | (line >> 32 & 1) << 32;
-    }
-    let mut total = 0;
-    for &id in order {
-        start[id as usize] = total;
-        total += count[id as usize] as u32 as usize;
-    }
-    lat.resize(total, 0);
-    for &line in parts.iter().copied().flatten() {
-        let at = &mut start[(line >> 33) as usize];
-        lat[*at] = line as u32;
-        *at += 1;
-    }
-    let mut out = Vec::with_capacity(total * 3 + 4096);
-    let mut buf = [0u8; 20];
-    for &id in order {
-        let n = count[id as usize] as u32 as usize;
-        if n == 0 {
-            continue;
+/// Everything the output phase needs once the scan is done.
+struct Plan {
+    /// Each hour's text and its lines, as the slices of every worker's arena that hold that hour.
+    hours: Vec<([u8; 13], Vec<&'static [u32]>)>,
+    names: Vec<&'static [u8]>,
+    /// The endpoint numbers by endpoint bytes.
+    order: Vec<u32>,
+}
+
+fn make_plan(parts: &'static [OnceLock<Part>], names: &Mutex<Names>) -> Plan {
+    let mut by_hour: BTreeMap<[u8; 13], Vec<&'static [u32]>> = BTreeMap::new();
+    for part in parts.iter().map(|p| p.get().unwrap()) {
+        for (i, run) in part.runs.iter().enumerate() {
+            let end = part.runs.get(i + 1).map_or(part.arena.len(), |r| r.2);
+            by_hour.entry(hour_text((run.0, run.1))).or_default().push(&part.arena[run.2..end]);
         }
-        let end = start[id as usize];
-        let [p50, p95, p99] = percentiles(&mut lat[end - n..end]);
-        let errors = count[id as usize] >> 32;
-        out.extend_from_slice(text);
-        out.extend_from_slice(b":00:00Z ");
-        out.extend_from_slice(names[id as usize]);
-        // floor(errors * 1_000_000 / count): integer division already floors.
-        for v in [n as u64, p50.into(), p95.into(), p99.into(), errors, errors * 1_000_000 / n as u64] {
-            out.push(b' ');
-            out.extend_from_slice(write_u64(&mut buf, v));
-        }
-        out.push(b'\n');
     }
-    out
+    let names = std::mem::take(&mut names.lock().unwrap().list);
+    let mut order: Vec<u32> = (0..names.len() as u32).collect();
+    order.sort_unstable_by_key(|&id| names[id as usize]);
+    Plan { hours: by_hour.into_iter().collect(), names, order }
 }
 
 /// Per-thread buffers reused from hour to hour.
@@ -347,35 +313,101 @@ struct Scratch {
     lat: Vec<u32>,
 }
 
-/// Formats every hour in parallel and writes the blocks to `sink` in hour
-/// order, each as soon as it and all earlier hours are done.
-fn write_hours(workers: &[Worker], names: &[&[u8]], threads: usize, sink: &mut impl Write) -> std::io::Result<()> {
-    let mut by_hour: BTreeMap<[u8; 13], Vec<&[u64]>> = BTreeMap::new();
-    for (key, lines) in workers.iter().flat_map(|w| &w.hours) {
-        by_hour.entry(hour_text(*key)).or_default().push(lines);
+/// The output lines of one hour of the plan.
+fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
+    let (text, parts) = &plan.hours[hour];
+    let (count, start, lat) = (&mut sc.count, &mut sc.start, &mut sc.lat);
+    count.clear();
+    count.resize(plan.names.len(), 0);
+    let mut lines = 0;
+    for part in parts {
+        let mut it = part.iter();
+        while let Some(&w) = it.next() {
+            count[(w >> 21) as usize] += 1 | u64::from(w >> 20 & 1) << 32;
+            if w & LAT_MASK == LAT_MASK {
+                it.next();
+            }
+            lines += 1;
+        }
     }
-    let hours: Vec<_> = by_hour.into_iter().collect();
-    let mut order: Vec<u32> = (0..names.len() as u32).collect();
-    order.sort_unstable_by_key(|&id| names[id as usize]);
+    start.clear();
+    start.extend(count.iter().scan(0, |total, &c| Some(std::mem::replace(total, *total + c as u32 as usize))));
+    lat.resize(lines, 0);
+    for part in parts {
+        let mut it = part.iter();
+        while let Some(&w) = it.next() {
+            let at = &mut start[(w >> 21) as usize];
+            lat[*at] = if w & LAT_MASK == LAT_MASK { *it.next().unwrap() } else { w & LAT_MASK };
+            *at += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(lines * 3 + 4096);
+    let mut buf = [0u8; 20];
+    for &id in &plan.order {
+        let n = count[id as usize] as u32 as usize;
+        if n == 0 {
+            continue;
+        }
+        let end = start[id as usize];
+        let [p50, p95, p99] = percentiles(&mut lat[end - n..end]);
+        let errors = count[id as usize] >> 32;
+        out.extend_from_slice(text);
+        out.extend_from_slice(b":00:00Z ");
+        out.extend_from_slice(plan.names[id as usize]);
+        // floor(errors * 1_000_000 / count): integer division already floors.
+        for v in [n as u64, p50.into(), p95.into(), p99.into(), errors, errors * 1_000_000 / n as u64] {
+            out.push(b' ');
+            out.extend_from_slice(write_u64(&mut buf, v));
+        }
+        out.push(b'\n');
+    }
+    out
+}
 
-    let next = AtomicUsize::new(0);
+/// Scans `d` with `threads` workers taking `chunk`-byte chunks, then formats every hour in parallel and writes
+/// the blocks to `sink` in hour order, each as soon as it and all earlier hours are done. `d` must be followed by
+/// `PAD` readable bytes.
+fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write) -> std::io::Result<()> {
+    let n = d.len();
+    // The first line start at or after `x` (a line start exactly at `x` goes to the chunk before): adjacent chunks agree.
+    let snap = |x: usize| if x >= n { n } else if x == 0 { 0 } else { x + d[x..].iter().position(|&b| b == b'\n').unwrap() + 1 };
+    let (cursor, next, barrier) = (AtomicUsize::new(0), AtomicUsize::new(0), Barrier::new(threads));
+    let names = Mutex::new(Names::default());
+    let parts: &'static [OnceLock<Part>] = Box::leak((0..threads).map(|_| OnceLock::new()).collect());
+    let plan: &'static OnceLock<Plan> = Box::leak(Box::default());
     let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
     std::thread::scope(|scope| {
-        for _ in 0..threads.min(hours.len()) {
-            let (sender, next, hours, order) = (sender.clone(), &next, &hours, &order);
+        for t in 0..threads {
+            let (sender, cursor, next, barrier, names) = (sender.clone(), &cursor, &next, &barrier, &names);
             scope.spawn(move || {
-                let mut scratch = Scratch { start: vec![0; names.len()], ..Scratch::default() };
+                let mut worker = Worker::new(d);
                 loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some((text, parts)) = hours.get(index) else { return };
-                    sender.send((index, format_hour(text, parts, names, order, &mut scratch))).expect("writer stopped");
+                    let from = cursor.fetch_add(chunk, Relaxed);
+                    if from >= n {
+                        break;
+                    }
+                    worker.scan(snap(from), snap(from + chunk), names);
+                }
+                parts[t].set(worker.part).ok();
+                barrier.wait();
+                let plan = plan.get_or_init(|| make_plan(parts, names));
+                let mut scratch = Scratch::default();
+                loop {
+                    let hour = next.fetch_add(1, Relaxed);
+                    if hour >= plan.hours.len() {
+                        return;
+                    }
+                    sender.send((hour, format_hour(plan, hour, &mut scratch))).expect("writer stopped");
                 }
             });
         }
         drop(sender);
-        let mut waiting: Vec<Option<Vec<u8>>> = vec![None; hours.len()];
+        let mut waiting: Vec<Option<Vec<u8>>> = Vec::new();
         let mut written = 0;
         for (index, block) in receiver {
+            if waiting.len() <= index {
+                waiting.resize(index + 1, None);
+            }
             waiting[index] = Some(block);
             while let Some(block) = waiting.get_mut(written).and_then(Option::take) {
                 sink.write_all(&block)?;
@@ -386,43 +418,24 @@ fn write_hours(workers: &[Worker], names: &[&[u8]], threads: usize, sink: &mut i
     })
 }
 
-/// Set `TRACK_A_TIMING=1` to print a per-phase breakdown to stderr.
-fn run(input_path: &str, output_path: &str, threads: usize) -> std::io::Result<()> {
-    let verbose = std::env::var("TRACK_A_TIMING").is_ok();
-    let mut t = std::time::Instant::now();
-    let mut lap = |label: &str| {
-        if verbose {
-            eprintln!("track-a: {label} in {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
-        }
-        t = std::time::Instant::now();
-    };
-    let data = map_file(input_path)?;
-    lap("map input");
-    let (workers, names) = scan_parallel(data, threads.max(1), 1 << 20);
-    lap("scan (parallel)");
-    let mut file = std::fs::File::create(output_path)?;
-    write_hours(&workers, &names, threads.max(1), &mut file)?;
-    // The process exits next; skip freeing the per-hour lists one by one.
-    std::mem::forget(workers);
-    lap("count, select, format and write");
-    Ok(())
-}
-
 fn main() {
     let input_path = std::env::var("INPUT_PATH").unwrap_or_else(|_| "/data/requests.log".to_string());
     let output_path = std::env::var("OUTPUT_PATH").unwrap_or_else(|_| "/out/summary.txt".to_string());
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-
     let start = std::time::Instant::now();
-    match run(&input_path, &output_path, threads) {
-        Ok(()) => {
-            eprintln!("track-a: done in {:.1} ms ({threads} threads)", start.elapsed().as_secs_f64() * 1000.0);
-        }
-        Err(e) => {
-            eprintln!("track-a: failed reading {input_path} or writing {output_path}: {e}");
-            std::process::exit(1);
-        }
+    if let Err(e) = run(&input_path, &output_path, threads) {
+        eprintln!("track-a: failed reading {input_path} or writing {output_path}: {e}");
+        std::process::exit(1);
     }
+    eprintln!("track-a: done in {:.1} ms ({threads} threads)", start.elapsed().as_secs_f64() * 1000.0);
+    // Nothing is freed: the process ends here.
+    std::process::exit(0);
+}
+
+fn run(input_path: &str, output_path: &str, threads: usize) -> std::io::Result<()> {
+    let data = map_file(input_path)?;
+    let mut file = std::fs::File::create(output_path)?;
+    process(data, threads, 1 << 20, &mut file)
 }
 
 #[cfg(test)]
