@@ -103,7 +103,7 @@ lines from 531 to 474.
   replaced did not rely on that.
 
 * Steps 8-11 have not run on the scoring box. Expect the board's T to differ.
-* `names_distinct` now rests on a 64-bit hash: two different names with the same 64-bit hash (about 3e-10 for 100 000 names) would be counted once. Steps 4-7 compared bytes and were exact whatever the hashes did. If more than about 131 000 distinct names turn up, the table is rebuilt larger and the scan restarts (tested).
+* `names_distinct` now rests on a 64-bit hash: two different names with the same 64-bit hash (not 3e-10 as first written: the table compares 47 bits along a probe path, so about 5e-5 per run for 100 000 names; a byte-comparing variant was built and measured at +20-30 ms on the laptop and +3 MiB, which is a larger loss than the risk it removes, so it was not shipped) would be counted once. Steps 4-7 compared bytes and were exact whatever the hashes did. If more than about 131 000 distinct names turn up, the table is rebuilt larger and the scan restarts (tested).
 * Local timings in steps 8-11 come from a laptop shared with other jobs; differences under about 10% are inside the noise.
 * Offsets are kept in 32 bits, so the input must be under 4 GiB (checked).
 * Step 1's and the baseline's local timings were not recorded in a form I

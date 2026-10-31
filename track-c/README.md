@@ -42,8 +42,10 @@ Assumptions beyond spec section 2.1, all from section 2.2: names are letters
 and spaces (so an LF followed by a digit or a BOM is a record boundary),
 ids, regions and amounts are unquoted, each region code is three letters
 `A`-`Z`, and `regions.csv` has LF line endings. Equality of names rests on
-a 64-bit hash: two different names would be merged only if their 64-bit
-hashes were equal (about 3e-10 for 100 000 names).
+a 64-bit hash, of which the table compares only the upper 47 bits when it
+probes past the home slot: two different names with equal 47-bit tags on one
+probe path would be merged (estimated about 5e-5 per run for 100 000 names;
+the earlier "3e-10" counted all 64 bits and was wrong).
 
 Tests (spec worked example, many thread counts, a large repeated file that
 makes real chunk cuts, a file with more distinct names than the first table
