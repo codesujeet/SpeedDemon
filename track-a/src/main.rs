@@ -2,21 +2,20 @@
 //! nearest-rank p50/p95/p99 latency and 5xx counts from a space-delimited
 //! log (`ts method endpoint status latency_us`), as in specs/a-ingest.md.
 //!
-//! The input is mapped and cut into 2 MiB morsels that workers take from an
-//! atomic cursor. A worker parses a morsel into packed `u64` records and
-//! counting-sorts them into one run of latencies per (hour, endpoint). Then
-//! one worker per hour merges that hour's runs from the few morsels that
-//! touch it, picks the percentiles by selection, and formats the lines, which
+//! The input is mapped and cut into morsels that workers take from an atomic
+//! cursor. A worker turns each line into one packed `u64` (endpoint number,
+//! error flag, latency) and appends it to its own list for the line's hour;
+//! endpoint numbers come from a table the worker keeps for the whole run,
+//! backed by one shared table that hands out the numbers. When the scan is
+//! done, workers take one hour at a time: they count its lines per endpoint
+//! (the packed values of all workers for that hour), place the latencies in
+//! one run per endpoint, select the percentiles and format the lines, which
 //! are written in hour order as they complete.
-//!
-//! Techniques and sources: research/compiler-flags.md (target-cpu),
-//! research/track-a-ingest.md (SWAR, FxHash), research/parallelism.md
-//! (morsel-driven dispatch).
 
-use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Mutex};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -33,11 +32,12 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     if len == 0 {
         return Ok(&[]);
     }
-    // PROT_READ = 1, MAP_PRIVATE = 2.
+    // SAFETY: a fresh read-only private mapping of `len` bytes of an open file; it is never unmapped.
     let p = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
     if p as isize == -1 {
         return Err(std::io::Error::last_os_error());
     }
+    // SAFETY: `p` points to `len` readable bytes that stay mapped for the life of the process.
     Ok(unsafe { std::slice::from_raw_parts(p, len) })
 }
 
@@ -46,342 +46,244 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     Ok(Box::leak(std::fs::read(path)?.into_boxed_slice()))
 }
 
-// --- SWAR byte scanning (research/track-a-ingest.md) --------------------
-
 #[inline]
-fn broadcast(b: u8) -> u64 {
-    (b as u64) * 0x0101_0101_0101_0101
+fn load8(d: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(d[at..at + 8].try_into().unwrap())
 }
 
+/// Bit i is set when byte `at + i` is a space or a line feed.
 #[inline]
-fn has_zero_byte(v: u64) -> bool {
-    v.wrapping_sub(0x0101_0101_0101_0101) & !v & 0x8080_8080_8080_8080 != 0
-}
-
-/// Where the method, endpoint and latency of the line at `line_start` end,
-/// as (endpoint start, endpoint end, latency end). One 64-byte window
-/// starting at the method holds the next four delimiters (the spaces after
-/// the method, the endpoint and the status, and the line feed) for almost
-/// every line; a line too long for it, or too near the end of the data,
-/// takes the byte-wise path.
-#[inline]
-fn split_line(data: &[u8], line_start: usize, end: usize) -> (usize, usize, usize) {
+fn delimiters(d: &[u8], at: usize) -> u64 {
     use std::arch::x86_64::*;
-    let q = line_start + 28;
-    if q + 64 <= data.len() {
-        // SAFETY: the 64 bytes at `q` are inside `data`; AVX2 is enabled for the build (target-cpu=x86-64-v3).
-        let mut bits = unsafe {
-            let (space, line_feed) = (_mm256_set1_epi8(b' ' as i8), _mm256_set1_epi8(b'\n' as i8));
-            let window = |at: usize| {
-                let v = _mm256_loadu_si256(data.as_ptr().add(at) as *const __m256i);
-                _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, space), _mm256_cmpeq_epi8(v, line_feed))) as u32 as u64
-            };
-            window(q) | window(q + 32) << 32
+    assert!(at + 64 <= d.len());
+    // SAFETY: the 64 bytes at `at` are inside `d` (asserted); AVX2 is enabled for the build (target-cpu=x86-64-v3).
+    unsafe {
+        let (space, line_feed) = (_mm256_set1_epi8(b' ' as i8), _mm256_set1_epi8(b'\n' as i8));
+        let window = |o: usize| {
+            let v = _mm256_loadu_si256(d.as_ptr().add(at + o) as *const __m256i);
+            _mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v, space), _mm256_cmpeq_epi8(v, line_feed))) as u32 as u64
         };
-        if bits.count_ones() >= 4 {
-            let mut at = [0usize; 4];
-            for slot in &mut at {
-                *slot = q + bits.trailing_zeros() as usize;
+        window(0) | window(32) << 32
+    }
+}
+
+/// (endpoint start, endpoint end, line feed) of the line at `ls`. The 27-byte
+/// timestamp is skipped; the next four delimiters (after the method, the
+/// endpoint, the status, and the line feed) are almost always in the first
+/// 64-byte window, and longer lines take further windows.
+#[inline]
+fn split(d: &[u8], ls: usize) -> (usize, usize, usize) {
+    let (mut at, mut found, mut n) = (ls + 28, [0usize; 4], 0);
+    loop {
+        let mut bits = delimiters(d, at);
+        if n == 0 && bits.count_ones() >= 4 {
+            for slot in &mut found {
+                *slot = at + bits.trailing_zeros() as usize;
                 bits &= bits - 1;
             }
-            return (at[0] + 1, at[1], at[3]);
+            return (found[0] + 1, found[1], found[3]);
         }
+        while bits != 0 && n < 4 {
+            found[n] = at + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            n += 1;
+        }
+        if n == 4 {
+            return (found[0] + 1, found[1], found[3]);
+        }
+        at += 64;
     }
-    let endpoint_start = find_delim_swar(data, q, end) + 1;
-    let endpoint_end = find_delim_swar(data, endpoint_start, end);
-    (endpoint_start, endpoint_end, find_delim_swar(data, endpoint_end + 5, end))
 }
 
-/// Finds the next space *or* newline at or after `start`, bounded by
-/// `end` — one combined SWAR scan instead of two separate ones. The
-/// original `process_morsel` found the line's newline first (one pass
-/// over the whole line), then searched for each of the 4 field-splitting
-/// spaces within that already-bounded line (a second pass collectively
-/// covering the same bytes again) — every byte in a line was touched
-/// twice. Checking both patterns against the same loaded 8-byte chunk
-/// costs one extra XOR+compare per chunk (the load, not the compare, is
-/// the expensive part), so fusing them touches each byte once instead of
-/// twice. Returns `end` if neither delimiter appears before `end` (the
-/// last field of a line with no trailing newline, or malformed input —
-/// same fallback the original's `.unwrap_or(line.len())` used).
+/// The decimal number in `d[s..e]` (1 to 10 digits): the last eight digits
+/// by SWAR on one 8-byte load that ends at `e`, the others one by one.
 #[inline]
-fn find_delim_swar(data: &[u8], start: usize, end: usize) -> usize {
-    let pattern_space = broadcast(b' ');
-    let pattern_nl = broadcast(b'\n');
-    let mut i = start.min(end);
-    while i + 8 <= end {
-        let chunk = u64::from_ne_bytes(data[i..i + 8].try_into().unwrap());
-        if has_zero_byte(chunk ^ pattern_space) || has_zero_byte(chunk ^ pattern_nl) {
-            for j in 0..8 {
-                let b = data[i + j];
-                if b == b' ' || b == b'\n' {
-                    return i + j;
+fn parse_latency(d: &[u8], s: usize, e: usize) -> u64 {
+    let len = e - s;
+    let n = len.min(8);
+    // The digits are the top `n` bytes of the load; the bytes below are cleared, which reads as leading zeros.
+    let w = load8(d, e - 8) & 0x0F0F_0F0F_0F0F_0F0F & (u64::MAX << (64 - 8 * n));
+    let w = w * 10 + (w >> 8);
+    let mut v = ((w & 0x0000_00FF_0000_00FF) * 0x000F_4240_0000_0064
+        + ((w >> 16) & 0x0000_00FF_0000_00FF) * 0x0000_2710_0000_0001)
+        >> 32;
+    if len > 8 {
+        let high = d[s..e - 8].iter().fold(0, |a, &c| a * 10 + u64::from(c - b'0'));
+        v += high * 100_000_000;
+    }
+    v & 0xFFFF_FFFF
+}
+
+/// The endpoint numbers handed out so far and the names that go with them.
+#[derive(Default)]
+struct Names {
+    ids: HashMap<&'static [u8], u32>,
+    list: Vec<&'static [u8]>,
+}
+
+/// One slot of a worker's endpoint table: where an occurrence of the name
+/// is in the worker's input, and its number. `len == 0` marks a free slot.
+#[derive(Clone, Copy, Default)]
+struct Slot {
+    start: usize,
+    len: u32,
+    id: u32,
+}
+
+/// What one worker found: for each hour it saw, the packed lines of that hour
+/// (`endpoint << 33 | error << 32 | latency`).
+struct Worker {
+    d: &'static [u8],
+    table: Vec<Slot>,
+    used: usize,
+    hours: Vec<((u64, u64), Vec<u64>)>,
+    cur_key: (u64, u64),
+    cur: usize,
+}
+
+impl Worker {
+    fn new(d: &'static [u8]) -> Self {
+        Worker { d, table: vec![Slot::default(); 4096], used: 0, hours: Vec::new(), cur_key: (0, 0), cur: 0 }
+    }
+
+    /// Table position at which the name `d[s..e]` starts probing.
+    #[inline]
+    fn home(&self, s: usize, e: usize) -> usize {
+        let (d, len) = (self.d, e - s);
+        let (a, b, c) = if len >= 8 {
+            (load8(d, s), load8(d, e - 8), load8(d, s + (len - 8) / 2))
+        } else {
+            (load8(d, s) & ((1u64 << (8 * len)) - 1), 0, 0)
+        };
+        let h = (a ^ b.rotate_left(21) ^ c.rotate_left(42) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (h >> 32) as usize & (self.table.len() - 1)
+    }
+
+    /// The number of the endpoint `d[s..e]`, taken from the shared table the
+    /// first time this worker sees it.
+    #[inline]
+    fn endpoint(&mut self, s: usize, e: usize, names: &Mutex<Names>) -> u32 {
+        let d = self.d;
+        let mask = self.table.len() - 1;
+        let mut i = self.home(s, e);
+        while self.table[i].len != 0 {
+            let slot = self.table[i];
+            if slot.len as usize == e - s && d[slot.start..slot.start + slot.len as usize] == d[s..e] {
+                return slot.id;
+            }
+            i = (i + 1) & mask;
+        }
+        let mut shared = names.lock().unwrap();
+        let next = shared.list.len() as u32;
+        let id = *shared.ids.entry(&d[s..e]).or_insert(next);
+        if id == next {
+            shared.list.push(&d[s..e]);
+        }
+        drop(shared);
+        self.table[i] = Slot { start: s, len: (e - s) as u32, id };
+        self.used += 1;
+        if self.used * 2 > self.table.len() {
+            let bigger = vec![Slot::default(); self.table.len() * 2];
+            let old = std::mem::replace(&mut self.table, bigger);
+            for slot in old.into_iter().filter(|s| s.len != 0) {
+                let mut j = self.home(slot.start, slot.start + slot.len as usize);
+                while self.table[j].len != 0 {
+                    j = (j + 1) & (self.table.len() - 1);
                 }
+                self.table[j] = slot;
             }
         }
-        i += 8;
+        id
     }
-    while i < end {
-        let b = data[i];
-        if b == b' ' || b == b'\n' {
-            return i;
-        }
-        i += 1;
-    }
-    end
-}
 
-// --- FxHash-style hasher (research/track-a-ingest.md) -------------------
-
-const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-
-#[derive(Default)]
-struct FxHasher {
-    hash: u64,
-}
-impl Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, mut bytes: &[u8]) {
-        while bytes.len() >= 8 {
-            let word = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
-            self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
-            bytes = &bytes[8..];
-        }
-        if !bytes.is_empty() {
-            let mut buf = [0u8; 8];
-            buf[..bytes.len()].copy_from_slice(bytes);
-            let word = u64::from_ne_bytes(buf);
-            self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
+    /// Parses the lines that start in `[start, end)`.
+    fn scan(&mut self, start: usize, end: usize, names: &Mutex<Names>) {
+        let d = self.d;
+        let mut ls = start;
+        while ls < end {
+            let (es, ee, nl) = split(d, ls);
+            let id = self.endpoint(es, ee, names);
+            let error = u64::from(d[ee + 1] >= b'5');
+            let latency = parse_latency(d, ee + 5, nl);
+            let key = (load8(d, ls), load8(d, ls + 5));
+            if key != self.cur_key {
+                self.cur_key = key;
+                self.cur = self.hours.iter().position(|h| h.0 == key).unwrap_or_else(|| {
+                    self.hours.push((key, Vec::new()));
+                    self.hours.len() - 1
+                });
+            }
+            self.hours[self.cur].1.push(u64::from(id) << 33 | error << 32 | latency);
+            ls = nl + 1;
         }
     }
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-type FxBuildHasher = BuildHasherDefault<FxHasher>;
-
-#[inline]
-fn parse_u32(bytes: &[u8]) -> u32 {
-    let mut v: u32 = 0;
-    for &b in bytes {
-        v = v * 10 + (b - b'0') as u32;
-    }
-    v
 }
 
-/// Packs "YYYY-MM-DDTHH" into one ascending u64 — a stable hour-bucket
-/// key without any calendar arithmetic. See research/track-a-ingest.md.
-#[inline]
-fn hour_bucket_key(ts: &[u8]) -> u64 {
-    let year = parse_u32(&ts[0..4]) as u64;
-    let month = parse_u32(&ts[5..7]) as u64;
-    let day = parse_u32(&ts[8..10]) as u64;
-    let hour = parse_u32(&ts[11..13]) as u64;
-    ((year * 100 + month) * 100 + day) * 100 + hour
+/// `YYYY-MM-DDTHH`, the 13 bytes that make an hour, from its two overlapping loads.
+fn hour_text(key: (u64, u64)) -> [u8; 13] {
+    let mut text = [0u8; 13];
+    text[..8].copy_from_slice(&key.0.to_le_bytes());
+    text[8..].copy_from_slice(&key.1.to_le_bytes()[3..]);
+    text
 }
 
-fn unpack_hour_key(key: u64) -> (u64, u64, u64, u64) {
-    let hour = key % 100;
-    let rest = key / 100;
-    let day = rest % 100;
-    let rest = rest / 100;
-    let month = rest % 100;
-    let year = rest / 100;
-    (year, month, day, hour)
-}
-
-/// One group of one morsel: the lines with this hour (`slot` indexes the
-/// morsel's `hours`) and this endpoint (`ep` indexes its `names`), whose
-/// latencies are `latencies[start..start + len]` of the morsel.
-struct Group {
-    slot: u32,
-    ep: u32,
-    errors: u32,
-    start: u32,
-    len: u32,
-}
-
-/// What one morsel's lines add up to, kept small and flat. Groups are
-/// sorted by (slot, ep). The same (hour, endpoint) usually shows up in only
-/// a couple of morsels, because the log is close to time order, so the
-/// final merge has little to combine.
-struct Morsel<'a> {
-    hours: Vec<u64>,
-    names: Vec<&'a [u8]>,
-    groups: Vec<Group>,
-    latencies: Vec<u32>,
-}
-
-/// A morsel's line is packed into one `u64`: hour slot (11 bits), endpoint
-/// number (20 bits), error flag (1 bit) and latency (32 bits). Sorting the
-/// packed values groups the lines with no hash map or pointer in the way.
-const GROUP_SHIFT: u32 = 33;
-/// Morsels are small enough that their slot and endpoint numbers fit.
-const MAX_MORSEL: usize = 1 << 24;
-
-/// Parses one morsel [start, end) of already line-aligned bytes. `ids`
-/// maps an endpoint to its number within the morsel and is reused (cleared)
-/// from one morsel to the next.
-fn process_morsel<'a>(
-    data: &'a [u8],
-    start: usize,
-    end: usize,
-    ids: &mut HashMap<&'a [u8], u32, FxBuildHasher>,
-) -> Morsel<'a> {
-    ids.clear();
-    let mut morsel = Morsel { hours: Vec::new(), names: Vec::new(), groups: Vec::new(), latencies: Vec::new() };
-    let mut lines: Vec<u64> = Vec::with_capacity((end - start) / 48 + 1);
-    let mut line_start = start;
-
-    // Every line is `ts method endpoint status latency` with a 27-byte
-    // timestamp and a 3-digit status (spec section 2), so only the method,
-    // endpoint and latency need a delimiter scan.
-    while line_start < end {
-        let ts = &data[line_start..line_start + 27];
-        let (endpoint_start, endpoint_end, latency_end) = split_line(data, line_start, end);
-        let status = &data[endpoint_end + 1..endpoint_end + 4];
-
-        let hour = hour_bucket_key(ts);
-        let slot = morsel.hours.iter().position(|&h| h == hour).unwrap_or_else(|| {
-            morsel.hours.push(hour);
-            assert!(morsel.hours.len() <= 1 << 11, "more hours in one morsel than the packed line format holds");
-            morsel.hours.len() - 1
-        });
-        let endpoint = &data[endpoint_start..endpoint_end];
-        let next = morsel.names.len() as u32;
-        let ep = *ids.entry(endpoint).or_insert(next);
-        if ep == next {
-            morsel.names.push(endpoint);
-        }
-        let error = u64::from(status[0] >= b'5');
-        let latency = parse_u32(&data[endpoint_end + 5..latency_end]);
-        lines.push((slot as u64) << 53 | (ep as u64) << GROUP_SHIFT | error << 32 | latency as u64);
-        line_start = latency_end + 1;
-    }
-
-    // Counting sort of the lines by (slot, endpoint): one pass to count, one
-    // to place each latency in its group's run of `latencies`.
-    let endpoints = morsel.names.len();
-    let group_of = |l: u64| (l >> 53) as usize * endpoints + (l >> GROUP_SHIFT & 0xF_FFFF) as usize;
-    let mut ends = vec![0u32; morsel.hours.len() * endpoints + 1];
-    for &l in &lines {
-        ends[group_of(l) + 1] += 1;
-    }
-    for g in 1..ends.len() {
-        ends[g] += ends[g - 1];
-    }
-    let mut errors = vec![0u32; ends.len() - 1];
-    let mut next = ends.clone();
-    morsel.latencies = vec![0; lines.len()];
-    for &l in &lines {
-        let g = group_of(l);
-        morsel.latencies[next[g] as usize] = l as u32;
-        next[g] += 1;
-        errors[g] += (l >> 32 & 1) as u32;
-    }
-    for g in 0..errors.len() {
-        if ends[g + 1] > ends[g] {
-            let (slot, ep) = (g / endpoints, g % endpoints);
-            morsel.groups.push(Group {
-                slot: slot as u32,
-                ep: ep as u32,
-                errors: errors[g],
-                start: ends[g],
-                len: ends[g + 1] - ends[g],
-            });
-        }
-    }
-    morsel
-}
-
-/// Morsel-driven dispatch: a shared atomic cursor over nominal byte
-/// offsets, each independently snapped forward to the next line boundary
-/// so adjacent morsels agree on the split point without coordination.
-/// Returns every morsel's result; they are combined when the output is
-/// written, not copied together here.
-fn process_parallel<'a>(data: &'a [u8], num_threads: usize, morsel_size: usize) -> Vec<Morsel<'a>> {
-    assert!(morsel_size <= MAX_MORSEL, "morsel too large for the packed line format");
-    let cursor = AtomicUsize::new(0);
+/// Morsel-driven scan: a shared atomic cursor over nominal byte offsets, each
+/// snapped forward to the next line start, so adjacent morsels agree on the
+/// split point without coordination. The last few hundred bytes are scanned
+/// from a zero-padded copy, so the 64-byte loads never run past the data.
+fn scan_parallel(data: &'static [u8], threads: usize, morsel: usize) -> (Vec<Worker>, Vec<&'static [u8]>) {
     let n = data.len();
-
-    let snap_fwd = |nominal: usize| -> usize {
-        if nominal == 0 {
-            0
-        } else if nominal >= n {
-            n
-        } else {
-            data[nominal..].iter().position(|&b| b == b'\n').map_or(n, |i| nominal + i + 1)
-        }
+    let snap = |nominal: usize, limit: usize| match nominal {
+        0 => 0,
+        x if x >= limit => limit,
+        x => x + data[x..limit].iter().position(|&b| b == b'\n').unwrap() + 1,
     };
-
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..num_threads)
+    let split_at = snap(n.saturating_sub(512), n);
+    let (cursor, names) = (AtomicUsize::new(0), Mutex::new(Names::default()));
+    let mut workers = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {
-                    let mut ids = HashMap::default();
-                    let mut mine = Vec::new();
+                    let mut worker = Worker::new(data);
                     loop {
-                        let nominal_start = cursor.fetch_add(morsel_size, Ordering::Relaxed);
-                        if nominal_start >= n {
-                            break;
+                        let nominal = cursor.fetch_add(morsel, Ordering::Relaxed);
+                        if nominal >= split_at {
+                            return worker;
                         }
-                        let start = snap_fwd(nominal_start);
-                        let end = snap_fwd(nominal_start + morsel_size);
-                        if start < end {
-                            mine.push(process_morsel(data, start, end, &mut ids));
-                        }
+                        worker.scan(snap(nominal, split_at), snap(nominal + morsel, split_at), &names);
                     }
-                    mine
                 })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().expect("worker thread panicked")).collect()
-    })
+        handles.into_iter().map(|h| h.join().expect("worker thread panicked")).collect::<Vec<_>>()
+    });
+    let mut padded = data[split_at..].to_vec();
+    let tail = padded.len();
+    padded.resize(tail + 128, 0);
+    let mut last = Worker::new(Box::leak(padded.into_boxed_slice()));
+    last.scan(0, tail, &names);
+    workers.push(last);
+    (workers, names.into_inner().unwrap().list)
 }
 
-/// Exact nearest-rank percentile via `select_nth_unstable` — O(n) per
-/// call (introselect), avoiding a full O(n log n) sort of the group's
-/// latencies. `p` is a whole percentage (50, 95, 99), and the rank is
-/// computed with the spec's own integer formula — `ceil(p*n/100)`,
-/// i.e. `(p*n + 99) / 100` in integer arithmetic — rather than any
-/// floating-point approximation of it, so there's no float-vs-integer
-/// rounding mismatch risk against an exact-hash correctness gate.
-fn percentile(latencies: &mut [u32], p: u64) -> u32 {
-    let n = latencies.len();
-    if n == 0 {
-        return 0;
+/// Exact nearest-rank percentiles p50, p95 and p99 of `lat` (the spec's
+/// integer rank `(p * n + 99) / 100`, 1-based), by selecting the largest
+/// rank first and the others inside what stays below it.
+fn percentiles(lat: &mut [u32]) -> [u32; 3] {
+    let n = lat.len();
+    let at = [49, 94, 98].map(|p| ((p + 1) * n).div_ceil(100) - 1);
+    let (mut out, mut hi) = ([0; 3], n);
+    for k in (0..3).rev() {
+        if k < 2 && at[k] == at[k + 1] {
+            out[k] = out[k + 1];
+        } else {
+            out[k] = *lat[..hi].select_nth_unstable(at[k]).1;
+            hi = at[k];
+        }
     }
-    let rank = (p * n as u64).div_ceil(100) as usize;
-    let idx = rank.saturating_sub(1).min(n - 1);
-    *latencies.select_nth_unstable(idx).1
+    out
 }
 
-/// Set `TRACK_A_TIMING=1` to print a per-phase breakdown to stderr.
-fn run(input_path: &str, output_path: &str, num_threads: usize) -> std::io::Result<()> {
-    let verbose = std::env::var("TRACK_A_TIMING").is_ok();
-    macro_rules! phase {
-        ($label:expr, $body:expr) => {{
-            let t = std::time::Instant::now();
-            let v = $body;
-            if verbose {
-                eprintln!("track-a: {} in {:.1}ms", $label, t.elapsed().as_secs_f64() * 1000.0);
-            }
-            v
-        }};
-    }
-
-    let data = phase!("map input", map_file(input_path)?);
-
-    let morsel_size = 2 * 1024 * 1024; // 2 MiB, per research/parallelism.md
-    let locals = phase!("parse+group (parallel)", process_parallel(data, num_threads.max(1), morsel_size));
-    phase!("merge, format and write", {
-        let mut file = std::fs::File::create(output_path)?;
-        format_groups(&locals, num_threads.max(1), &mut file)
-    })
-}
-
-#[inline]
 fn write_u64(buf: &mut [u8; 20], mut v: u64) -> &[u8] {
     let mut i = 20;
     loop {
@@ -394,89 +296,83 @@ fn write_u64(buf: &mut [u8; 20], mut v: u64) -> &[u8] {
     }
 }
 
-#[inline]
-fn write_padded(out: &mut Vec<u8>, v: u64, width: usize, buf: &mut [u8; 20]) {
-    let digits = write_u64(buf, v);
-    out.resize(out.len() + width.saturating_sub(digits.len()), b'0');
-    out.extend_from_slice(digits);
+/// The output lines of one hour, given the packed lines of every worker for
+/// that hour. `order` lists the endpoint numbers by endpoint bytes.
+fn format_hour(text: &[u8; 13], parts: &[&[u64]], names: &[&[u8]], order: &[u32], scratch: &mut Scratch) -> Vec<u8> {
+    let (count, start, lat) = (&mut scratch.count, &mut scratch.start, &mut scratch.lat);
+    count.clear();
+    count.resize(names.len(), 0);
+    for &line in parts.iter().copied().flatten() {
+        count[(line >> 33) as usize] += 1 | (line >> 32 & 1) << 32;
+    }
+    let mut total = 0;
+    for &id in order {
+        start[id as usize] = total;
+        total += count[id as usize] as u32 as usize;
+    }
+    lat.resize(total, 0);
+    for &line in parts.iter().copied().flatten() {
+        let at = &mut start[(line >> 33) as usize];
+        lat[*at] = line as u32;
+        *at += 1;
+    }
+    let mut out = Vec::with_capacity(total * 3 + 4096);
+    let mut buf = [0u8; 20];
+    for &id in order {
+        let n = count[id as usize] as u32 as usize;
+        if n == 0 {
+            continue;
+        }
+        let end = start[id as usize];
+        let [p50, p95, p99] = percentiles(&mut lat[end - n..end]);
+        let errors = count[id as usize] >> 32;
+        out.extend_from_slice(text);
+        out.extend_from_slice(b":00:00Z ");
+        out.extend_from_slice(names[id as usize]);
+        // floor(errors * 1_000_000 / count): integer division already floors.
+        for v in [n as u64, p50.into(), p95.into(), p99.into(), errors, errors * 1_000_000 / n as u64] {
+            out.push(b' ');
+            out.extend_from_slice(write_u64(&mut buf, v));
+        }
+        out.push(b'\n');
+    }
+    out
 }
 
-/// Turns every (hour, endpoint) group into its output line, in parallel,
-/// one hour at a time, and writes the lines to `sink` in hour order. A
-/// worker takes an hour, collects that hour's groups from the few morsels
-/// that touch it, orders them by endpoint bytes (which, after the hour, is
-/// exactly the output order), and merges the runs of equal endpoints, which
-/// are the same group seen in different morsels. No map is searched. The
-/// finished hours are written as soon as every earlier hour is, so the
-/// output is never held in memory all at once.
-fn format_groups(morsels: &[Morsel], num_threads: usize, sink: &mut impl Write) -> std::io::Result<()> {
-    let mut touches: Vec<(u64, &Morsel, u32)> = morsels
-        .iter()
-        .flat_map(|m| m.hours.iter().enumerate().map(move |(slot, &hour)| (hour, m, slot as u32)))
-        .collect();
-    touches.sort_unstable_by_key(|t| t.0);
-    let hours: Vec<&[(u64, &Morsel, u32)]> = touches.chunk_by(|a, b| a.0 == b.0).collect();
+/// Per-thread buffers reused from hour to hour.
+#[derive(Default)]
+struct Scratch {
+    count: Vec<u64>,
+    start: Vec<usize>,
+    lat: Vec<u32>,
+}
+
+/// Formats every hour in parallel and writes the blocks to `sink` in hour
+/// order, each as soon as it and all earlier hours are done.
+fn write_hours(workers: &[Worker], names: &[&[u8]], threads: usize, sink: &mut impl Write) -> std::io::Result<()> {
+    let mut by_hour: BTreeMap<[u8; 13], Vec<&[u64]>> = BTreeMap::new();
+    for (key, lines) in workers.iter().flat_map(|w| &w.hours) {
+        by_hour.entry(hour_text(*key)).or_default().push(lines);
+    }
+    let hours: Vec<_> = by_hour.into_iter().collect();
+    let mut order: Vec<u32> = (0..names.len() as u32).collect();
+    order.sort_unstable_by_key(|&id| names[id as usize]);
 
     let next = AtomicUsize::new(0);
-    let (sender, receiver) = std::sync::mpsc::channel::<(usize, Vec<u8>)>();
+    let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
     std::thread::scope(|scope| {
-        for _ in 0..num_threads.min(hours.len()) {
-            let sender = sender.clone();
-            let (next, hours) = (&next, &hours);
+        for _ in 0..threads.min(hours.len()) {
+            let (sender, next, hours, order) = (sender.clone(), &next, &hours, &order);
             scope.spawn(move || {
-                let mut latencies: Vec<u32> = Vec::new();
-                let mut buf = [0u8; 20];
+                let mut scratch = Scratch { start: vec![0; names.len()], ..Scratch::default() };
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(touching) = hours.get(index) else { break };
-                    let mut items: Vec<(&[u8], &[u32], u32)> = Vec::new();
-                    for &(_, m, slot) in *touching {
-                        let first = m.groups.partition_point(|g| g.slot < slot);
-                        for g in m.groups[first..].iter().take_while(|g| g.slot == slot) {
-                            let from = g.start as usize;
-                            items.push((m.names[g.ep as usize], &m.latencies[from..from + g.len as usize], g.errors));
-                        }
-                    }
-                    items.sort_unstable_by(|a, b| a.0.cmp(b.0));
-
-                    let (year, month, day, hour) = unpack_hour_key(touching[0].0);
-                    let mut out = Vec::new();
-                    for group in items.chunk_by(|a, b| a.0 == b.0) {
-                        let (mut count, mut errors) = (0u64, 0u64);
-                        latencies.clear();
-                        for &(_, lats, errs) in group {
-                            count += lats.len() as u64;
-                            errors += errs as u64;
-                            latencies.extend_from_slice(lats);
-                        }
-                        let p50 = percentile(&mut latencies, 50);
-                        let p95 = percentile(&mut latencies, 95);
-                        let p99 = percentile(&mut latencies, 99);
-                        // floor(errors * 1_000_000 / count), per spec; integer
-                        // division of non-negatives already floors.
-                        let error_ppm = errors * 1_000_000 / count;
-
-                        write_padded(&mut out, year, 4, &mut buf);
-                        out.push(b'-');
-                        write_padded(&mut out, month, 2, &mut buf);
-                        out.push(b'-');
-                        write_padded(&mut out, day, 2, &mut buf);
-                        out.push(b'T');
-                        write_padded(&mut out, hour, 2, &mut buf);
-                        out.extend_from_slice(b":00:00Z ");
-                        out.extend_from_slice(group[0].0);
-                        for v in [count, p50 as u64, p95 as u64, p99 as u64, errors, error_ppm] {
-                            out.push(b' ');
-                            out.extend_from_slice(write_u64(&mut buf, v));
-                        }
-                        out.push(b'\n');
-                    }
-                    sender.send((index, out)).expect("writer stopped");
+                    let Some((text, parts)) = hours.get(index) else { return };
+                    sender.send((index, format_hour(text, parts, names, order, &mut scratch))).expect("writer stopped");
                 }
             });
         }
         drop(sender);
-
         let mut waiting: Vec<Option<Vec<u8>>> = vec![None; hours.len()];
         let mut written = 0;
         for (index, block) in receiver {
@@ -490,21 +386,35 @@ fn format_groups(morsels: &[Morsel], num_threads: usize, sink: &mut impl Write) 
     })
 }
 
+/// Set `TRACK_A_TIMING=1` to print a per-phase breakdown to stderr.
+fn run(input_path: &str, output_path: &str, threads: usize) -> std::io::Result<()> {
+    let verbose = std::env::var("TRACK_A_TIMING").is_ok();
+    let mut t = std::time::Instant::now();
+    let mut lap = |label: &str| {
+        if verbose {
+            eprintln!("track-a: {label} in {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        t = std::time::Instant::now();
+    };
+    let data = map_file(input_path)?;
+    lap("map input");
+    let (workers, names) = scan_parallel(data, threads.max(1), 1 << 20);
+    lap("scan (parallel)");
+    let mut file = std::fs::File::create(output_path)?;
+    write_hours(&workers, &names, threads.max(1), &mut file)?;
+    lap("count, select, format and write");
+    Ok(())
+}
+
 fn main() {
-    let input_path =
-        std::env::var("INPUT_PATH").unwrap_or_else(|_| "/data/requests.log".to_string());
-    let output_path =
-        std::env::var("OUTPUT_PATH").unwrap_or_else(|_| "/out/summary.txt".to_string());
-    let num_threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let input_path = std::env::var("INPUT_PATH").unwrap_or_else(|_| "/data/requests.log".to_string());
+    let output_path = std::env::var("OUTPUT_PATH").unwrap_or_else(|_| "/out/summary.txt".to_string());
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
     let start = std::time::Instant::now();
-    match run(&input_path, &output_path, num_threads) {
+    match run(&input_path, &output_path, threads) {
         Ok(()) => {
-            eprintln!(
-                "track-a: done in {:.1} ms ({} threads)",
-                start.elapsed().as_secs_f64() * 1000.0,
-                num_threads
-            );
+            eprintln!("track-a: done in {:.1} ms ({threads} threads)", start.elapsed().as_secs_f64() * 1000.0);
         }
         Err(e) => {
             eprintln!("track-a: failed reading {input_path} or writing {output_path}: {e}");

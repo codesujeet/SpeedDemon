@@ -3,102 +3,101 @@
 
 use super::*;
 
-#[derive(Default)]
-struct GroupData {
-    count: u64,
-    errors: u64,
-    latencies: Vec<u32>,
+/// Runs the scan and the output phase on `data` and returns the output bytes.
+fn summarize(data: &[u8], threads: usize, morsel: usize) -> Vec<u8> {
+    let (workers, names) = scan_parallel(Box::leak(data.to_vec().into_boxed_slice()), threads, morsel);
+    let mut out = Vec::new();
+    write_hours(&workers, &names, threads, &mut out).unwrap();
+    out
 }
 
-/// Folds the morsels into one map keyed by (hour, endpoint), for easy inspection.
-fn merged<'a>(morsels: Vec<Morsel<'a>>) -> HashMap<(u64, &'a [u8]), GroupData> {
-    let mut all: HashMap<(u64, &[u8]), GroupData> = HashMap::new();
-    for m in &morsels {
-        for g in &m.groups {
-            let from = g.start as usize;
-            let entry = all.entry((m.hours[g.slot as usize], m.names[g.ep as usize])).or_default();
-            entry.count += g.len as u64;
-            entry.errors += g.errors as u64;
-            entry.latencies.extend_from_slice(&m.latencies[from..from + g.len as usize]);
-        }
+/// A plain, slow implementation of the spec, for comparison.
+fn reference(data: &[u8]) -> Vec<u8> {
+    let mut groups: BTreeMap<(String, String), (Vec<u64>, u64)> = BTreeMap::new();
+    for line in std::str::from_utf8(data).unwrap().lines() {
+        let f: Vec<&str> = line.split(' ').collect();
+        let g = groups.entry((f[0][..13].to_string(), f[2].to_string())).or_default();
+        g.0.push(f[4].parse().unwrap());
+        g.1 += u64::from(f[3].starts_with('5'));
     }
-    all
-}
-
-#[test]
-fn parses_sample_lines_and_groups_by_endpoint_and_hour() {
-    let data = b"2026-10-30T18:07:18.569411Z GET /api/v2/products 200 8177\n\
-2026-10-30T18:07:21.136274Z GET /api/v2/products 503 81573\n\
-2026-10-30T19:07:27.963350Z PUT /v2/ab_tests 200 6381\n";
-    let groups = merged(process_parallel(data, 1, 1024));
-    // 1 group for (products, hour 18) covering both product lines,
-    // 1 group for (ab_tests, hour 19) - 2 distinct (endpoint,hour) keys.
-    assert_eq!(groups.len(), 2);
-    let key18 = (hour_bucket_key(b"2026-10-30T18"), b"/api/v2/products" as &[u8]);
-    let g = groups.get(&key18).unwrap();
-    assert_eq!(g.count, 2);
-    assert_eq!(g.errors, 1);
-}
-
-#[test]
-fn percentile_matches_full_sort_reference() {
-    let mut data: Vec<u32> = (1..=1000).rev().collect();
-    let mut sorted = data.clone();
-    sorted.sort_unstable();
-    for &p in &[50u64, 95, 99] {
-        let mut d = data.clone();
-        let got = percentile(&mut d, p);
-        let rank = (p * sorted.len() as u64).div_ceil(100) as usize;
-        let expected = sorted[rank.saturating_sub(1).min(sorted.len() - 1)];
-        assert_eq!(got, expected, "p={p}");
-    }
-    let _ = &mut data; // silence unused-mut in case of future edits
-}
-
-#[test]
-fn percentile_rank_matches_spec_worked_cases() {
-    // Spec section 3.4: "With n = 1 all three equal the single
-    // value. With n = 101, the ranks are 51, 96 and 100."
-    let one = vec![42u32];
-    assert_eq!(percentile(&mut one.clone(), 50), 42);
-    assert_eq!(percentile(&mut one.clone(), 95), 42);
-    assert_eq!(percentile(&mut one.clone(), 99), 42);
-
-    let hundred_one: Vec<u32> = (1..=101).collect();
-    assert_eq!(percentile(&mut hundred_one.clone(), 50), 51);
-    assert_eq!(percentile(&mut hundred_one.clone(), 95), 96);
-    assert_eq!(percentile(&mut hundred_one.clone(), 99), 100);
-}
-
-#[test]
-fn single_threaded_and_multi_threaded_dispatch_agree() {
-    let mut data = Vec::new();
-    for i in 0..5000u32 {
-        let hour = i % 5;
-        let ep = i % 7;
-        data.extend_from_slice(
-            format!(
-                "2026-10-30T{:02}:00:00.000000Z GET /ep/{} {} {}\n",
-                hour,
-                ep,
-                if i % 11 == 0 { 503 } else { 200 },
-                1000 + i
-            )
-            .as_bytes(),
+    let mut out = String::new();
+    for ((hour, endpoint), (mut lat, errors)) in groups {
+        lat.sort_unstable();
+        let n = lat.len() as u64;
+        let rank = |p: u64| lat[((p * n + 99) / 100 - 1) as usize];
+        out += &format!(
+            "{hour}:00:00Z {endpoint} {n} {} {} {} {errors} {}\n",
+            rank(50),
+            rank(95),
+            rank(99),
+            errors * 1_000_000 / n
         );
     }
-    let single = merged(process_parallel(&data, 1, 4096));
-    let multi = merged(process_parallel(&data, 6, 4096));
-    assert_eq!(single.len(), multi.len());
-    for (k, v) in &single {
-        let mv = multi.get(k).expect("key missing in multi-threaded result");
-        assert_eq!(v.count, mv.count, "count mismatch for {k:?}");
-        assert_eq!(v.errors, mv.errors, "errors mismatch for {k:?}");
-        let mut a = v.latencies.clone();
-        let mut b = mv.latencies.clone();
-        a.sort_unstable();
-        b.sort_unstable();
-        assert_eq!(a, b, "latencies mismatch for {k:?}");
+    out.into_bytes()
+}
+
+#[test]
+fn parse_latency_reads_one_to_ten_digits() {
+    for v in [0u64, 7, 10, 99, 123, 4096, 99_999, 1_000_000, 12_345_678, 99_999_999, 100_000_000, 987_654_321, 4_294_967_295] {
+        let line = format!("2026-10-30T18:00:00.000000Z GET /x 200 {v}\n");
+        let s = line.find("200 ").unwrap() + 4;
+        assert_eq!(parse_latency(line.as_bytes(), s, line.len() - 1), v);
+    }
+}
+
+#[test]
+fn percentiles_match_a_full_sort() {
+    for n in [1usize, 2, 3, 4, 5, 20, 21, 99, 100, 101, 1000] {
+        let mut data: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2_654_435_761) % 50).collect();
+        let mut sorted = data.clone();
+        sorted.sort_unstable();
+        let rank = |p: usize| sorted[(p * n).div_ceil(100) - 1];
+        assert_eq!(percentiles(&mut data), [rank(50), rank(95), rank(99)], "n={n}");
+    }
+    // Spec section 3.4: with n = 1 all three equal the single value; with n = 101 the ranks are 51, 96 and 100.
+    assert_eq!(percentiles(&mut [42]), [42, 42, 42]);
+    assert_eq!(percentiles(&mut (1..=101).rev().collect::<Vec<u32>>()), [51, 96, 100]);
+}
+
+#[test]
+fn any_thread_count_and_morsel_size_gives_the_reference_output() {
+    // Many hours (also out of order), endpoints of 1 to 125 bytes, latencies of 1 to 10
+    // digits, and a file long enough to have a morsel boundary in every other line.
+    let mut data = Vec::new();
+    let mut x = 12345u64;
+    for i in 0..6000u64 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let hour = (x >> 40) % 30;
+        let len = 1 + (x >> 20) as usize % 125;
+        let endpoint = format!("/{}", "e".repeat(len - 1));
+        let endpoint = if i % 9 == 0 { "/".to_string() } else { endpoint };
+        let latency = if i % 7 == 0 { 4_294_967_295 } else { (x >> 33) % 10u64.pow(1 + (i % 10) as u32) };
+        let method = ["GET", "OPTIONS", "DELETE"][(i % 3) as usize];
+        let status = [200, 404, 499, 500, 599][(x >> 10) as usize % 5];
+        data.extend_from_slice(
+            format!("2026-11-01T{:02}:07:18.569411Z {method} {endpoint} {status} {latency}\n", hour % 24).as_bytes(),
+        );
+    }
+    let expected = reference(&data);
+    for (threads, morsel) in [(1, 1 << 20), (4, 1000), (3, 97), (8, 4096), (2, 16)] {
+        assert_eq!(summarize(&data, threads, morsel), expected, "threads={threads} morsel={morsel}");
+    }
+}
+
+#[test]
+fn more_endpoints_than_the_first_table_holds() {
+    let mut data = Vec::new();
+    for i in 0..30_000u32 {
+        data.extend_from_slice(format!("2026-10-30T18:00:00.000000Z PUT /ep/{}/x {} {i}\n", i % 5000, 200 + i % 400).as_bytes());
+    }
+    assert_eq!(summarize(&data, 3, 1 << 14), reference(&data));
+}
+
+#[test]
+fn files_shorter_than_one_window_work() {
+    for n in 1..4 {
+        let data: Vec<u8> = (0..n).flat_map(|i| format!("2026-10-30T18:00:00.000000Z GET /a{i} 200 {i}\n").into_bytes()).collect();
+        assert_eq!(summarize(&data, 4, 1 << 20), reference(&data));
     }
 }
 
@@ -161,24 +160,4 @@ fn empty_input_gives_empty_output() {
     assert_eq!(output.len(), 0);
 
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn morsel_boundary_never_splits_or_drops_a_line() {
-    // Lines of varying length so morsel boundaries land mid-line at
-    // some morsel size, forcing the snap-forward logic to matter.
-    let mut data = Vec::new();
-    let mut total_lines = 0u32;
-    for i in 0..2000u32 {
-        let pad = "x".repeat((i % 37) as usize);
-        data.extend_from_slice(
-            format!("2026-10-30T10:00:00.000000Z GET /{pad}/{i} 200 {i}\n").as_bytes(),
-        );
-        total_lines += 1;
-    }
-    for morsel_size in [16usize, 64, 100, 257, 4096] {
-        let groups = merged(process_parallel(&data, 4, morsel_size));
-        let counted: u64 = groups.values().map(|g| g.count).sum();
-        assert_eq!(counted, total_lines as u64, "morsel_size={morsel_size}");
-    }
 }
