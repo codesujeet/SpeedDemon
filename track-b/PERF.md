@@ -196,7 +196,14 @@ queries, one thread, `--branch-sim=yes`). Wall times on the shared laptop swung
 | 11 | The token mask is 32 bytes wide (`u32`), not 64. Joining two 32-bit `movemask`s into one `u64` made LLVM turn the mask into 64 separate bools and rebuild it with `vpinsrb`: about 300 instructions per 64 bytes, 52 M of 580 M instructions. Also the scan loop walks the starts and pairs each with the next end, with no per-token `open` test | pending | 580.1 M -> 533.9 M (-8.0%) | 2.73 M -> 2.84 M |
 | 12 | The serial tail is parallel and shorter: each worker logs its first ten ids into one log per range of queries, each merge thread reads only its own range (it used to scan every log and sort its share), picks the ten smallest by insertion, and renders its own lines; the main thread only writes the chunks. The 2.8 MB `Answer` array, the serial `render` and the "done in" timing print are gone | pending | after the last worker: 18-20 ms -> 6.5-11 ms (merge 11.5 -> 4-6.6, render 5.5 -> 0, write 1.5-5; `Instant` timestamps, Docker harness flags, 8 runs on a loaded laptop) | not measured |
 | 13 | Term lookup: the length is folded into the second key word (one bit per byte in the unused top bit, `pdep`), so a bucket's three entries are matched with two vector compares; CRC32C bucket hash instead of two multiplies; a miss reads a spare slot (the sink id) instead of branching; the dedupe of a document's terms is fused with its lookups; `intern` moved to the tests | pending | 533.9 M -> 490.5 M (-8.1%); flush 98 M -> 46 M; parse 27 M -> 19 M | 2.84 M -> 3.02 M (flush 54 k -> 38 k; the rest is code layout in query evaluation) |
+| 14 | `intersect` binary-searches the longer list when it is more than 16 times the shorter (a phrase's rare anchor list against a common term's list, `A AND rare`); a phrase starts from its rarest term by one linear min instead of sorting a copy of its terms | pending | 479.9 M -> 448.8 M instructions (-6.5%); 4 interleaved dock runs, 4 of 4 faster (median 598 vs 750 ms, loaded laptop) | 3.03 M -> 2.93 M |
 
+
+Tried and dropped in round 4 (callgrind, 8 pieces, instructions): the same binary
+search in `union` and `difference` (453.4 M -> 453.5 M); bitmap threshold
+`df >= w * k` for k = 1/4, 1/2, 1, 2, 4, 8 and none: 498.9 M, 486.9 M, 479.9 M,
+478.6 M, 480.7 M, 488.3 M, 547.1 M, so the existing `w` stays (k = 2 is within
+0.3%); a ratio of 4, 8, 16 or 32 for the binary search: 453.0-453.7 M, flat.
 
 <!-- board-runs:begin -->
 ## Board runs

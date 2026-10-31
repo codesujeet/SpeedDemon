@@ -599,9 +599,25 @@ impl Piece {
 
 // --- Set operations on sorted doc lists ---------------------------------
 
-/// `a ∩ b` into `out`: a merge that advances both cursors with arithmetic.
+/// `a ∩ b` into `out`: a merge that advances both cursors with arithmetic,
+/// or, when one list is much shorter, a binary search in the longer one for
+/// each of its members.
 fn intersect(a: &[u16], b: &[u16], out: &mut Vec<u16>) {
     out.clear();
+    let (a, b) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if a.len() * 16 < b.len() {
+        let mut lo = 0;
+        for &x in a {
+            lo += b[lo..].partition_point(|&y| y < x);
+            if lo == b.len() {
+                break;
+            }
+            if b[lo] == x {
+                out.push(x);
+            }
+        }
+        return;
+    }
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
         let (x, y) = (a[i], b[j]);
@@ -680,7 +696,6 @@ struct Scratch {
     b: Vec<u16>,
     ma: Vec<u64>,
     mb: Vec<u64>,
-    ord: Vec<u32>,
 }
 
 /// Where a running result lives: a term's list or bitmap in the piece, or
@@ -823,20 +838,22 @@ impl Scratch {
             // Some term is absent from the whole piece (nearly always).
             return &self.a;
         }
-        let by_rarity = &mut self.ord;
-        by_rarity.clear();
-        by_rarity.extend_from_slice(e);
-        by_rarity.sort_unstable_by_key(|&t| pc.list(t).len());
-        by_rarity.dedup();
-        self.a.extend_from_slice(pc.list(by_rarity[0]));
-        for &t in &by_rarity[1..] {
+        // Start from the rarest term's list; the order of the rest does not
+        // matter (a list far longer than the running result is searched, not
+        // merged).
+        let (pivot, &rarest) = e
+            .iter()
+            .enumerate()
+            .min_by_key(|&(_, &t)| pc.list(t).len())
+            .unwrap();
+        self.a.extend_from_slice(pc.list(rarest));
+        for &t in e.iter().filter(|&&t| t != rarest) {
             if self.a.is_empty() {
                 break;
             }
             intersect(&self.a, pc.list(t), &mut self.b);
             std::mem::swap(&mut self.a, &mut self.b);
         }
-        let pivot = e.iter().position(|&t| t == by_rarity[0]).unwrap();
         self.a.retain(|&d| {
             let ids = pc.doc(d);
             ids.iter().enumerate().any(|(i, &t)| {
