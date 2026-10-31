@@ -377,3 +377,72 @@ PHRASE \"x x x x\"\n";
         assert_eq!(run_on(docs, queries, threads), want, "threads={threads}");
     }
 }
+
+/// Random documents and queries against a brute-force evaluator, at piece
+/// sizes that make a term's list a bitmap in some pieces and a sorted list in
+/// others, so every list/bitmap combination of the BOOL operators runs.
+#[test]
+fn random_queries_match_a_brute_force_evaluator() {
+    let mut x = 0x9E37_79B9_7F4A_7C15u64;
+    let mut rnd = move |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    let vocab: Vec<String> = (0..24).map(|i| format!("w{i}")).collect();
+    // Skewed: low ranks are common, high ranks rare.
+    let mut word = |r: &mut dyn FnMut(u64) -> u64| &vocab[(r(24) * r(24) / 24) as usize];
+    let docs: Vec<Vec<String>> = (0..500)
+        .map(|_| (0..rnd(30)).map(|_| word(&mut rnd).clone()).collect())
+        .collect();
+    let text: String = docs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("{i}\t{}\n", d.join(" ")))
+        .collect();
+    let mut queries = String::new();
+    let mut want = String::new();
+    for _ in 0..600 {
+        let k = 1 + rnd(5) as usize;
+        let terms: Vec<String> = (0..k).map(|_| word(&mut rnd).clone()).collect();
+        let hits: Vec<usize> = if rnd(3) == 0 && k > 1 {
+            queries += &format!("PHRASE \"{}\"\n", terms.join(" "));
+            let n = terms.len();
+            (0..docs.len())
+                .filter(|&i| docs[i].windows(n).any(|w| w == &terms[..]))
+                .collect()
+        } else {
+            let ops: Vec<u64> = (1..k).map(|_| rnd(3)).collect();
+            queries += &format!("BOOL {}", terms[0]);
+            for (op, t) in ops.iter().zip(&terms[1..]) {
+                queries += &format!(" {} {t}", ["AND", "OR", "NOT"][*op as usize]);
+            }
+            queries += "\n";
+            let has = |t: &String, i: usize| docs[i].contains(t);
+            (0..docs.len())
+                .filter(|&i| {
+                    ops.iter()
+                        .zip(&terms[1..])
+                        .fold(has(&terms[0], i), |acc, (op, t)| match op {
+                            0 => acc && has(t, i),
+                            1 => acc || has(t, i),
+                            _ => acc && !has(t, i),
+                        })
+                })
+                .collect()
+        };
+        want += &format!("{} {}", hits.len(), hits.iter().sum::<usize>());
+        for h in hits.iter().take(10) {
+            want += &format!(" {h}");
+        }
+        want += "\n";
+    }
+    for (threads, piece) in [(1, 1 << 20), (3, 700), (4, 3000), (12, 9000)] {
+        assert_eq!(
+            run_pieces(&text, &queries, threads, piece),
+            want,
+            "{threads} {piece}"
+        );
+    }
+}

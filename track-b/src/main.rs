@@ -21,7 +21,7 @@
 //!    intersects its terms' lists, then verifies each candidate document by
 //!    scanning its stored token ids for the exact run.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -58,12 +58,11 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
 /// `b | 0x20` folds `A`-`Z` onto `a`-`z` and leaves digits alone, and no
 /// other byte lands in `a`-`z` after the fold. Every other byte, including
 /// every byte >= 0x80, separates tokens (spec 2.2) without UTF-8 decoding.
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
 fn token_mask(c: &[u8; 64]) -> u64 {
     use std::arch::x86_64::*;
     #[inline(always)]
     fn half(c: &[u8]) -> u64 {
-        // SAFETY: AVX2 is enabled at compile time (cfg above); `c` is the
+        // SAFETY: the build targets x86-64-v3 (.cargo/config.toml), so AVX2 is available; `c` is the
         // 32 bytes read by one unaligned load.
         unsafe {
             let v = _mm256_loadu_si256(c.as_ptr() as *const __m256i);
@@ -78,14 +77,6 @@ fn token_mask(c: &[u8; 64]) -> u64 {
         }
     }
     half(&c[..32]) | half(&c[32..]) << 32
-}
-
-#[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-fn token_mask(c: &[u8; 64]) -> u64 {
-    (0..64).fold(0, |m, i| {
-        let b = c[i];
-        m | (((b | 0x20).wrapping_sub(b'a') <= 25 || b.wrapping_sub(b'0') <= 9) as u64) << i
-    })
 }
 
 /// Calls `f(start, end)` for every token `text[start..end]`, in order, until
@@ -407,7 +398,16 @@ struct Piece {
     ustart: Vec<u32>,
     /// Term `t`'s sorted piece-local doc numbers: `post[off[t]..off[t + 1]]`.
     post: Vec<u16>,
-    off: Vec<u32>,
+    /// Per term: where its list starts in `post`, and its length.
+    info: Vec<[u32; 2]>,
+    /// Words per bitmap, and the bitmaps of the terms in at least that many
+    /// documents (`map_at[t]` is where term `t`'s starts in `maps`).
+    w: usize,
+    maps: Vec<u64>,
+    map_at: Vec<u32>,
+    /// Bit `t` is set when term `t` is in some document of the piece. A
+    /// small array that stays in L1, unlike `off`.
+    present: Vec<u64>,
     /// Per term: the stamp of the last document seen with it, and how many
     /// documents of this piece contain it.
     last: Vec<u32>,
@@ -421,7 +421,37 @@ struct Piece {
 impl Piece {
     #[inline(always)]
     fn list(&self, t: u32) -> &[u16] {
-        &self.post[self.off[t as usize] as usize..self.off[t as usize + 1] as usize]
+        let [at, n] = self.info[t as usize];
+        &self.post[at as usize..(at + n) as usize]
+    }
+
+    /// Whether term `t` is in so many documents that a bitmap beats a list.
+    #[inline(always)]
+    fn dense(&self, t: u32) -> bool {
+        self.info[t as usize][1] as usize >= self.w
+    }
+
+    #[inline(always)]
+    fn map(&self, t: u32) -> &[u64] {
+        &self.maps[self.map_at[t as usize] as usize..][..self.w]
+    }
+
+    #[inline(always)]
+    fn has(&self, t: u32) -> bool {
+        self.present[t as usize / 64] >> (t % 64) & 1 != 0
+    }
+
+    /// Whether the query `e` can match anything in this piece, judged only
+    /// by which terms occur in it: a PHRASE needs every term, and a BOOL is
+    /// run over presence (AND, OR; NOT can only remove). `false` is exact.
+    fn possible(&self, e: &[u32], phrase: bool) -> bool {
+        if phrase {
+            return e.iter().all(|&t| self.has(t));
+        }
+        e[1..].iter().fold(self.has(e[0]), |p, &x| {
+            let h = self.has(x & !(3 << 30));
+            [p & h, p | h, p][(x >> 30) as usize]
+        })
     }
 
     /// Looks up the current document's tokens and records its distinct terms.
@@ -494,21 +524,36 @@ impl Piece {
         self.dstart.push(self.ids.len() as u32);
         self.ustart.push(self.uniq.len() as u32);
 
-        self.off.clear();
-        self.off.push(0);
+        self.w = (self.dstart.len() - 1).div_ceil(64).max(1);
+        self.info.clear();
+        self.present.clear();
+        self.present.resize(nt / 64 + 1, 0);
         let mut total = 0;
-        for &c in &self.count {
+        for (t, &c) in self.count.iter().enumerate() {
+            self.info.push([total, c]);
             total += c;
-            self.off.push(total);
+            self.present[t / 64] |= ((c != 0) as u64) << (t % 64);
         }
         self.post.clear();
         self.post.resize(total as usize, 0);
-        let mut cur = self.off.clone();
+        let mut cur: Vec<u32> = self.info.iter().map(|i| i[0]).collect();
         for (d, w) in self.ustart.windows(2).enumerate() {
             for &id in &self.uniq[w[0] as usize..w[1] as usize] {
                 self.post[cur[id as usize] as usize] = d as u16;
                 cur[id as usize] += 1;
             }
+        }
+        self.maps.clear();
+        self.map_at.resize(nt, 0);
+        for t in (0..nt).filter(|&t| self.count[t] as usize >= self.w) {
+            let (at, n, base) = (
+                self.info[t][0] as usize,
+                self.count[t] as usize,
+                self.maps.len(),
+            );
+            self.map_at[t] = base as u32;
+            self.maps.resize(base + self.w, 0);
+            set_bits(&mut self.maps[base..], &self.post[at..at + n], true);
         }
         used
     }
@@ -592,6 +637,30 @@ fn difference(a: &[u16], b: &[u16], out: &mut Vec<u16>) {
     }
 }
 
+/// The members of the sorted list `l` whose bit in `m` is `keep`, into `out`.
+fn filter(l: &[u16], m: &[u64], keep: bool, out: &mut Vec<u16>) {
+    out.clear();
+    out.resize(l.len(), 0);
+    let mut n = 0;
+    for &d in l {
+        out[n] = d;
+        n += ((m[d as usize / 64] >> (d % 64) & 1 != 0) == keep) as usize;
+    }
+    out.truncate(n);
+}
+
+/// Sets (or clears) the bit of every doc number in `l`.
+fn set_bits(m: &mut [u64], l: &[u16], on: bool) {
+    for &d in l {
+        let bit = 1u64 << (d % 64);
+        if on {
+            m[d as usize / 64] |= bit;
+        } else {
+            m[d as usize / 64] &= !bit;
+        }
+    }
+}
+
 // --- Evaluation ---------------------------------------------------------
 
 /// Reused buffers for the running result of one query.
@@ -599,56 +668,137 @@ fn difference(a: &[u16], b: &[u16], out: &mut Vec<u16>) {
 struct Scratch {
     a: Vec<u16>,
     b: Vec<u16>,
+    ma: Vec<u64>,
+    mb: Vec<u64>,
     ord: Vec<u32>,
 }
 
-/// Where the running result lives: a term's list in the piece, or a buffer.
+/// Where a running result lives: a term's list or bitmap in the piece, or
+/// one of the two scratch buffers (lists and bitmaps have one pair each).
 #[derive(Clone, Copy)]
-enum Src {
-    List(u32),
+enum Loc {
+    Term(u32),
     A,
     B,
 }
 
+/// A finished answer within a piece: doc numbers as a sorted list or a bitmap.
+enum Res<'a> {
+    List(&'a [u16]),
+    Map(&'a [u64]),
+}
+
+/// A running result: a sorted list of doc numbers, or a bitmap of them.
+#[derive(Clone, Copy)]
+struct Cur {
+    loc: Loc,
+    map: bool,
+}
+
 impl Scratch {
-    #[inline(always)]
-    fn get<'a>(&'a self, pc: &'a Piece, src: Src) -> &'a [u16] {
-        match src {
-            Src::List(t) => pc.list(t),
-            Src::A => &self.a,
-            Src::B => &self.b,
+    fn list<'a>(&'a self, pc: &'a Piece, loc: Loc) -> &'a [u16] {
+        match loc {
+            Loc::Term(t) => pc.list(t),
+            Loc::A => &self.a,
+            Loc::B => &self.b,
+        }
+    }
+
+    fn map<'a>(&'a self, pc: &'a Piece, loc: Loc) -> &'a [u64] {
+        match loc {
+            Loc::Term(t) => pc.map(t),
+            Loc::A => &self.ma,
+            Loc::B => &self.mb,
         }
     }
 
     /// Strictly left to right, no precedence (spec section 3). The running
-    /// result starts as a borrow of the first term's list, so a query that
-    /// never needs to combine anything copies nothing.
-    fn eval_bool<'a>(&'a mut self, pc: &'a Piece, e: &[u32]) -> &'a [u16] {
-        let mut src = Src::List(e[0]);
+    /// result starts as a borrow of the first term's list (or bitmap), so a
+    /// query that never needs to combine anything copies nothing. Terms in
+    /// many of the piece's documents are bitmaps, which combine in a handful
+    /// of word operations instead of a branchy merge.
+    fn eval_bool<'a>(&'a mut self, pc: &'a Piece, e: &[u32]) -> Res<'a> {
+        let mut cur = Cur {
+            loc: Loc::Term(e[0]),
+            map: pc.dense(e[0]),
+        };
         for &x in &e[1..] {
-            let (op, rhs) = (x >> 30, pc.list(x & !(3 << 30)));
-            let lhs = self.get(pc, src);
-            if (lhs.is_empty() && op != 1) || (rhs.is_empty() && op != 0) {
+            let (op, r) = (x >> 30, x & !(3 << 30));
+            let r_map = pc.dense(r);
+            let lhs_empty = !cur.map && self.list(pc, cur.loc).is_empty();
+            if (lhs_empty && op != 1) || (pc.info[r as usize][1] == 0 && op != 0) {
                 // Nothing to add (OR, NOT of an empty list) or nothing left.
                 continue;
             }
-            if lhs.is_empty() {
-                src = Src::List(x & !(3 << 30));
+            if lhs_empty {
+                cur = Cur {
+                    loc: Loc::Term(r),
+                    map: r_map,
+                };
                 continue;
             }
-            let (lhs, out, next) = match src {
-                Src::A => (&self.a[..], &mut self.b, Src::B),
-                Src::B => (&self.b[..], &mut self.a, Src::A),
-                Src::List(t) => (pc.list(t), &mut self.a, Src::A),
+            let to_a = !matches!(cur.loc, Loc::A);
+            let (mut ol, mut om) = if to_a {
+                (std::mem::take(&mut self.a), std::mem::take(&mut self.ma))
+            } else {
+                (std::mem::take(&mut self.b), std::mem::take(&mut self.mb))
             };
-            match op {
-                0 => intersect(lhs, rhs, out),
-                1 => union(lhs, rhs, out),
-                _ => difference(lhs, rhs, out),
+            let (l, m): (&[u16], &[u64]) = if cur.map {
+                (&[], self.map(pc, cur.loc))
+            } else {
+                (self.list(pc, cur.loc), &[])
+            };
+            let into_map = match (cur.map, r_map) {
+                (false, false) => {
+                    let r = pc.list(r);
+                    [intersect, union, difference][op as usize](l, r, &mut ol);
+                    false
+                }
+                (false, true) if op != 1 => {
+                    filter(l, pc.map(r), op == 0, &mut ol);
+                    false
+                }
+                (true, false) if op == 0 => {
+                    filter(pc.list(r), m, true, &mut ol);
+                    false
+                }
+                (false, true) => {
+                    om.clear();
+                    om.extend_from_slice(pc.map(r));
+                    set_bits(&mut om, l, true);
+                    true
+                }
+                (true, false) => {
+                    om.clear();
+                    om.extend_from_slice(m);
+                    set_bits(&mut om, pc.list(r), op == 1);
+                    true
+                }
+                (true, true) => {
+                    om.clear();
+                    om.extend(
+                        m.iter()
+                            .zip(pc.map(r))
+                            .map(|(&a, &b)| [a & b, a | b, a & !b][op as usize]),
+                    );
+                    true
+                }
+            };
+            if to_a {
+                (self.a, self.ma) = (ol, om);
+            } else {
+                (self.b, self.mb) = (ol, om);
             }
-            src = next;
+            cur = Cur {
+                loc: if to_a { Loc::A } else { Loc::B },
+                map: into_map,
+            };
         }
-        self.get(pc, src)
+        if cur.map {
+            Res::Map(self.map(pc, cur.loc))
+        } else {
+            Res::List(self.list(pc, cur.loc))
+        }
     }
 
     /// Documents whose token ids contain `e` as a consecutive run.
@@ -658,12 +808,16 @@ impl Scratch {
     /// the run around it. A repeated term (`"x x x"`) needs that many
     /// consecutive `x`s, which the comparison checks directly.
     fn eval_phrase<'a>(&'a mut self, pc: &'a Piece, e: &[u32]) -> &'a [u16] {
+        self.a.clear();
+        if e.iter().any(|&t| pc.list(t).is_empty()) {
+            // Some term is absent from the whole piece (nearly always).
+            return &self.a;
+        }
         let by_rarity = &mut self.ord;
         by_rarity.clear();
         by_rarity.extend_from_slice(e);
         by_rarity.sort_unstable_by_key(|&t| pc.list(t).len());
         by_rarity.dedup();
-        self.a.clear();
         self.a.extend_from_slice(pc.list(by_rarity[0]));
         for &t in &by_rarity[1..] {
             if self.a.is_empty() {
@@ -692,27 +846,73 @@ struct Acc {
     log: Vec<u64>,
 }
 
+/// `POS_MASK[j]` has the bits whose position has bit `j` set.
+const POS_MASK: [u64; 6] = [
+    0xAAAA_AAAA_AAAA_AAAA,
+    0xCCCC_CCCC_CCCC_CCCC,
+    0xF0F0_F0F0_F0F0_F0F0,
+    0xFF00_FF00_FF00_FF00,
+    0xFFFF_0000_FFFF_0000,
+    0xFFFF_FFFF_0000_0000,
+];
+
 /// Runs every query against the piece `pc`, folding its matches into `acc`.
-fn answer_piece(pc: &Piece, qs: &Queries, sc: &mut Scratch, acc: &mut Acc) {
-    for q in 0..qs.len() {
+fn answer_piece(pc: &Piece, qs: &Queries, sc: &mut Scratch, acc: &mut Acc, full: &[AtomicU32]) {
+    for (q, full_at) in full.iter().enumerate() {
         let e = qs.get(q);
         if e.is_empty() {
             continue;
         }
-        let ids = if qs.phrase[q] {
-            sc.eval_phrase(pc, e)
+        if !pc.possible(e, qs.phrase[q]) {
+            continue;
+        }
+        let res = if qs.phrase[q] {
+            Res::List(sc.eval_phrase(pc, e))
         } else {
             sc.eval_bool(pc, e)
         };
-        if ids.is_empty() {
+        // Count and sum of the piece-local numbers; a bitmap is never
+        // spelled out: the sum of positions is six masked popcounts a word.
+        let (n, sum) = match res {
+            Res::List(l) => (l.len() as u64, l.iter().map(|&d| d as u64).sum::<u64>()),
+            Res::Map(m) => m.iter().enumerate().fold((0, 0), |(n, sum), (w, &x)| {
+                let c = x.count_ones() as u64;
+                let by_bit: u64 = (0..6)
+                    .map(|j| ((x & POS_MASK[j]).count_ones() as u64) << j)
+                    .sum();
+                (n + c, sum + 64 * w as u64 * c + by_bit)
+            }),
+        };
+        if n == 0 {
             continue;
         }
         let seen = acc.count[q] as usize;
-        acc.count[q] += ids.len() as u32;
-        acc.sum[q] +=
-            ids.len() as u64 * pc.base as u64 + ids.iter().map(|&d| d as u64).sum::<u64>();
-        for &d in ids.iter().take(10usize.saturating_sub(seen)) {
-            acc.log.push((q as u64) << 32 | (pc.base + d as u32) as u64);
+        acc.count[q] += n as u32;
+        acc.sum[q] += n * pc.base as u64 + sum;
+        // Once some worker holds ten ids from pieces up to base B, ids from
+        // pieces after B can never be among the ten smallest.
+        let want = if pc.base > full_at.load(Ordering::Relaxed) {
+            0
+        } else {
+            10usize.saturating_sub(seen)
+        };
+        if seen as u64 + n >= 10 {
+            full_at.fetch_min(pc.base, Ordering::Relaxed);
+        }
+        let key = (q as u64) << 32 | pc.base as u64;
+        match res {
+            Res::List(l) => acc.log.extend(l.iter().take(want).map(|&d| key + d as u64)),
+            Res::Map(m) => {
+                let mut left = want;
+                for (w, &x) in m.iter().enumerate() {
+                    let mut x = x;
+                    while x != 0 && left > 0 {
+                        acc.log
+                            .push(key + (w * 64) as u64 + x.trailing_zeros() as u64);
+                        (left, x) = (left - 1, x & (x - 1));
+                    }
+                }
+            }
         }
     }
 }
@@ -741,6 +941,7 @@ fn answer_all(
 ) -> Vec<Acc> {
     let n_pieces = docs.len().div_ceil(piece);
     let next = AtomicUsize::new(0);
+    let full: Vec<AtomicU32> = (0..qs.len()).map(|_| AtomicU32::new(u32::MAX)).collect();
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads.max(1))
             .map(|_| {
@@ -760,7 +961,7 @@ fn answer_all(
                             (piece_start(docs, p, piece), piece_start(docs, p + 1, piece));
                         while from < to {
                             from += pc.build(&docs[from..to], table);
-                            answer_piece(&pc, qs, &mut sc, &mut acc);
+                            answer_piece(&pc, qs, &mut sc, &mut acc, &full);
                         }
                     }
                 })
@@ -850,7 +1051,7 @@ fn render(answers: &[Answer]) -> Vec<u8> {
 /// Bytes of `docs.txt` per piece. Small enough that a piece's token ids and
 /// postings stay in a core's cache while all 50,000 queries run on it,
 /// large enough that the per-piece cost of running every query is amortised.
-const PIECE_BYTES: usize = 4 << 20;
+const PIECE_BYTES: usize = 1 << 20;
 
 /// Set `TRACK_B_TIMING=1` to print a per-phase breakdown to stderr.
 fn run(
@@ -883,12 +1084,6 @@ fn run(
         "index and answer",
         answer_all(docs_data, &queries, &table, threads, piece)
     );
-    if verbose {
-        eprintln!(
-            "log entries {}",
-            accs.iter().map(|a| a.log.len()).sum::<usize>()
-        );
-    }
     let answers = phase!("merge", merge(&accs, queries.len(), threads));
     let out = phase!("render", render(&answers));
     phase!("write output", std::fs::write(output_path, out))?;
