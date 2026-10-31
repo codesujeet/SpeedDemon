@@ -50,6 +50,10 @@ cache (10 MB), plus stacks.
 ## Tried and dropped
 
 
+* **Round 3, `pread` of each chunk into a per-worker 1 MiB buffer instead of the shared mapping** (no page faults on the input, names copied out of the buffer): wall min over 7-9 runs, mmap vs pread, on distinct cores: 1 core 161 vs 154 ms, 2 cores 94 vs 96, 4 cores 73 vs 66, 4 cores x 2 threads 73 vs 67; peak memory 24-32 MB vs 25-38 MB. The scan stalls at the same point either way, so page-fault contention on the mapping is not what limits it; reverted (the gain at 4 cores is inside the noise and RSS grows).
+* **What the 12-thread scan scaling looks like** (temporary timestamps, local): 1 core scan 124 ms and hour phase 60 ms; 4 cores 60 and 25; 8 threads 55 and 14-20. Windows showed 35-50% processor use from other work during every run, and cpus 0-5 of this machine are 3 physical cores (SMT pairs 0-1, 2-3, 4-5), so local scaling numbers below ideal are not evidence of a shared-resource bottleneck in the program.
+* Not built: overlapping the hour phase with the scan. Hours finish in file order only approximately, the arenas would need published lengths and a per-hour pending-chunk count (about 60 more source lines), and the local noise would not let a 5-10 ms effect be measured.
+
 * **Round 2 profile (12 threads, local, temporary per-thread timestamps):** thread start 0.5-4 ms, scan 45-55 ms on every thread (ends within 1 ms of each other, so tail balance is fine), barrier plus `make_plan` 1-2 ms, hour phase 15-24 ms, total 70 ms. Scan wall time scales poorly with threads (1 core 190 ms, 2: 114, 4: 75, 6: 66, 12: 75), not with the per-line cost (about 60 ms on one core in-process). A pre-pass that touches every input page (5-9 ms) or the arena pages did not shorten the scan after it.
 * **256 KiB chunks instead of 1 MiB**: A/B medians 77 vs 78 ms (15 rounds), no change; reverted.
 * **`mallopt` (no mmap for big buffers, no trim) to stop page-fault churn in the hour phase**: 12-thread medians 70 -> 76 ms, peak 33 -> 43 MB; reverted.
