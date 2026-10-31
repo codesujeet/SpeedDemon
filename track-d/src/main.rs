@@ -5,7 +5,7 @@
 //! Dijkstra, in input order. See README.md for the approach.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -155,6 +155,37 @@ fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, part
     Csr { row_offset, adj }
 }
 
+/// The reverse of `g`. Its edges are in local order after the renaming, so
+/// counting the in-degrees and then placing each edge at an atomically claimed
+/// slot of its head's row touches few distinct cache lines, and no copy of the
+/// edge list is needed (the order of edges within a row is arbitrary).
+fn transpose(g: &Csr, parts: usize) -> Csr {
+    let n = g.row_offset.len() - 1;
+    let rows = |p: usize| (n * p / parts) as u32..(n * (p + 1) / parts) as u32;
+    let degree: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
+    par(parts, |p| {
+        for &(v, _) in rows(p).flat_map(|u| g.row(u)) {
+            degree[v as usize + 1].fetch_add(1, Relaxed);
+        }
+    });
+    let mut row_offset: Vec<u32> = degree.into_iter().map(AtomicU32::into_inner).collect();
+    for i in 0..n {
+        row_offset[i + 1] += row_offset[i];
+    }
+    let cursor: Vec<AtomicU32> = row_offset.iter().map(|&o| AtomicU32::new(o)).collect();
+    let mut adj = vec![(0u32, 0u32); row_offset[n] as usize];
+    let out = Disjoint(adj.as_mut_ptr());
+    par(parts, |p| {
+        for u in rows(p) {
+            for &(v, w) in g.row(u) {
+                // SAFETY: each edge claims its own slot of row `v`, which has one slot per edge counted.
+                unsafe { out.put(cursor[v as usize].fetch_add(1, Relaxed) as usize, (u, w)) };
+            }
+        }
+    });
+    Csr { row_offset, adj }
+}
+
 /// New node order (`order[new] = old`) that puts neighbours close together.
 /// Node ids are a random relabelling of a road-like lattice, so with the input
 /// ids every relaxation lands on a random cache line. Workers grow compact
@@ -243,10 +274,7 @@ fn load_graph(data: &[u8], threads: usize, mut phase: impl FnMut(&str)) -> (usiz
     let fwd = permute_csr(&original, &order, &new_id, threads);
     drop((original, order));
     phase("permute");
-    let pieces = threads.clamp(1, n.max(1));
-    let rev = build_csr(n, threads, pieces, fwd.adj.len() / pieces / threads * 2 + 16, |p| {
-        (n * p / pieces..n * (p + 1) / pieces).flat_map(|u| fwd.row(u as u32).iter().map(move |&(v, w)| (v, u as u32, w)))
-    });
+    let rev = transpose(&fwd, threads);
     phase("reverse CSR");
     (n, fwd, rev, new_id)
 }
@@ -319,45 +347,64 @@ impl RadixHeap {
     }
 }
 
-/// Per-worker search state, reused by every query so nothing is allocated
-/// or zeroed per query. `label[v]` holds node `v`'s tentative distance
-/// from the source (`[0]`) and to the target (`[1]`), each stored as
-/// distance + 1 so that 0 means "not reached": a fresh calloc'd array is
-/// valid as is, with no initialisation pass. Both directions of a node share
-/// a cache line, which is what a relaxation reads (its own side, then the
-/// other side for `best`). Almost every distance fits 32 bits, which halves
-/// the array that every worker keeps; the few that do not (paths through
-/// the edges of weight near 2^32) are marked `u32::MAX` and held exactly in
-/// `big`. `touched` lists the nodes to clear before the next query.
+/// Labels of one page of `PAGE` consecutive node ids.
+const PAGE: usize = 16;
+
+/// Per-worker search state, reused by every query. The numbering puts a
+/// node's neighbours a few ids away, so a search touches runs of consecutive
+/// ids. Labels live in pages of `PAGE` ids, allocated from a pool the first
+/// time a search touches any id of the page (`page_of` maps id / `PAGE` to
+/// the page, 0 for none), so a worker holds a few MB instead of an array over
+/// all nodes. A label pair holds the node's tentative distance from the
+/// source (`[0]`) and to the target (`[1]`) as distance + 1, so 0 means "not
+/// reached" and a fresh page is all zeros. Almost every distance fits 32 bits;
+/// the few that do not (paths through the edges of weight near 2^32) are
+/// marked `u32::MAX` and held exactly in `big`.
 struct Scratch {
-    label: Vec<[u32; 2]>,
+    page_of: Vec<u32>,
+    pool: Vec<[u32; 2]>,
+    /// Pages handed out, to give back before the next query.
+    pages: Vec<u32>,
     big: HashMap<(u32, usize), u64>,
-    touched: Vec<u32>,
     heaps: [RadixHeap; 2],
 }
 impl Scratch {
     fn new(n: usize) -> Self {
-        Scratch { label: vec![[0; 2]; n], big: HashMap::new(), touched: Vec::new(), heaps: [RadixHeap::new(), RadixHeap::new()] }
+        Scratch {
+            page_of: vec![0; n.div_ceil(PAGE)],
+            pool: Vec::new(),
+            pages: Vec::new(),
+            big: HashMap::new(),
+            heaps: [RadixHeap::new(), RadixHeap::new()],
+        }
     }
 
     fn reset(&mut self) {
-        // A wide search is cleared by one sequential sweep, a narrow one node by node.
-        if self.touched.len() > self.label.len() / 16 {
-            self.label.fill([0; 2]);
-        } else {
-            for &v in &self.touched {
-                self.label[v as usize] = [0; 2];
-            }
+        for &p in &self.pages {
+            self.page_of[p as usize] = 0;
         }
+        self.pages.clear();
+        self.pool.clear();
         self.big.clear();
-        self.touched.clear();
         self.heaps.iter_mut().for_each(RadixHeap::clear);
     }
 
-    /// Distance label of `v` on `side`, or `u64::MAX` if unreached.
+    /// Index in the pool of the label pair of `v`, giving its page a zeroed slot first if needed.
     #[inline]
-    fn get(&self, side: usize, v: u32) -> u64 {
-        match self.label[v as usize][side] {
+    fn slot(&mut self, v: u32) -> usize {
+        let page = (v as usize) / PAGE;
+        if self.page_of[page] == 0 {
+            self.pool.resize(self.pool.len() + PAGE, [0; 2]);
+            self.page_of[page] = (self.pool.len() / PAGE) as u32;
+            self.pages.push(page as u32);
+        }
+        (self.page_of[page] as usize - 1) * PAGE + v as usize % PAGE
+    }
+
+    /// Distance label of node `v` (in slot `i`) on `side`, or `u64::MAX` if unreached.
+    #[inline]
+    fn get(&self, i: usize, v: u32, side: usize) -> u64 {
+        match self.pool[i][side] {
             0 => u64::MAX,
             u32::MAX => self.big[&(v, side)],
             label => label as u64 - 1,
@@ -365,15 +412,11 @@ impl Scratch {
     }
 
     #[inline]
-    fn set(&mut self, side: usize, v: u32, dist: u64) {
-        let label = &mut self.label[v as usize];
-        if label[0] | label[1] == 0 {
-            self.touched.push(v);
-        }
+    fn set(&mut self, i: usize, v: u32, side: usize, dist: u64) {
         if dist < u32::MAX as u64 - 1 {
-            label[side] = dist as u32 + 1;
+            self.pool[i][side] = dist as u32 + 1;
         } else {
-            label[side] = u32::MAX;
+            self.pool[i][side] = u32::MAX;
             self.big.insert((v, side), dist);
         }
     }
@@ -395,7 +438,8 @@ fn bidirectional_dijkstra(fwd: &Csr, rev: &Csr, source: u32, target: u32, s: &mu
     s.reset();
     let graphs = [fwd, rev];
     for (side, node) in [source, target].into_iter().enumerate() {
-        s.set(side, node, 0);
+        let i = s.slot(node);
+        s.set(i, node, side, 0);
         s.heaps[side].push(State { dist: 0, node });
     }
 
@@ -406,7 +450,8 @@ fn bidirectional_dijkstra(fwd: &Csr, rev: &Csr, source: u32, target: u32, s: &mu
         }
         let side = usize::from(s.heaps[0].len() > s.heaps[1].len());
         let State { dist, node } = s.heaps[side].pop().unwrap();
-        if dist > s.get(side, node) {
+        let at = s.slot(node);
+        if dist > s.get(at, node, side) {
             continue;
         }
         for &(v, w) in graphs[side].row(node) {
@@ -414,11 +459,12 @@ fn bidirectional_dijkstra(fwd: &Csr, rev: &Csr, source: u32, target: u32, s: &mu
             if nd >= best {
                 continue;
             }
-            if nd < s.get(side, v) {
-                s.set(side, v, nd);
+            let i = s.slot(v);
+            if nd < s.get(i, v, side) {
+                s.set(i, v, side, nd);
                 s.heaps[side].push(State { dist: nd, node: v });
             }
-            let other = s.get(1 - side, v);
+            let other = s.get(i, v, 1 - side);
             if other != u64::MAX {
                 best = best.min(nd + other);
             }
@@ -491,10 +537,8 @@ fn run(graph_path: &str, queries_path: &str, output_path: &str, threads: usize) 
     drop(new_id);
     phase("parse queries");
 
-    // One worker per physical core: the two hardware threads of a core share its
-    // caches, and the 14 MB of labels each worker keeps is the largest memory
-    // cost of this phase. Measured no slower than 12 workers.
-    let answers = answer_queries(&fwd, &rev, &queries, node_count, threads.div_ceil(2));
+    // One worker per hardware thread: a worker's labels are a few MB, so they are cheap.
+    let answers = answer_queries(&fwd, &rev, &queries, node_count, threads);
     phase("answer queries");
     let mut out: Vec<u8> = Vec::with_capacity(queries.len() * 12);
     for answer in answers {
