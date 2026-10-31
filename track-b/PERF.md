@@ -218,5 +218,15 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `33b8455` | Track B: postings fill uses the term offset as its own cursor (agent-b d49c673) | `run-604a4ee5a8cd` | 0.3165 | 56.8 | 864 | 64.61 |
 | `b208288` | Track A: workers write their own hour block at its final offset; no writer thread (agent-a | `run-322d9de18375` | 0.3117 | 57.3 | 864 | 64.73 |
 | `cd4c35e` | Revert "Track A: workers write their own hour block at its final offset; no writer thread  | `run-531bf965b055` | 0.3175 | 57.7 | 864 | 64.50 |
+| `e804869` | PERF.md: add a Board runs table with real run IDs from the public feed to every track | `run-f64748d5e5f3` | 0.3134 | 57.2 | 864 | 64.69 |
+| `36f4296` | Tracks A and C: profile-guided optimization from a committed profile (no source or Dockerf | `run-43d319d067db` | 0.3270 | 57.3 | 864 | 64.22 |
+| `158f18f` | Track B: 32-byte token mask (agent-b 0054521); Track A PERF.md header with current board n | `run-62fab5acecb4` | 0.3075 | 57.2 | 866 | 64.88 |
+| `49548fa` | Track B: merge and render in parallel from per-range logs (agent-b a34f4cf) | `run-9bbde7f89a2e` | 0.3134 | 58.5 | 857 | 64.62 |
+| `3286475` | Track C: 111-bit name fingerprint (second independent hash compared on every tag match), d | `run-d49f29c34b28` | 0.2984 | 58.7 | 857 | 65.13 |
+| `280509c` | Track B: vector-compare term lookup, CRC32C hash, fused dedupe (agent-b) | `run-adaee4189cd3` | 0.2924 | 58.4 | 870 | 65.32 |
+| `892d831` | Track C: regenerate the PGO profile for the 111-bit fingerprint source | `run-b8432c174907` | 0.2940 | 58.2 | 870 | 65.28 |
+| `2ca5698` | Track C: back to the 36f4296 source and profile (the wider fingerprint cost 3-5 ms on the  | `run-adb26f28d060` | 0.2739 | 59.1 | 882 | 65.94 |
+| `b1497a5` | Track B: 2 MB pieces (agent-b c51c3b0) | `run-37cd73b3c901` | 0.2569 | 71.3 | 882 | 65.82 |
+| `f00df83` | Revert Track B 2 MB pieces: T -17 ms but M +12 MiB, 65.82 vs 65.94 on the board | `run-bb89766a881e` | 0.2648 | 59.7 | 882 | 66.26 |
 
 <!-- board-runs:end -->

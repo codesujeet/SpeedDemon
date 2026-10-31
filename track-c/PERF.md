@@ -122,5 +122,15 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `33b8455` | Track B: postings fill uses the term offset as its own cursor (agent-b d49c673) | `run-7fc38643a6b0` | 0.0475 | 9.4 | 542 | 72.52 |
 | `b208288` | Track A: workers write their own hour block at its final offset; no writer thread (agent-a | `run-020190d2999d` | 0.0482 | 10.3 | 542 | 71.97 |
 | `cd4c35e` | Revert "Track A: workers write their own hour block at its final offset; no writer thread  | `run-c4635c6dc06f` | 0.0474 | 10.3 | 542 | 72.16 |
+| `e804869` | PERF.md: add a Board runs table with real run IDs from the public feed to every track | `run-870c55ac49de` | 0.0483 | 9.7 | 542 | 72.19 |
+| `36f4296` | Tracks A and C: profile-guided optimization from a committed profile (no source or Dockerf | `run-1b9d7bb316d6` | 0.0437 | 9.7 | 542 | 73.27 |
+| `158f18f` | Track B: 32-byte token mask (agent-b 0054521); Track A PERF.md header with current board n | `run-c2cca30b2db3` | 0.0433 | 9.7 | 542 | 73.39 |
+| `49548fa` | Track B: merge and render in parallel from per-range logs (agent-b a34f4cf) | `run-2c6fc5b6afdd` | 0.0479 | 9.9 | 542 | 72.22 |
+| `3286475` | Track C: 111-bit name fingerprint (second independent hash compared on every tag match), d | `run-fb77cbc5db79` | 0.0463 | 10.8 | 556 | 72.13 |
+| `280509c` | Track B: vector-compare term lookup, CRC32C hash, fused dedupe (agent-b) | `run-77c892598bb5` | 0.0494 | 11.0 | 556 | 71.35 |
+| `892d831` | Track C: regenerate the PGO profile for the 111-bit fingerprint source | `run-50d1b72e7320` | 0.0490 | 11.2 | 556 | 71.35 |
+| `2ca5698` | Track C: back to the 36f4296 source and profile (the wider fingerprint cost 3-5 ms on the  | `run-5a68bdb4e25e` | 0.0456 | 10.3 | 542 | 72.58 |
+| `b1497a5` | Track B: 2 MB pieces (agent-b c51c3b0) | `run-60441c945919` | 0.0475 | 10.3 | 542 | 72.15 |
+| `f00df83` | Revert Track B 2 MB pieces: T -17 ms but M +12 MiB, 65.82 vs 65.94 on the board | `run-9e0e1b6e7e0d` | 0.0412 | 9.9 | 542 | 73.85 |
 
 <!-- board-runs:end -->
