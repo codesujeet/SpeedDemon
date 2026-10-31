@@ -58,62 +58,69 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
 /// `b | 0x20` folds `A`-`Z` onto `a`-`z` and leaves digits alone, and no
 /// other byte lands in `a`-`z` after the fold. Every other byte, including
 /// every byte >= 0x80, separates tokens (spec 2.2) without UTF-8 decoding.
-fn token_mask(c: &[u8; 64]) -> u64 {
+/// 32 bytes, not 64: joining two 32-bit movemasks into one `u64` makes LLVM
+/// spill the mask bit by bit (about 300 instructions per 64 bytes).
+#[inline(always)]
+fn token_mask(c: &[u8; 32]) -> u32 {
     use std::arch::x86_64::*;
-    #[inline(always)]
-    fn half(c: &[u8]) -> u64 {
-        // SAFETY: the build targets x86-64-v3 (.cargo/config.toml), so AVX2 is available; `c` is the
-        // 32 bytes read by one unaligned load.
-        unsafe {
-            let v = _mm256_loadu_si256(c.as_ptr() as *const __m256i);
-            let l = _mm256_sub_epi8(
-                _mm256_or_si256(v, _mm256_set1_epi8(0x20)),
-                _mm256_set1_epi8(0x61),
-            );
-            let d = _mm256_sub_epi8(v, _mm256_set1_epi8(0x30));
-            let is_l = _mm256_cmpeq_epi8(_mm256_min_epu8(l, _mm256_set1_epi8(25)), l);
-            let is_d = _mm256_cmpeq_epi8(_mm256_min_epu8(d, _mm256_set1_epi8(9)), d);
-            _mm256_movemask_epi8(_mm256_or_si256(is_l, is_d)) as u32 as u64
-        }
+    // SAFETY: the build targets x86-64-v3 (.cargo/config.toml), so AVX2 is available; `c` is the
+    // 32 bytes read by one unaligned load.
+    unsafe {
+        let v = _mm256_loadu_si256(c.as_ptr() as *const __m256i);
+        let l = _mm256_sub_epi8(
+            _mm256_or_si256(v, _mm256_set1_epi8(0x20)),
+            _mm256_set1_epi8(0x61),
+        );
+        let d = _mm256_sub_epi8(v, _mm256_set1_epi8(0x30));
+        let is_l = _mm256_cmpeq_epi8(_mm256_min_epu8(l, _mm256_set1_epi8(25)), l);
+        let is_d = _mm256_cmpeq_epi8(_mm256_min_epu8(d, _mm256_set1_epi8(9)), d);
+        _mm256_movemask_epi8(_mm256_or_si256(is_l, is_d)) as u32
     }
-    half(&c[..32]) | half(&c[32..]) << 32
 }
 
 /// Calls `f(start, end)` for every token `text[start..end]`, in order, until
-/// `f` returns false. Token bytes come from 64-byte masks: a token starts
+/// `f` returns false. Token bytes come from 32-byte masks: a token starts
 /// at a set bit whose predecessor is clear and ends at the clear bit that
 /// follows it.
 #[inline(always)]
 fn scan_tokens(text: &[u8], mut f: impl FnMut(usize, usize) -> bool) {
-    let (mut open, mut start, mut prev) = (false, 0usize, 0u64);
-    for base in (0..text.len()).step_by(64) {
-        let m = match text.get(base..base + 64) {
+    let (mut open, mut start, mut prev) = (false, 0usize, 0u32);
+    for base in (0..text.len()).step_by(32) {
+        let m = match text.get(base..base + 32) {
             Some(c) => token_mask(c.try_into().unwrap()),
             None => {
                 // Last, partial chunk: pad with separators.
-                let mut chunk = [b' '; 64];
+                let mut chunk = [b' '; 32];
                 chunk[..text.len() - base].copy_from_slice(&text[base..]);
                 token_mask(&chunk)
             }
         };
         let shifted = m << 1 | prev;
         let (mut starts, mut ends) = (m & !shifted, !m & shifted);
-        prev = m >> 63;
-        while ends != 0 {
+        prev = m >> 31;
+        if open && ends != 0 {
+            // The token left open by the previous chunk ends at the first end.
             let end = base + ends.trailing_zeros() as usize;
             ends &= ends - 1;
-            if !open {
-                start = base + starts.trailing_zeros() as usize;
-                starts &= starts - 1;
-            }
             open = false;
             if !f(start, end) {
                 return;
             }
         }
-        if starts != 0 {
-            open = true;
-            start = base + starts.trailing_zeros() as usize;
+        // Every start pairs with the next end; only a chunk's last start can
+        // have none (that token runs on into the next chunk).
+        while starts != 0 {
+            let s = base + starts.trailing_zeros() as usize;
+            starts &= starts - 1;
+            if ends == 0 {
+                (open, start) = (true, s);
+                break;
+            }
+            let end = base + ends.trailing_zeros() as usize;
+            ends &= ends - 1;
+            if !f(s, end) {
+                return;
+            }
         }
     }
     if open {

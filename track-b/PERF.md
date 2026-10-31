@@ -185,6 +185,17 @@ pieces can estimate.
 * The tokenizer is deliberately byte-based (spec 2.2): anything above 0x7F
   separates tokens. A Unicode-aware tokenizer fails the hash.
 
+## Round 4 (steps 11+)
+
+Deterministic counts: callgrind on 8 pieces (8 MB of the full corpus, all 50,000
+queries, one thread, `--branch-sim=yes`). Wall times on the shared laptop swung
+500-900 ms between identical runs, so none are claimed.
+
+| Step | Change | Run ID | Instructions (8 pieces) | Mispredicts |
+|---|---|---|---|---|
+| 11 | The token mask is 32 bytes wide (`u32`), not 64. Joining two 32-bit `movemask`s into one `u64` made LLVM turn the mask into 64 separate bools and rebuild it with `vpinsrb`: about 300 instructions per 64 bytes, 52 M of 580 M instructions. Also the scan loop walks the starts and pairs each with the next end, with no per-token `open` test | pending | 580.1 M -> 533.9 M (-8.0%) | 2.73 M -> 2.84 M |
+
+
 <!-- board-runs:begin -->
 ## Board runs
 

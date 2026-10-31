@@ -7,13 +7,14 @@ laptop running Docker with the board's run flags on the full public dataset,
 with the output hash checked against the published SHA-256. Local runs swing
 30-50%, so each row is an interleaved before -> after median over the stated
 rounds, and rows are only comparable within themselves. The laptop is
-slower than the scoring box: the version of steps 1-5 (commit `0bbd5d0`)
-measured **0.122 s, 79 MB, 537 lines, K 14.24, 57.68 points on the live
-board** and about 0.21 s, 78 MB on this laptop. The **Run ID** column stays
-*pending* until a step has its own board run, and **Points** is only filled
-from board numbers. Steps 6-9 have not been on the board yet. Everything
-that was tried, including the failures, is in
-[`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
+slower than the scoring box. On the live board the first version (steps 1-5,
+commit `0bbd5d0`) measured 0.122 s, 79 MB, 537 lines, 57.68 points; the current
+version (`36f4296`) measures **0.0274 s, 21.8 MiB, 508 lines, 79.52 points** (best
+run so far: 79.88 points, run `run-39a9b4e1b49e`). The **Run ID** column stays
+*pending* where a step never had its own board run; the "Board runs" table at the
+end lists every run read from the public board feed, with its commit. **Points**
+is only filled from board numbers. Everything that was tried, including the
+failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 
 | Step | Change | Run ID | T (s), local | M (MB), local | Points |
 |---|---|---|---|---|---|
