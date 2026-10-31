@@ -50,6 +50,12 @@ cache (10 MB), plus stacks.
 ## Tried and dropped
 
 
+* **Round 2 profile (12 threads, local, temporary per-thread timestamps):** thread start 0.5-4 ms, scan 45-55 ms on every thread (ends within 1 ms of each other, so tail balance is fine), barrier plus `make_plan` 1-2 ms, hour phase 15-24 ms, total 70 ms. Scan wall time scales poorly with threads (1 core 190 ms, 2: 114, 4: 75, 6: 66, 12: 75), not with the per-line cost (about 60 ms on one core in-process). A pre-pass that touches every input page (5-9 ms) or the arena pages did not shorten the scan after it.
+* **256 KiB chunks instead of 1 MiB**: A/B medians 77 vs 78 ms (15 rounds), no change; reverted.
+* **`mallopt` (no mmap for big buffers, no trim) to stop page-fault churn in the hour phase**: 12-thread medians 70 -> 76 ms, peak 33 -> 43 MB; reverted.
+* **One 32-byte compare for names up to 32 bytes**: scan best-of-25 60 -> 61 ms, no change; reverted.
+* Not tried: pinning workers to physical cores (the board pins the run to 6 P-cores already; the extra source lines are not justified without a measurable gain).
+
 * **Listing delimiters in a separate pass only (no parse)**: 20 ms for 3.1 M lines on one core, so listing is cheap. By ablation (one core, best of 25 in-process repeats) the rest of the 100 ms scan is: error flag, latency and hour parse 26 ms, endpoint table 43 ms, arena writes 12 ms.
 * **MAP_POPULATE and touching all pages first**: no gain in CPU time (page faults are about 25% of the 1-core CPU, but pre-faulting only moves them).
 * Comparing against the mapped first occurrence instead of a private copy of each name: the copy was kept, 5 to 10 ms of scan faster (names sit together).
