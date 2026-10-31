@@ -23,7 +23,7 @@ const LAT_MASK: u32 = (1 << 20) - 1;
 /// The spec gives every seed a catalogue of exactly 1,842 endpoints, so 11 bits of endpoint number are enough.
 const MAX_ENDPOINTS: usize = 1 << 11;
 /// Slots of a worker's endpoint table (at most a quarter used).
-const SLOTS: usize = 1 << 14;
+const SLOTS: usize = 1 << 13;
 /// Bytes after the end of the input that may be read (the vector loads of the last line).
 const PAD: usize = 128;
 
@@ -128,8 +128,9 @@ struct Worker {
     d: &'static [u8],
     /// Endpoint table: `offset of the name in store | length << 32 | number << 40`; 0 is a free slot.
     table: Vec<u64>,
-    /// A copy of each name this worker has seen (so that the names the lines are compared with sit together),
-    /// with 32 zero bytes before and after.
+    /// A copy of each name this worker has seen, one after the other (so that the names the lines are compared
+    /// with sit together), with 32 zero bytes before them and 32 bytes of capacity after (the compares mask
+    /// whatever lies outside a name).
     store: Vec<u8>,
     part: Part,
     key: (u64, u64),
@@ -140,7 +141,7 @@ impl Worker {
     fn new(d: &'static [u8]) -> Self {
         // A line has at least 40 bytes and takes at most two words.
         let arena = Vec::with_capacity(d.len() / 20 + 16);
-        Worker { d, table: vec![0; SLOTS], store: Vec::with_capacity(MAX_ENDPOINTS * 190), part: Part { arena, runs: Vec::new() }, key: (0, 0), pos: vec![0; 1016] }
+        Worker { d, table: vec![0; SLOTS], store: vec![0; 32], part: Part { arena, runs: Vec::new() }, key: (0, 0), pos: vec![0; 1016] }
     }
 
     /// The number of the endpoint `d[es..ee]`, taken from the shared names the first time this worker sees it.
@@ -150,7 +151,7 @@ impl Worker {
         let bits = 8 * len.min(8) as u32;
         let a = load8(base.add(es)) & (u64::MAX >> (64 - bits));
         let b = load8(base.add(ee - 8)) & (u64::MAX << (64 - bits));
-        let mut i = ((a ^ b.rotate_left(29) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 50) as usize;
+        let mut i = ((a ^ b.rotate_left(29) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 51) as usize;
         loop {
             let slot = *self.table.get_unchecked(i);
             if slot == 0 {
@@ -172,10 +173,9 @@ impl Worker {
             shared.list.push(&self.d[es..ee]);
         }
         assert!((id as usize) < MAX_ENDPOINTS, "more endpoints than the spec's catalogue of 1,842");
-        self.store.resize(self.store.len() + 32, 0);
         let off = self.store.len();
         self.store.extend_from_slice(&self.d[es..ee]);
-        self.store.resize(self.store.len() + 32, 0);
+        self.store.reserve(32);
         self.table[i] = off as u64 | ((ee - es) as u64) << 32 | u64::from(id) << 40;
         id
     }
@@ -338,6 +338,20 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
             let at = &mut start[(w >> 21) as usize];
             lat[*at] = if w & LAT_MASK == LAT_MASK { *it.next().unwrap() } else { w & LAT_MASK };
             *at += 1;
+        }
+    }
+    // The hour's lines are in `lat` now: give the pages of the arenas that hold only this hour back to the system, so
+    // the output written so far is paid for by the input freed (the lines are most of the process's memory).
+    #[cfg(unix)]
+    for part in parts {
+        extern "C" {
+            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+        }
+        let (from, to) = (part.as_ptr() as usize, part.as_ptr() as usize + 4 * part.len());
+        let (from, to) = ((from + 4095) & !4095, to & !4095);
+        if to > from {
+            // SAFETY: whole pages inside this hour's slice of an arena; only this hour reads them, and 4 is MADV_DONTNEED.
+            unsafe { madvise(from as *mut u8, to - from, 4) };
         }
     }
     let mut out = Vec::with_capacity(lines * 3 + 4096);

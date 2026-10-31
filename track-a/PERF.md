@@ -33,6 +33,8 @@ that was tried, including the failures, is in
 | 13 | Lines are 4 bytes: `error << 31, endpoint << 16, latency in the low 16 bits`, with latencies of 65535 or more stored as 65535 and their real value in a side list per hour list (endpoint numbers must stay below 32,768; the spec's catalogue has 1,842) | pending | 1 CPU: scan 188 -> 187 ms, phase 2 78 -> 71 ms (min of 8); peak 45 -> 38.8 MB | 45 -> 39 | pending |
 | 14 | Alternative design (branch agent-a2), rewritten from first principles: one pass, no atomics in the hot loop except the chunk cursor; each stretch of up to ~1000 delimiters is listed as offsets first (AVX2 mask, 8 offsets written unconditionally), then lines are read five offsets at a time so no line is parsed to find the next; `u32` lines (endpoint 11 bits, error, 20-bit latency, longer values followed by a whole word); per-worker endpoint table with a private copy of each name and a two-compare (first/last 32 bytes) exact check; per-worker arena in scan order with a run list per hour change; barrier, then one hour per task | pending | 1 CPU (`--cpuset-cpus=2`), min of 7 CPU user+sys: 285 -> 251 ms (speed-demon HEAD vs this); scan alone, best of 25 in-process repeats: 102 -> 78 ms | 36 -> 25 | pending |
 | 15 | Groups of up to 32 latencies are fully sorted instead of selected three times | pending | 1 CPU min CPU 251 -> 235 ms (7-9 runs) | 25 | pending |
+| 16 | Each hour gives the pages of the arenas that hold only its lines back to the system (`madvise(MADV_DONTNEED)`) as soon as they are copied into the hour's placement buffer, so the output file's page cache is paid for by input freed | pending | 12 CPUs: 7 runs, CPU unchanged within noise; 1 CPU min CPU 193 -> 171 ms (7 interleaved runs) | cgroup `memory.peak` max of 5-7 runs: 12 CPUs 33.7 -> 24.6 MiB; 1 CPU 24.6 -> 15.6 MiB | pending |
+| 17 | Memory per worker: endpoint names are stored back to back (no 64 padding bytes each; the compares already mask what lies outside a name) and the endpoint table has 8,192 slots instead of 16,384 (1,842 names, load 22%) | pending | 1 CPU CPU min (7 interleaved runs) 174 -> 168 ms (noise level); 12 CPUs: no change in CPU | cgroup anon at the end of the scan with 12 workers 17.05 -> 15.75 MiB (step 16 -> here), `memory.peak` max of 7 runs 25.1 -> 24.1 | pending |
 
 Steps 6-9 together, measured the way the board measures (5 runs, mean of the
 middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
@@ -77,6 +79,11 @@ cache (10 MB), plus stacks.
   median over 11 interleaved rounds, inside the noise; reverted.
 * **Morsel size** (1 MiB, 2 MiB, 4 MiB with the step 9 parser): median 131,
   125 and 137 ms, peak 53, 45 and 44 MB. 2 MiB stays.
+
+* **Memory, steps 16-17** (12 CPUs, interleaved runs of 9, cgroup `memory.peak`; median / max): start of this work 33.0 / 33.3 MiB, now 23.3 / 24.1 MiB, CPU unchanged. The peak is now just after the scan: about 12.4 MiB of lines, 1.4 MiB of kernel memory, 2 MiB of tables and stores, then 12 threads allocating their hour buffers (about 0.4 MiB each) before their releases catch up. Pages shared by two hours' slices of one arena are not released (about 700 slices, 3 MiB).
+* **Dropped: writing each output block to disk and evicting it from the page cache** (`sync_file_range` + `posix_fadvise(DONTNEED)`): the output's 10 MiB of cache is gone at the end, but the peak is at the start of the output phase, so `memory.peak` only moved 24.6 -> 23.0 MiB; not kept.
+* **Dropped: 2 and 4 MiB chunks** (fewer, larger arena slices, so fewer unreleased shared pages): peak median 23.5 -> 22.9 MiB, CPU min 385 -> 408 ms; not kept.
+* **Phase 2 by sub-phase** (1 CPU, TSC cycles, best of 3): count 19 M, place 10 M, release 3 M, percentiles 54 M, format 27 M (about 45 ms of 235). The percentile sorts are half of it.
 
 ## Where the unit tests live
 
