@@ -6,7 +6,7 @@ The task, the input files and the exact output format are in the [spec](https://
 
 `regions.csv` becomes a dense array from `region_id` to country group;
 any id outside it is unmatched (one byte per id; the rare group beyond the 254th is kept in a small map). `records.csv` is mapped read-only and cut
-into many more chunks than threads (8 per thread); workers claim chunks from
+into many more chunks than threads (32 per thread); workers claim chunks from
 an atomic counter, so fast and slow cores (P and E cores) finish together. A
 chunk cut must not land inside a quoted field. The spec makes names letters
 and notes lowercase words, so a line feed inside a quoted field is followed

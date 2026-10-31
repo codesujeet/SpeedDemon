@@ -457,7 +457,7 @@ fn cut(data: &[u8], from: usize) -> usize {
 /// Bytes at the end of the file that are copied behind padding and parsed
 /// last, so no chunk's SIMD loads can run past the mapping.
 const TAIL: usize = 8192;
-const CHUNKS_PER_THREAD: usize = 8;
+const CHUNKS_PER_THREAD: usize = 32;
 
 fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Names) -> Vec<Agg> {
     let n_groups = regions.countries.len() + 1;
@@ -555,6 +555,8 @@ fn aggregate(data: &[u8], regions: &Regions, threads: usize) -> Vec<Agg> {
             out.iter_mut()
                 .enumerate()
                 .for_each(|(g, a)| a.names_distinct = names.distinct(g));
+            // The process ends soon; freeing the tables would only cost time.
+            std::mem::forget(names);
             return out;
         }
         id_bits += 2;
@@ -622,6 +624,8 @@ fn main() {
         eprintln!("track-c: failed: {e}");
         std::process::exit(1);
     }
+    // Skip the destructors and the runtime's teardown.
+    std::process::exit(0);
 }
 
 #[cfg(test)]
