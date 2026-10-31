@@ -909,23 +909,6 @@ fn piece_start(docs: &[u8], p: usize, piece: usize) -> usize {
         .map_or(docs.len(), |i| at + i)
 }
 
-/// Gives the page table entries of the whole pages between the addresses `from` and `to` of a file mapping back
-/// to the system (`MADV_DONTNEED`; a page is read again from the page cache if it is used). The exit would
-/// otherwise take apart all 62,000 mapped pages of `docs.txt` on one core, which counts in the run's time.
-#[cfg(unix)]
-unsafe fn drop_pages(from: usize, to: usize) {
-    extern "C" {
-        fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
-    }
-    let (from, to) = ((from + 4095) & !4095, to & !4095);
-    if to > from {
-        madvise(from as *mut u8, to - from, 4);
-    }
-}
-
-#[cfg(not(unix))]
-unsafe fn drop_pages(_: usize, _: usize) {}
-
 /// Workers take pieces from a shared counter (so a slow piece can't strand
 /// the rest) and answer all queries on each.
 fn answer_all(
@@ -953,15 +936,12 @@ fn answer_all(
                         if p >= n_pieces {
                             return acc;
                         }
-                        let (first, to) =
+                        let (mut from, to) =
                             (piece_start(docs, p, piece), piece_start(docs, p + 1, piece));
-                        let mut from = first;
                         while from < to {
                             from += pc.build(&docs[from..to], table);
                             answer_piece(&pc, qs, &mut sc, &mut acc, &full);
                         }
-                        // SAFETY: the piece lies in the file mapping.
-                        unsafe { drop_pages(docs.as_ptr() as usize + first, docs.as_ptr() as usize + to) };
                     }
                 })
             })
