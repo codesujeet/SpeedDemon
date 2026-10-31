@@ -12,7 +12,7 @@ version of steps 1-8 (commit `db4cc76`) measured **0.475 s, 382 MiB, 736 lines,
 K 9.48, 48.85 points on the live board** (run `run-890f67017a83`) and about
 0.96 s, 384 MB on this laptop. The **Run ID** column stays *pending* for
 steps without their own board run, and **Points** is only filled from board
-numbers. Steps 9-17 have not been on the board yet. Everything that was tried,
+numbers. Steps 9-18 have not been on the board yet. Everything that was tried,
 including the failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 
 | Step | Change | Run ID | T (s), local | M (MB), local | Points |
@@ -35,6 +35,7 @@ including the failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 | 15 | CSR edges take one 32-bit word (neighbour + weight; a weight that does not fit takes a second word) | pending | docker interleaved 693 -> 654 ms (9 rounds) | 125 -> 98 | pending |
 | 16 | Filed edges (the bucket build of the original-id CSR) are one `u64` each instead of 12 bytes | pending | neutral (native min of 7: 482 vs 465 ms) | 98 -> 86 | pending |
 | 17 | Rows are copied out while regions grow and renamed into the final array in parallel (no separate permutation pass); `malloc_trim` between build phases | pending | docker interleaved 668 -> 599 ms (9 rounds); native min of 8: order + permute 152 -> 116 ms | peak is now the query phase, about 92 | pending |
+| 18 | Numbers up to 7 digits are parsed from one 8-byte load (separators are the only input bytes without bit 4 set); region growth prefetches the rows it is about to read; the big buffers are not freed at exit | pending | docker interleaved 556 -> 488 ms (9 rounds); native min of 9: forward CSR 112 -> 82 ms (parser), order 85 -> 72 ms (prefetch) | about 93, same | pending |
 
 Step 9 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.867 s and 262 MB, against 0.964 s and
@@ -150,6 +151,18 @@ went from 520 to 662, because the 4-byte edge encoding, the run/rename code and
 the paged labels are real code; that costs about 0.8 points of K against the
 time and memory gains.
 
+## Step 18 in detail
+
+Parsing alone (12 threads, no filing) took 54-72 ms of the 112 ms the
+original-id CSR needed, about 7 ns per input byte of CPU, so the digit loop was
+the next target. The word-at-a-time reader brought the whole phase to 82 ms.
+Prefetching the row of the node 6 places ahead in the region queue and the
+offset entry of each newly claimed node cut the ordering from 85 to 72 ms
+(minimum of 9); a deeper variant (rows 12 ahead plus the claimed byte of the
+neighbours 4 ahead) was equal in the minimum, with a lower mean, and was not
+kept for its extra lines. The exit change (`mem::forget` of the CSRs and the
+worker pools) is below the noise on its own.
+
 ## Tried and dropped in steps 14-17
 
 * **Label page size** 8, 16, 32, 64 ids: no difference within noise
@@ -160,7 +173,7 @@ time and memory gains.
 
 ## Caveats
 
-* Steps 9-17 have not run on the scoring box. Expect the board's T to differ.
+* Steps 9-18 have not run on the scoring box. Expect the board's T to differ.
 * The earlier "61x" figure from a synthetic random graph was wrong for the
   real road network and has been removed from this log.
 * Source size is the weak axis: the reference is 43 code lines.
