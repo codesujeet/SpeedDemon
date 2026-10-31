@@ -340,6 +340,20 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
             *at += 1;
         }
     }
+    // The hour's lines are in `lat` now: give the pages of the arenas that hold only this hour back to the system, so
+    // the output written so far is paid for by the input freed (the lines are most of the process's memory).
+    #[cfg(unix)]
+    for part in parts {
+        extern "C" {
+            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+        }
+        let (from, to) = (part.as_ptr() as usize, part.as_ptr() as usize + 4 * part.len());
+        let (from, to) = ((from + 4095) & !4095, to & !4095);
+        if to > from {
+            // SAFETY: whole pages inside this hour's slice of an arena; only this hour reads them, and 4 is MADV_DONTNEED.
+            unsafe { madvise(from as *mut u8, to - from, 4) };
+        }
+    }
     let mut out = Vec::with_capacity(lines * 3 + 4096);
     let mut buf = [0u8; 20];
     for &id in &plan.order {
