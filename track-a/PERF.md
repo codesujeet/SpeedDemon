@@ -31,6 +31,8 @@ that was tried, including the failures, is in
 | 11 | No per-morsel results and no merge across morsels. Each worker appends one packed `u64` per line (endpoint number, error flag, latency) to its own list for the line's hour, with a worker-lifetime endpoint table backed by one shared table of numbers; after the scan each hour is counted per endpoint, placed in one run per endpoint, and visited in endpoint-byte order (sorted once). Latency parsed with SWAR, hour found by comparing 13 timestamp bytes, per-hour lists start with room for 8192 lines, the process skips freeing them | pending | 1 CPU (`--cpuset-cpus=2`): 0.42-0.57 -> 0.28 s wall/CPU (3 interleaved runs); 12 threads: no clear change on this loaded laptop (A/B medians 188 -> 185 ms, harness replica 0.132 -> 0.152 s, within the +-20% noise of four agents sharing the machine) | 46 -> 45 | pending |
 | 12 | Branchless endpoint check: four masked 32-byte compares replace the length-dependent `bcmp` | pending | 1 CPU, min of 8 interleaved runs: scan 189 -> 168 ms, user+sys 259 -> 235 ms | 45 | pending |
 | 13 | Lines are 4 bytes: `error << 31, endpoint << 16, latency in the low 16 bits`, with latencies of 65535 or more stored as 65535 and their real value in a side list per hour list (endpoint numbers must stay below 32,768; the spec's catalogue has 1,842) | pending | 1 CPU: scan 188 -> 187 ms, phase 2 78 -> 71 ms (min of 8); peak 45 -> 38.8 MB | 45 -> 39 | pending |
+| 14 | Alternative design (branch agent-a2), rewritten from first principles: one pass, no atomics in the hot loop except the chunk cursor; each stretch of up to ~1000 delimiters is listed as offsets first (AVX2 mask, 8 offsets written unconditionally), then lines are read five offsets at a time so no line is parsed to find the next; `u32` lines (endpoint 11 bits, error, 20-bit latency, longer values followed by a whole word); per-worker endpoint table with a private copy of each name and a two-compare (first/last 32 bytes) exact check; per-worker arena in scan order with a run list per hour change; barrier, then one hour per task | pending | 1 CPU (`--cpuset-cpus=2`), min of 7 CPU user+sys: 285 -> 251 ms (speed-demon HEAD vs this); scan alone, best of 25 in-process repeats: 102 -> 78 ms | 36 -> 25 | pending |
+| 15 | Groups of up to 32 latencies are fully sorted instead of selected three times | pending | 1 CPU min CPU 251 -> 235 ms (7-9 runs) | 25 | pending |
 
 Steps 6-9 together, measured the way the board measures (5 runs, mean of the
 middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
@@ -47,6 +49,10 @@ cache (10 MB), plus stacks.
 
 ## Tried and dropped
 
+
+* **Listing delimiters in a separate pass only (no parse)**: 20 ms for 3.1 M lines on one core, so listing is cheap. By ablation (one core, best of 25 in-process repeats) the rest of the 100 ms scan is: error flag, latency and hour parse 26 ms, endpoint table 43 ms, arena writes 12 ms.
+* **MAP_POPULATE and touching all pages first**: no gain in CPU time (page faults are about 25% of the 1-core CPU, but pre-faulting only moves them).
+* Comparing against the mapped first occurrence instead of a private copy of each name: the copy was kept, 5 to 10 ms of scan faster (names sit together).
 * **Cascading selection** (find p50, then search only the part above it for
   p95, then above that for p99). Correct and tested, but 463 vs 501 ms over
   11 interleaved rounds, so no gain; reverted. The merge phase is not

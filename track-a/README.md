@@ -5,31 +5,39 @@ The task, the input files and the exact output format are in the [spec](https://
 ## Approach
 
 The input is mapped read-only, so nothing is copied and the pages the host
-already cached cost no memory. Twelve workers pull 1 MiB morsels from an
-atomic cursor; each morsel start is snapped forward to the next line, so
-neighbours agree on the split without talking. The last few hundred bytes are
-scanned from a zero-padded copy so the 64-byte vector loads stay inside the data.
+already cached cost no memory (a zero page is mapped after the file so the
+vector loads of the last line stay inside the mapping). Twelve workers take 1 MiB
+chunks from an atomic cursor; each chunk start is snapped forward to the next
+line, so neighbours agree on the split without talking. This cursor is the only
+shared state in the scan, apart from a mutex taken once per endpoint name per
+worker.
 
-The spec fixes the line layout, so the 27-byte timestamp and the 3-digit
-status are read by offset and only the method, endpoint and latency need a
-delimiter scan (one 64-byte AVX2 window finds the four delimiters of almost
-every line). Each line becomes one packed `u32` (endpoint number, error flag,
-latency, parsed with SWAR) that is appended to the worker's own list for the
-line's hour, found by comparing the 13 timestamp bytes `YYYY-MM-DDTHH`. A
-worker keeps one endpoint table for the whole run (open addressing, names
-compared byte for byte, so collisions are always resolved); the first time it
-meets a name it asks one shared table for the name's number.
+Per chunk, a worker first lists the offsets of all delimiters (spaces and line
+feeds) with AVX2 compares and bit scans, about four per 64 bytes. The spec gives
+every line exactly five, so the lines are then read five offsets at a time and no
+line has to be parsed to find the next one. The 27-byte timestamp and the 3-digit
+status are read by offset. Each line becomes one `u32`: endpoint number (11 bits,
+the catalogue has 1,842), error flag (first status digit is 5) and a 20-bit
+latency (SWAR parse); a latency of 2^20-1 or more is stored as the mask followed by
+one whole word. The words go to the worker's own arena in scan order, and a short
+run list records where the hour (13 timestamp bytes `YYYY-MM-DDTHH`, compared with
+the previous line's) changes. The endpoint is found in a worker-private open
+addressing table keyed by a hash of the length and the first and last 8 bytes; a
+hit is accepted only after comparing the first and last 32 bytes with a private
+copy of the name (and the blocks in between for names over 64 bytes), and a miss
+asks the shared table for the name's number. Collisions are therefore always
+resolved exactly and nothing depends on the names.
 
-After the scan, workers take one hour at a time. Only that hour's lists (one
-per worker) are read: lines are counted per endpoint number, the latencies are
-placed in one run per endpoint, and the endpoints are visited in order of their
-bytes (sorted once, about 1,800 names), so nothing is sorted or merged per
-hour. p50, p95 and p99 come from `select_nth_unstable` on each run (largest
-rank first, the others inside what remains below it). Blocks are written to the
-file in hour order as soon as they and all earlier hours are done.
+After a barrier, workers take one hour at a time. The hour's runs are in the
+arenas of the (few) workers whose chunks overlap it. Lines are counted per
+endpoint number, the latencies placed in one run per endpoint, and the endpoints
+visited in byte order (sorted once). Groups of up to 32 latencies are sorted,
+larger ones use `select_nth_unstable` (largest rank first, the others inside what
+remains below it). Blocks are written to the file in hour order as soon as they
+and all earlier hours are done, and the process exits without freeing anything.
 
 Tests (spec worked example, empty input, rank edge cases, morsel boundaries,
-more endpoints than the first table holds, against a plain reference
+a full catalogue of colliding names, names that differ in one byte, against a plain reference
 implementation) are in `tests/track_a.rs` at the repository root, compiled into
 the test build only (`cargo test` in this folder runs them).
 
@@ -46,7 +54,8 @@ None.
 
 ## With another 24 hours
 
-Memory is now mostly the packed lines (12 MB) and the output file's page
-cache; 6-byte lines or 2-byte latencies with an escape would shrink the first.
-The scan itself would gain from finding all delimiters of a whole 64-byte
-block at once instead of line by line.
+Memory is the arenas (4 bytes a line, 12 MB) and the output file's page cache;
+2-byte latencies with an escape would halve the first. The per-line cost is now the
+endpoint table lookup and the hour/latency work; a static split into line-aligned
+ranges (so each hour is touched by one or two workers) would also make the output
+phase read less scattered data.

@@ -252,6 +252,10 @@ fn hour_text(key: (u64, u64)) -> [u8; 13] {
 /// rank first and the others inside what stays below it.
 fn percentiles(lat: &mut [u32]) -> [u32; 3] {
     let n = lat.len();
+    if n <= 32 {
+        lat.sort_unstable();
+        return [49, 94, 98].map(|p| lat[((p + 1) * n).div_ceil(100) - 1]);
+    }
     let at = [49, 94, 98].map(|p| ((p + 1) * n).div_ceil(100) - 1);
     let (mut out, mut hi) = ([0; 3], n);
     for k in (0..3).rev() {
@@ -364,7 +368,6 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
 /// `PAD` readable bytes.
 fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write) -> std::io::Result<()> {
     let n = d.len();
-    let t0 = std::time::Instant::now();
     // The first line start at or after `x` (a line start exactly at `x` goes to the chunk before): adjacent chunks agree.
     let snap = |x: usize| if x >= n { n } else if x == 0 { 0 } else { x + d[x..].iter().position(|&b| b == b'\n').unwrap() + 1 };
     let (cursor, next, barrier) = (AtomicUsize::new(0), AtomicUsize::new(0), Barrier::new(threads));
@@ -386,9 +389,6 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
                 }
                 parts[t].set(worker.part).ok();
                 barrier.wait();
-                if t == 0 && std::env::var("TRACK_A_TIMING").is_ok() {
-                    eprintln!("track-a: scan done at {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
-                }
                 let plan = plan.get_or_init(|| make_plan(parts, names));
                 let mut scratch = Scratch::default();
                 loop {
@@ -421,12 +421,10 @@ fn main() {
     let input_path = std::env::var("INPUT_PATH").unwrap_or_else(|_| "/data/requests.log".to_string());
     let output_path = std::env::var("OUTPUT_PATH").unwrap_or_else(|_| "/out/summary.txt".to_string());
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let start = std::time::Instant::now();
     if let Err(e) = run(&input_path, &output_path, threads) {
         eprintln!("track-a: failed reading {input_path} or writing {output_path}: {e}");
         std::process::exit(1);
     }
-    eprintln!("track-a: done in {:.1} ms ({threads} threads)", start.elapsed().as_secs_f64() * 1000.0);
     // Nothing is freed: the process ends here.
     std::process::exit(0);
 }
