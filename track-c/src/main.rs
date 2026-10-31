@@ -152,9 +152,10 @@ impl Names {
         }
     }
 
-    /// Records that `group` has a name with hash `h`.
+    /// The number of the name with hash `h`, assigning the next free one to
+    /// a new name; 0 if the table has run out of numbers.
     #[inline]
-    fn add(&self, group: usize, h: u64) {
+    fn number(&self, h: u64) -> usize {
         let mask = self.slots.len() - 1;
         let mut s = h as usize & mask;
         loop {
@@ -163,7 +164,7 @@ impl Names {
                 let id = self.issued.fetch_add(1, Relaxed) + 1;
                 if id >= 1 << self.id_bits {
                     self.full.store(true, Relaxed);
-                    return;
+                    return 0;
                 }
                 let new = (h >> self.id_bits << self.id_bits) | id as u64;
                 cur = self.slots[s].compare_exchange(0, new, Relaxed, Relaxed).unwrap_or_else(|other| other);
@@ -172,9 +173,7 @@ impl Names {
                 }
             }
             if (cur ^ h) >> self.id_bits == 0 {
-                let id = cur as usize & ((1 << self.id_bits) - 1);
-                self.bits[(group << (self.id_bits - 6)) + id / 64].fetch_or(1 << (id % 64), Relaxed);
-                return;
+                return cur as usize & ((1 << self.id_bits) - 1);
             }
             s = (s + 1) & mask;
         }
@@ -183,6 +182,63 @@ impl Names {
     fn distinct(&self, group: usize) -> u64 {
         let row = &self.bits[group << (self.id_bits - 6)..(group + 1) << (self.id_bits - 6)];
         row.iter().map(|w| w.load(Relaxed).count_ones() as u64).sum()
+    }
+}
+
+const BATCH: usize = 16;
+
+/// Name sightings on their way into the shared structures. A sighting is
+/// first numbered in the table, and one batch later its bit is set, so the
+/// cache misses of up to `BATCH` lookups overlap (prefetches are issued a
+/// batch ahead) instead of each stalling the parser.
+struct Sightings<'a> {
+    names: &'a Names,
+    seen: [(usize, u64); BATCH],
+    seen_len: usize,
+    bits: [(usize, u64); BATCH],
+    bits_len: usize,
+}
+
+impl<'a> Sightings<'a> {
+    fn new(names: &'a Names) -> Self {
+        Sightings { names, seen: [(0, 0); BATCH], seen_len: 0, bits: [(0, 0); BATCH], bits_len: 0 }
+    }
+
+    #[inline]
+    fn push(&mut self, group: usize, h: u64) {
+        let slot = &self.names.slots[h as usize & (self.names.slots.len() - 1)];
+        // SAFETY: a prefetch is a hint; it never faults or changes memory.
+        unsafe { std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>((slot as *const AtomicU64).cast()) };
+        self.seen[self.seen_len] = (group, h);
+        self.seen_len += 1;
+        if self.seen_len == BATCH {
+            self.flush();
+        }
+    }
+
+    /// Sets the bits numbered by the previous batch, then numbers this one.
+    fn flush(&mut self) {
+        for &(word, bit) in &self.bits[..self.bits_len] {
+            self.names.bits[word].fetch_or(bit, Relaxed);
+        }
+        self.bits_len = 0;
+        for &(group, h) in &self.seen[..self.seen_len] {
+            let id = self.names.number(h);
+            if id != 0 {
+                let word = (group << (self.names.id_bits - 6)) + id / 64;
+                let ptr: *const AtomicU64 = &self.names.bits[word];
+                // SAFETY: a hint to get the line ready for writing; it never faults.
+                unsafe { std::arch::asm!("prefetchw [{0}]", in(reg) ptr, options(nostack, preserves_flags)) };
+                self.bits[self.bits_len] = (word, 1 << (id % 64));
+                self.bits_len += 1;
+            }
+        }
+        self.seen_len = 0;
+    }
+
+    fn finish(mut self) {
+        self.flush();
+        self.flush();
     }
 }
 
@@ -274,7 +330,7 @@ fn digits(data: &[u8], at: usize) -> (u64, usize) {
 
 /// Parses every record in `data[start..end]` (both record boundaries; the
 /// 64 bytes after `end` must be readable) into `groups`.
-fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, names: &Names, groups: &mut [Agg]) {
+fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, sightings: &mut Sightings, groups: &mut [Agg]) {
     let unmatched = regions.countries.len();
     let mut i = start;
     while i < end {
@@ -306,7 +362,7 @@ fn parse_records(data: &[u8], start: usize, end: usize, regions: &Regions, names
         agg.amount_max = agg.amount_max.max(cents);
         agg.name_bytes += (ne - ns - npairs) as u64;
         agg.note_bytes += (te - ts - tpairs) as u64;
-        names.add(g, hash_name(data, ns, ne));
+        sightings.push(g, hash_name(data, ns, ne));
     }
 }
 
@@ -342,12 +398,14 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
             .map(|_| {
                 s.spawn(|| {
                     let mut groups = vec![Agg::default(); n_groups];
+                    let mut sightings = Sightings::new(names);
                     loop {
                         let k = next.fetch_add(1, Relaxed);
                         if k >= chunks {
+                            sightings.finish();
                             return groups;
                         }
-                        parse_records(data, bound(k), bound(k + 1), regions, names, &mut groups);
+                        parse_records(data, bound(k), bound(k + 1), regions, &mut sightings, &mut groups);
                     }
                 })
             })
@@ -358,7 +416,9 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
     let mut tail = data[tail_at..].to_vec();
     tail.resize(tail.len() + 64, 0);
     let mut groups = vec![Agg::default(); n_groups];
-    parse_records(&tail, 0, data.len() - tail_at, regions, names, &mut groups);
+    let mut sightings = Sightings::new(names);
+    parse_records(&tail, 0, data.len() - tail_at, regions, &mut sightings, &mut groups);
+    sightings.finish();
     parts.push(groups);
 
     let mut out = vec![Agg::default(); n_groups];
