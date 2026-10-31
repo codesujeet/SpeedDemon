@@ -33,8 +33,9 @@ arenas of the (few) workers whose chunks overlap it. Lines are counted per
 endpoint number, the latencies placed in one run per endpoint, and the endpoints
 visited in byte order (sorted once). Groups of up to 32 latencies are sorted,
 larger ones use `select_nth_unstable` (largest rank first, the others inside what
-remains below it). Blocks are written to the file in hour order as soon as they
-and all earlier hours are done, and the process exits without freeing anything.
+remains below it). Each worker writes its blocks into the file with `pwrite`, at the sum of the
+sizes of the earlier hours, as soon as those sizes are known (no writer thread),
+and the process exits without freeing anything.
 
 Tests (spec worked example, empty input, rank edge cases, morsel boundaries,
 a full catalogue of colliding names, names that differ in one byte, against a plain reference
