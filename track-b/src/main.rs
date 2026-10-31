@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::fmt::Write;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Barrier, Mutex, Once, OnceLock};
+use std::sync::Mutex;
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
@@ -42,35 +42,13 @@ fn map(path: &str) -> &'static [u8] {
     }
 }
 
-type Job = &'static (dyn Fn(usize) + Sync);
-static POOL: OnceLock<(Mutex<Option<Job>>, Barrier)> = OnceLock::new();
-static STARTED: Once = Once::new();
-
-/// Runs f(t) on every thread and collects what each returns. The threads are
-/// started once and reused by every phase: a new thread's stack is a new
-/// mapping, which waits behind every page fault and unmap in flight.
+/// Runs f(t) on every thread and collects what each returns.
 fn on_threads<R: Send>(f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let (job, gate) = POOL.get_or_init(|| (Mutex::new(None), Barrier::new(THREADS)));
-    STARTED.call_once(|| {
-        for t in 1..THREADS {
-            std::thread::spawn(move || loop {
-                let (job, gate) = POOL.get().unwrap();
-                gate.wait();
-                let f = job.lock().unwrap().unwrap();
-                f(t);
-                gate.wait();
-            });
-        }
-    });
-    let out: Vec<Mutex<Option<R>>> = (0..THREADS).map(|_| Mutex::new(None)).collect();
-    let run = |t: usize| *out[t].lock().unwrap() = Some(f(t));
-    let run: &(dyn Fn(usize) + Sync) = &run;
-    // Safe while `run` outlives the phase, and the second wait ensures that.
-    *job.lock().unwrap() = Some(unsafe { std::mem::transmute::<&(dyn Fn(usize) + Sync), Job>(run) });
-    gate.wait();
-    run(0);
-    gate.wait();
-    out.into_iter().map(|r| r.into_inner().unwrap().unwrap()).collect()
+    let f = &f;
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..THREADS).map(|t| s.spawn(move || f(t))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 
 /// The decimal number at text[i..].
