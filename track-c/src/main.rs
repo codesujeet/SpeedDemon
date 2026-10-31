@@ -417,6 +417,13 @@ fn parse_records(
     let unmatched = regions.countries.len();
     let mut i = start;
     while i < end {
+        // The hardware prefetcher stops at page boundaries; pull the stream in ahead.
+        // SAFETY: a prefetch is a hint; it never faults, even past the mapping.
+        unsafe {
+            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
+                data.as_ptr().wrapping_add(i + 1536).cast(),
+            )
+        };
         i += 3 * (data[i] == 0xEF) as usize;
         let (id, n) = digits(data, i);
         let (ns, ne, npairs, next) = text_field(data, i + n + 1);
