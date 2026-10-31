@@ -459,6 +459,25 @@ fn cut(data: &[u8], from: usize) -> usize {
 const TAIL: usize = 8192;
 const CHUNKS_PER_THREAD: usize = 32;
 
+/// Drops this worker's page-table entries for a consumed chunk so process
+/// exit has less to tear down; the pages stay in the page cache.
+#[cfg(unix)]
+fn release(data: &[u8], from: usize, to: usize) {
+    extern "C" {
+        fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    }
+    let base = data.as_ptr() as usize;
+    let (a, b) = ((base + from + 4095) & !4095, (base + to) & !4095);
+    if b > a {
+        // SAFETY: a page-aligned range inside our read-only file mapping that
+        // is never read again; MADV_DONTNEED on it only drops mappings.
+        unsafe { madvise(a as *mut u8, b - a, 4) };
+    }
+}
+
+#[cfg(not(unix))]
+fn release(_: &[u8], _: usize, _: usize) {}
+
 fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Names) -> Vec<Agg> {
     let n_groups = regions.countries.len() + 1;
     let tail_at = if data.len() - body > 2 * TAIL {
@@ -493,6 +512,7 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
                             &mut sightings,
                             &mut groups,
                         );
+                        release(data, bound(k), bound(k + 1));
                     }
                 })
             })

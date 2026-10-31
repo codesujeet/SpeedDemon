@@ -31,6 +31,7 @@ board yet. Everything that was tried, including the failures, is in
 | 13 | 32 chunks per thread instead of 8 (better balance at the end on P/E cores); the name table is leaked and the process calls `exit(0)` after the output is written, so no destructors or teardown run | pending | 0.125 -> 0.103-0.114 median (11 interleaved rounds; inside the noise) | 11 | pending |
 | 11 | Names hashed from one masked AVX2 load (a 64-byte window of constants supplies the mask) instead of four masked scalar loads | pending | 0.111 -> 0.105 median, cpu 1042 -> 991 ms (7 interleaved rounds) | 12 | pending |
 | 12 | Region table is one byte per region id (2 MB -> 1 MB, so it stays in L2); the rare group beyond the 254th goes to a spill map | pending | 0.123 -> 0.106 median, cpu 1126 -> 992 ms (13 interleaved rounds) | 11 -> 10 | pending |
+| 14 | Each worker `madvise(MADV_DONTNEED)`s the page-aligned interior of a chunk it has finished, so the page-table teardown at exit (counted in T) happens in parallel while parsing | pending | ~85 -> ~74 ms median, 7 of 8 interleaved docker rounds faster (noisy laptop) | 10 | pending |
 
 Step 5 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.139 s and 47 MB, against 0.213 s and
