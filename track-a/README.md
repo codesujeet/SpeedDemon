@@ -28,13 +28,14 @@ copy of the name (and the blocks in between for names over 64 bytes), and a miss
 asks the shared table for the name's number. Collisions are therefore always
 resolved exactly and nothing depends on the names.
 
-After a barrier, workers take one hour at a time. The hour's runs are in the
-arenas of the (few) workers whose chunks overlap it. Lines are counted per
-endpoint number, the latencies placed in one run per endpoint, and the endpoints
-visited in byte order (sorted once). Groups of up to 32 latencies are sorted,
-larger ones use `select_nth_unstable` (largest rank first, the others inside what
-remains below it). Blocks are written to the file in hour order as soon as they
-and all earlier hours are done, and the process exits without freeing anything.
+After a barrier, workers take one hour at a time. Each line of the hour becomes the key
+`rank << 20 | latency`, where rank is the endpoint's place in byte order (the names are
+sorted once); a latency of 2^20-1 or more is clamped in the key and kept exactly in a
+small sorted side list. Three 11-bit radix passes order the keys, so every group is
+contiguous, in output order, with its latencies ascending, and the count, p50, p95 and
+p99 (spec rank `(p * n + 99) / 100`) are index reads (clamped values come from the side
+list, which sorts the same way). Blocks are written to the file in hour order as soon
+as they and all earlier hours are done, and the process exits without freeing anything.
 
 Tests (spec worked example, empty input, rank edge cases, morsel boundaries,
 a full catalogue of colliding names, names that differ in one byte, against a plain reference
