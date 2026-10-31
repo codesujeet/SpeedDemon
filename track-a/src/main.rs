@@ -385,14 +385,24 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
     // The first line start at or after `x` (a line start exactly at `x` goes to the chunk before): adjacent chunks agree.
     let snap = |x: usize| if x >= n { n } else if x == 0 { 0 } else { x + d[x..].iter().position(|&b| b == b'\n').unwrap() + 1 };
     let (cursor, next, barrier) = (AtomicUsize::new(0), AtomicUsize::new(0), Barrier::new(threads));
+    let cursor0 = AtomicUsize::new(0);
     let names = Mutex::new(Names::default());
     let parts: &'static [OnceLock<Part>] = Box::leak((0..threads).map(|_| OnceLock::new()).collect());
     let plan: &'static OnceLock<Plan> = Box::leak(Box::default());
     let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
     std::thread::scope(|scope| {
         for t in 0..threads {
-            let (sender, cursor, next, barrier, names) = (sender.clone(), &cursor, &next, &barrier, &names);
+            let (sender, cursor, next, barrier, names, cursor0) = (sender.clone(), &cursor, &next, &barrier, &names, &cursor0);
             scope.spawn(move || {
+                let mut dry = Worker::new(d);
+                loop {
+                    let from = cursor0.fetch_add(chunk, Relaxed);
+                    if from >= n {
+                        break;
+                    }
+                    dry.scan(snap(from), snap(from + chunk), names);
+                }
+                std::mem::forget(dry);
                 let mut worker = Worker::new(d);
                 loop {
                     let from = cursor.fetch_add(chunk, Relaxed);
