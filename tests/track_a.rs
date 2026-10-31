@@ -3,10 +3,17 @@
 
 use super::*;
 
+/// The input followed by `PAD` zero bytes, as `process` requires.
+fn padded(data: &[u8]) -> &'static [u8] {
+    let mut v = data.to_vec();
+    v.resize(data.len() + PAD, 0);
+    &Box::leak(v.into_boxed_slice())[..data.len()]
+}
+
 /// Runs the scan and the output phase on `data` and returns the output bytes.
 fn summarize(data: &[u8], threads: usize, chunk: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    process(data.len(), &|buf, at| buf.copy_from_slice(&data[at..at + buf.len()]), threads, chunk, &mut out).unwrap();
+    process(padded(data), threads, chunk, &mut out).unwrap();
     out
 }
 
