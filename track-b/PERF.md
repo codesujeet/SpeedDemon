@@ -26,6 +26,8 @@ Everything that was tried, including the failures, is in
 | 6 | Rebuild around **pieces**: the corpus is cut into 4 MB line-aligned pieces; a worker tokenizes a piece (AVX2 token mask, branch-free key, bucketed term table with prefetch), builds u16 piece-local postings, runs all 50,000 queries on it, and folds each answer into per-worker count / sum / first-ten accumulators merged at the end. No global token array and no global postings. | pending | 1,479 -> 968 ms (7 interleaved rounds, loaded laptop) | 274 -> 118 | pending |
 | 7 | 1 MB pieces; terms in at least `ndocs/64` documents of a piece also get a bitmap (word-wise AND/OR/NOT, six masked popcounts for a bitmap answer's sum); a presence bitset skips queries that cannot match the piece; a shared per-query marker stops logging ids that cannot be among the ten smallest | pending | 1,438 -> 901 ms vs the step-5 base (9 interleaved rounds); 845 -> 796 vs step 6 (7 rounds). Harness replica (5 runs): 0.664 s | 274 -> 70 | pending |
 | 8 | Source trim and small memory wins: per-term stamp and count packed into one array, query-file-sized term table (no regrowth), plain merge for intersect (the binary-search branch never mattered on piece-sized lists), the `TRACK_B_TIMING` phase printing removed, `process::exit(0)` after the output is written | pending | 793 -> 797 ms (11 interleaved rounds, no change within noise) | 70 -> 64 | pending |
+| 9 | The query file is parsed in one SIMD pass with the corpus tokenizer (upper case tokens are keywords, lower case ones terms) and terms are interned straight from the file (no per-line `split`, no padding-buffer copy, presized vectors). The serial parse before the workers start was 27-40 ms in Docker | pending | whole run 734 -> 647 ms median (7 interleaved rounds, loaded laptop); callgrind: conditional branches 17.0 M -> 9.6 M and mispredicts 946 k -> 545 k on a tiny corpus | 67 -> 65 | pending |
+| 10 | Postings are filled with the term's start offset as its own write cursor (restored afterwards) instead of a per-piece `Vec<u32>` copy, and `info` is reserved at its exact size: one 300 KB allocation and one pass fewer per piece, no doubling slack | pending | not distinguishable from noise (8 interleaved rounds on a loaded laptop, medians 822 vs 795 ms) | 67 -> 59 (peak of 8 runs: 66.8 -> 58.9) | pending |
 
 Source lines (the harness's count) went from 659 to 924 at step 7 and 889 at step 8: the AVX2 scanner, the
 bucketed table, bitmaps and the merge cost 265 lines.
@@ -145,6 +147,28 @@ from about 25 to about 15 ns per token.
 * Positional output writes from the workers and buffer reuse: the output is
   1.4 MB (render + write about 5 ms) and per-piece buffers are already reused;
   not worth the lines.
+
+## Round 3 findings (steps 9-10)
+
+* **Where the CPU goes** (perf, cpu-clock, full data, answering functions
+  pinned with `inline(never)`): `Piece::flush` (table lookups) 16%, the
+  per-token scan closure 13%, the scan loop and per-piece term-sized passes
+  12%, `eval_bool` 8.5%, `intersect` 8%, `possible` 6.5%, `answer_piece` 6%,
+  phrase evaluation 4%. Callgrind on 8 pieces: tokenize and build about 50
+  instructions per input byte (about 190 per token), answering 21 M
+  instructions per piece (about 430 per query-piece pair, spread thin: no
+  function above 3%). Skipping the answering phase locally gave 330 ms
+  against 650 ms, so the two halves are about equal.
+* **Serial parts of the run** (Docker, `Instant` around each phase): query
+  parse 27-37 ms (still 27 ms on a second, warm call, so it is work, not
+  cold start), merge 8-12 ms, render + write 6 ms. Step 9 attacks the first.
+* **Dense-term filter and AVX2 scan in PHRASE evaluation** (intersect a
+  candidate list against the bitmap of a dense term instead of walking its
+  list; find the pivot id in a document with 8-wide compares): 574.3 M ->
+  572.5 M instructions on 8 pieces, no effect; dropped.
+* **Parallel parse** (partitioned term table, per-partition insertion, one
+  resolve pass) designed but not built: about 90 more source lines for at
+  most 20 ms.
 
 ## Most promising next step
 

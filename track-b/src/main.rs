@@ -522,6 +522,7 @@ impl Piece {
 
         self.w = (self.dstart.len() - 1).div_ceil(64).max(1);
         self.info.clear();
+        self.info.reserve_exact(nt);
         self.present.clear();
         self.present.resize(nt / 64 + 1, 0);
         let mut total = 0;
@@ -532,12 +533,15 @@ impl Piece {
         }
         self.post.clear();
         self.post.resize(total as usize, 0);
-        let mut cur: Vec<u32> = self.info.iter().map(|i| i[0]).collect();
         for (d, w) in self.ustart.windows(2).enumerate() {
             for &id in &self.uniq[w[0] as usize..w[1] as usize] {
-                self.post[cur[id as usize] as usize] = d as u16;
-                cur[id as usize] += 1;
+                let at = &mut self.info[id as usize][0];
+                self.post[*at as usize] = d as u16;
+                *at += 1;
             }
+        }
+        for i in &mut self.info {
+            i[0] -= i[1];
         }
         self.maps.clear();
         self.map_at.resize(nt, 0);

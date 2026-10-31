@@ -64,6 +64,6 @@ Every query still runs on every piece (12.5 M presence checks, 3.9 M real
 evaluations). Grouping queries by an anchor term and visiting only the
 queries whose anchor is present in the piece would remove most of that; the
 anchor needs global term counts, which one or two sample pieces could
-estimate. The query file is parsed serially before any worker starts (about
-20-40 ms), which could be overlapped with mapping the corpus. I would keep
+estimate. The query file is parsed serially before any worker starts (one SIMD
+pass, see `PERF.md`), which could be split across the workers. I would keep
 either only if an interleaved A/B shows it (see `PERF.md`).
