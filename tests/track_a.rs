@@ -2,6 +2,10 @@
 //! compiled into the binary's test build only (`#[path]` in main.rs).
 
 use super::*;
+use std::collections::BTreeMap;
+
+/// Zero bytes after the input that `process` may read.
+const PAD: usize = 128;
 
 /// The input followed by `PAD` zero bytes, as `process` requires.
 fn padded(data: &[u8]) -> &'static [u8] {
@@ -11,10 +15,15 @@ fn padded(data: &[u8]) -> &'static [u8] {
 }
 
 /// Runs the scan and the output phase on `data` and returns the output bytes.
-fn summarize(data: &[u8], threads: usize, chunk: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    process(padded(data), threads, chunk, &mut out).unwrap();
-    out
+fn summarize(data: &[u8], threads: usize, pieces: usize) -> Vec<u8> {
+    let out = Mutex::new(Vec::new());
+    let create = |total: usize| {
+        let mut buf = out.lock().unwrap();
+        buf.resize(total, 0);
+        buf.as_mut_ptr()
+    };
+    process(padded(data), threads, pieces, &create);
+    out.into_inner().unwrap()
 }
 
 /// A plain, slow implementation of the spec, for comparison.
@@ -30,25 +39,19 @@ fn reference(data: &[u8]) -> Vec<u8> {
     for ((hour, endpoint), (mut lat, errors)) in groups {
         lat.sort_unstable();
         let n = lat.len() as u64;
-        let rank = |p: u64| lat[((p * n + 99) / 100 - 1) as usize];
-        out += &format!(
-            "{hour}:00:00Z {endpoint} {n} {} {} {} {errors} {}\n",
-            rank(50),
-            rank(95),
-            rank(99),
-            errors * 1_000_000 / n
-        );
+        let rank = |p: u64| lat[((p * n).div_ceil(100) - 1) as usize];
+        out += &format!("{hour}:00:00Z {endpoint} {n} {} {} {} {errors} {}\n", rank(50), rank(95), rank(99), errors * 1_000_000 / n);
     }
     out.into_bytes()
 }
 
 #[test]
-fn parse_latency_reads_one_to_ten_digits() {
+fn decode_reads_one_to_ten_digits() {
     for v in [0u64, 7, 10, 99, 123, 4096, 99_999, 1_000_000, 12_345_678, 99_999_999, 100_000_000, 987_654_321, 4_294_967_295] {
         let line = format!("2026-10-30T18:00:00.000000Z GET /x 200 {v}\n");
-        let s = line.find("200 ").unwrap() + 4;
-        // SAFETY: the digits are inside `line`, which is longer than eight bytes before them.
-        assert_eq!(unsafe { parse_latency(line.as_ptr(), s, line.len() - 1) }, v as u32);
+        let digits = line.len() - 1 - (line.find("200 ").unwrap() + 4);
+        // SAFETY: the digits are inside `line`, which is longer than sixteen bytes.
+        assert_eq!(unsafe { decode(line.as_ptr().add(line.len() - 1), digits as u32) }, v as u32);
     }
 }
 
@@ -67,27 +70,25 @@ fn percentiles_match_a_full_sort() {
 }
 
 #[test]
-fn any_thread_count_and_morsel_size_gives_the_reference_output() {
+fn any_thread_count_and_piece_count_gives_the_reference_output() {
     // Many hours (also out of order), endpoints of 1 to 125 bytes, latencies of 1 to 10
-    // digits, and a file long enough to have a morsel boundary in every other line.
+    // digits, and a file long enough to have a piece boundary in every other line.
     let mut data = Vec::new();
     let mut x = 12345u64;
     for i in 0..6000u64 {
         x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        let hour = (x >> 40) % 30;
+        let hour = (x >> 40) as usize % HOURS;
         let len = 1 + (x >> 20) as usize % 125;
         let endpoint = format!("/{}", "e".repeat(len - 1));
         let endpoint = if i % 9 == 0 { "/".to_string() } else { endpoint };
         let latency = if i % 7 == 0 { 4_294_967_295 } else { (x >> 33) % 10u64.pow(1 + (i % 10) as u32) };
         let method = ["GET", "OPTIONS", "DELETE"][(i % 3) as usize];
         let status = [200, 404, 499, 500, 599][(x >> 10) as usize % 5];
-        data.extend_from_slice(
-            format!("2026-11-01T{:02}:07:18.569411Z {method} {endpoint} {status} {latency}\n", hour % 24).as_bytes(),
-        );
+        data.extend_from_slice(format!("{}:07:18.569411Z {method} {endpoint} {status} {latency}\n", std::str::from_utf8(&label(hour)[..13]).unwrap()).as_bytes());
     }
     let expected = reference(&data);
-    for (threads, morsel) in [(1, 1 << 20), (4, 1000), (3, 97), (8, 4096), (2, 16)] {
-        assert_eq!(summarize(&data, threads, morsel), expected, "threads={threads} morsel={morsel}");
+    for (threads, pieces) in [(1, 1), (4, 32), (3, 500), (8, 96), (2, 2000)] {
+        assert_eq!(summarize(&data, threads, pieces), expected, "threads={threads} pieces={pieces}");
     }
 }
 
@@ -99,7 +100,7 @@ fn a_full_catalogue_of_similar_endpoints() {
         let (k, pad) = (i % 2000, "p".repeat(i as usize % 2000 % 100));
         data.extend_from_slice(format!("2026-10-30T18:00:00.000000Z PUT /endpoint/{pad}/{k}/last/x {} {i}\n", 200 + i % 400).as_bytes());
     }
-    assert_eq!(summarize(&data, 3, 1 << 14), reference(&data));
+    assert_eq!(summarize(&data, 3, 24), reference(&data));
 }
 
 #[test]
@@ -117,20 +118,26 @@ fn endpoints_that_differ_in_one_byte_stay_apart() {
                 for i in 0..4u32 {
                     data.extend_from_slice(b"2026-10-30T18:00:00.000000Z GET ");
                     data.extend_from_slice(&name);
-                    data.extend_from_slice(format!(" 200 {}
-", i + 10 * u32::from(variant)).as_bytes());
+                    data.extend_from_slice(
+                        format!(
+                            " 200 {}
+",
+                            i + 10 * u32::from(variant)
+                        )
+                        .as_bytes(),
+                    );
                 }
             }
         }
     }
-    assert_eq!(summarize(&data, 3, 1000), reference(&data));
+    assert_eq!(summarize(&data, 3, 30), reference(&data));
 }
 
 #[test]
 fn files_shorter_than_one_window_work() {
     for n in 1..4 {
         let data: Vec<u8> = (0..n).flat_map(|i| format!("2026-10-30T18:00:00.000000Z GET /a{i} 200 {i}\n").into_bytes()).collect();
-        assert_eq!(summarize(&data, 4, 1 << 20), reference(&data));
+        assert_eq!(summarize(&data, 4, 32), reference(&data));
     }
 }
 
