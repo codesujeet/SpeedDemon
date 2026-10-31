@@ -288,16 +288,24 @@ fn percentiles(lat: &mut [u32]) -> [u32; 3] {
     out
 }
 
-fn write_u64(buf: &mut [u8; 20], mut v: u64) -> &[u8] {
-    let mut i = 20;
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            return &buf[i..];
-        }
+/// Writes `v` in decimal at `p` and returns the end. Eight bytes are stored whatever the length (the caller has room for
+/// them), and nothing branches on the digits: the number is split into pairs of digits in the lanes of one register
+/// and the leading zeros are shifted out. Numbers of 10^8 and more, which the data does not have, take a slow path.
+unsafe fn put(p: *mut u8, v: u64) -> *mut u8 {
+    if v >= 100_000_000 {
+        let s = v.to_string();
+        p.copy_from_nonoverlapping(s.as_ptr(), s.len());
+        return p.add(s.len());
     }
+    let x = (v / 10_000) | ((v % 10_000) << 32);
+    let q = ((x * 5243) >> 19) & 0x0000_007F_0000_007F;
+    let x = (x - q * 100) << 16 | q;
+    let q = ((x * 103) >> 10) & 0x000F_000F_000F_000F;
+    let x = (x - q * 10) << 8 | q;
+    // The first digit is the lowest byte, so the leading zeros are the low zero bytes (`v == 0` keeps one digit).
+    let zeros = (x.trailing_zeros() / 8).min(7);
+    p.cast::<u64>().write_unaligned((x | 0x3030_3030_3030_3030) >> (8 * zeros));
+    p.add(8 - zeros as usize)
 }
 
 /// Everything the output phase needs once the scan is done.
@@ -377,8 +385,7 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
             unsafe { madvise(from as *mut u8, to - from, 4) };
         }
     }
-    let mut out = Vec::with_capacity(lines * 3 + 4096);
-    let mut buf = [0u8; 20];
+    let mut out: Vec<u8> = Vec::with_capacity(lines * 3 + 4096);
     for &id in &plan.order {
         let n = count[id as usize] as u32 as usize;
         if n == 0 {
@@ -387,15 +394,25 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
         let end = start[id as usize];
         let [p50, p95, p99] = percentiles(&mut lat[end - n..end]);
         let errors = count[id as usize] >> 32;
-        out.extend_from_slice(text);
-        out.extend_from_slice(b":00:00Z ");
-        out.extend_from_slice(plan.names[id as usize]);
-        // floor(errors * 1_000_000 / count): integer division already floors.
-        for v in [n as u64, p50.into(), p95.into(), p99.into(), errors, errors * 1_000_000 / n as u64] {
-            out.push(b' ');
-            out.extend_from_slice(write_u64(&mut buf, v));
+        let name = plan.names[id as usize];
+        out.reserve(name.len() + 256);
+        // SAFETY: room for the name (copied as 64 bytes when it is shorter: the input has `PAD` bytes after it) and
+        // for 13 + 8 + 6 * 10 + 1 more bytes, and `put` stores 8 bytes at most after the end of a number.
+        unsafe {
+            let (start, mut p) = (out.as_mut_ptr(), out.as_mut_ptr().add(out.len()));
+            p.copy_from_nonoverlapping(text.as_ptr(), 13);
+            p.add(13).cast::<[u8; 8]>().write_unaligned(*b":00:00Z ");
+            p = p.add(21);
+            p.copy_from_nonoverlapping(name.as_ptr(), name.len().max(64));
+            p = p.add(name.len());
+            // floor(errors * 1_000_000 / count): integer division already floors.
+            for v in [n as u64, p50.into(), p95.into(), p99.into(), errors, errors * 1_000_000 / n as u64] {
+                *p = b' ';
+                p = put(p.add(1), v);
+            }
+            *p = b'\n';
+            out.set_len(p.add(1).offset_from(start) as usize);
         }
-        out.push(b'\n');
     }
     out
 }
