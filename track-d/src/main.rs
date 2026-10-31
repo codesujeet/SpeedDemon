@@ -5,7 +5,7 @@
 //! Dijkstra, in input order. See README.md for the approach.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -113,26 +113,43 @@ impl Csr {
 }
 
 /// Builds the CSR of the `(key, other, weight)` edges that `scan(part)` yields
-/// for each of `parts` parts, with two passes over them: count each key's
-/// degree, then place every edge at an atomically claimed slot of its row.
-/// Parts run in parallel and share only atomic counters, so the order of
-/// edges within a row is arbitrary (distances do not depend on it).
-fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, parts: usize, scan: impl Fn(usize) -> I + Sync) -> Csr {
-    let degree: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
-    par(parts, |p| scan(p).for_each(|(key, _, _)| _ = degree[key as usize + 1].fetch_add(1, Relaxed)));
-    let mut row_offset: Vec<u32> = degree.into_iter().map(AtomicU32::into_inner).collect();
-    for i in 0..n {
-        row_offset[i + 1] += row_offset[i];
+/// for each of `parts` parts. Every part files its edges under the worker that
+/// owns their key (worker `w` owns keys `n*w/workers..n*(w+1)/workers`); then
+/// each worker counts and places only its own edges, into its own slice of the
+/// adjacency array, so no counter or slot is shared and nothing is atomic.
+/// `hint` is the expected number of edges a part files per worker.
+fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, parts: usize, hint: usize, scan: impl Fn(usize) -> I + Sync) -> Csr {
+    let filed = par(parts, |p| {
+        let mut owned: Vec<Vec<(u32, u32, u32)>> = (0..workers).map(|_| Vec::with_capacity(hint)).collect();
+        scan(p).for_each(|e| owned[e.0 as usize * workers / n].push(e));
+        owned
+    });
+    let bounds = |w: usize| (n * w).div_ceil(workers);
+    let degrees = par(workers, |w| {
+        let lo = bounds(w);
+        let mut degree = vec![0u32; bounds(w + 1) - lo];
+        for e in filed.iter().flat_map(|owned| &owned[w]) {
+            degree[e.0 as usize - lo] += 1;
+        }
+        degree
+    });
+    let mut row_offset = vec![0u32; n + 1];
+    for (w, degree) in degrees.iter().enumerate() {
+        for (i, &d) in degree.iter().enumerate() {
+            row_offset[bounds(w) + i + 1] = row_offset[bounds(w) + i] + d;
+        }
     }
-    let cursor: Vec<AtomicU32> = row_offset.iter().map(|&o| AtomicU32::new(o)).collect();
     let mut adj = vec![(0u32, 0u32); row_offset[n] as usize];
     let out = Disjoint(adj.as_mut_ptr());
-    par(parts, |p| {
-        for (key, other, weight) in scan(p) {
-            let at = cursor[key as usize].fetch_add(1, Relaxed) as usize;
-            // SAFETY: `at` is unique to this edge (its key's row has one slot per edge counted)
-            // and in bounds because the counting pass saw the same edges.
-            unsafe { out.put(at, (other, weight)) };
+    par(workers, |w| {
+        let lo = bounds(w);
+        let mut cursor = row_offset[lo..bounds(w + 1)].to_vec();
+        for &(key, other, weight) in filed.iter().flat_map(|owned| &owned[w]) {
+            let c = &mut cursor[key as usize - lo];
+            // SAFETY: the slots of rows [lo, hi) belong to this worker alone, and `*c` walks
+            // exactly the `degree` slots of the row.
+            unsafe { out.put(*c as usize, (other, weight)) };
+            *c += 1;
         }
     });
     Csr { row_offset, adj }
@@ -210,7 +227,7 @@ fn permute_csr(g: &Csr, order: &[u32], new_id: &[u32], workers: usize) -> Csr {
 /// both CSRs in the locality order and `new_id[old]` the new name of node `old`.
 fn load_graph(data: &[u8], threads: usize, mut phase: impl FnMut(&str)) -> (usize, Csr, Csr, Vec<u32>) {
     let (n, slices) = split_graph(data, threads);
-    let original = build_csr(n, slices.len(), |p| parse_edges(slices[p]));
+    let original = build_csr(n, threads, slices.len(), data.len() / 16 / threads / threads + 16, |p| parse_edges(slices[p]));
     phase("forward CSR on the input ids");
     let order = region_order(&original, threads);
     let mut new_id = vec![0u32; n];
@@ -222,7 +239,7 @@ fn load_graph(data: &[u8], threads: usize, mut phase: impl FnMut(&str)) -> (usiz
     drop((original, order));
     phase("permute");
     let pieces = threads.clamp(1, n.max(1));
-    let rev = build_csr(n, pieces, |p| {
+    let rev = build_csr(n, threads, pieces, fwd.adj.len() / pieces / threads * 2 + 16, |p| {
         (n * p / pieces..n * (p + 1) / pieces).flat_map(|u| fwd.row(u as u32).iter().map(move |&(v, w)| (v, u as u32, w)))
     });
     phase("reverse CSR");
