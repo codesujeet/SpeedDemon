@@ -399,6 +399,16 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
                     if from >= n {
                         break;
                     }
+                    // Map this chunk's pages in one call (MADV_POPULATE_READ, Linux 5.14) instead of one fault per 16 pages.
+                    #[cfg(target_os = "linux")]
+                    {
+                        extern "C" {
+                            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+                        }
+                        let (a, b) = ((d.as_ptr() as usize + from) & !4095, (d.as_ptr() as usize + (from + chunk).min(n) + 4095) & !4095);
+                        // SAFETY: whole pages of the read-only file mapping (the page after the file is part of it); a failure is harmless.
+                        unsafe { madvise(a as *mut u8, b - a, 22) };
+                    }
                     worker.scan(snap(from), snap(from + chunk), names);
                 }
                 parts[t].set(worker.part).ok();
