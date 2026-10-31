@@ -9,8 +9,8 @@ already cached cost no memory (a zero page is mapped after the file so the
 vector loads of the last line stay inside the mapping). Twelve workers take 1 MiB
 chunks from an atomic cursor; each chunk start is snapped forward to the next
 line, so neighbours agree on the split without talking. This cursor is the only
-shared state in the scan, apart from a mutex taken once per endpoint name per
-worker.
+shared state in the scan, apart from a lock-free table of endpoint numbers that
+a worker reads once per endpoint name.
 
 Per chunk, a worker first lists the offsets of all delimiters (spaces and line
 feeds) with AVX2 compares and bit scans, about four per 64 bytes. The spec gives

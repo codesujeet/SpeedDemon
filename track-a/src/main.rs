@@ -12,10 +12,10 @@
 //! percentiles, format, and hand the block to the main thread, which writes
 //! the blocks in hour order.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-use std::sync::{mpsc, Barrier, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::{mpsc, Barrier, OnceLock};
 
 /// A stored line is `endpoint << 21 | error << 20 | latency`; a latency that does not fit 20 bits is stored as
 /// `LAT_MASK` and followed by a whole `u32` holding the latency.
@@ -110,12 +110,21 @@ unsafe fn same(p: *const u8, q: *const u8, len: usize) -> bool {
     ok
 }
 
-/// The endpoint numbers handed out so far and the names that go with them.
-#[derive(Default)]
-struct Names {
-    ids: HashMap<&'static [u8], u32>,
-    list: Vec<&'static [u8]>,
+/// Whether `slot` of a name table (names stored from `names` on) is the `len` bytes at `p`.
+#[inline(always)]
+unsafe fn holds(slot: u64, names: *const u8, p: *const u8, len: usize) -> bool {
+    (slot >> 32) as u8 as usize == len && same(p, names.add(slot as u32 as usize), len)
 }
+
+/// The endpoint numbers handed out so far: a table hashed like the workers' private ones, so that no lock is taken
+/// (a mutex made the first chunks of all workers wait for each other for a third of the scan). A slot is
+/// `offset of the first occurrence in the input | length << 32 | number << 40`; 0 is free, `BUSY` is being filled.
+struct Names {
+    slots: Vec<AtomicU64>,
+    next: AtomicUsize,
+}
+
+const BUSY: u64 = u64::MAX;
 
 /// What one worker found: all its lines in scan order, and where the hour (`YYYY-MM-DDTHH` as two overlapping
 /// 8-byte loads) changes: `(first load, second load, index in arena)`.
@@ -146,18 +155,19 @@ impl Worker {
 
     /// The number of the endpoint `d[es..ee]`, taken from the shared names the first time this worker sees it.
     #[inline(always)]
-    unsafe fn endpoint(&mut self, es: usize, ee: usize, names: &Mutex<Names>) -> u32 {
+    unsafe fn endpoint(&mut self, es: usize, ee: usize, names: &Names) -> u32 {
         let (base, len) = (self.d.as_ptr(), ee - es);
         let bits = 8 * len.min(8) as u32;
         let a = load8(base.add(es)) & (u64::MAX >> (64 - bits));
         let b = load8(base.add(ee - 8)) & (u64::MAX << (64 - bits));
-        let mut i = ((a ^ b.rotate_left(29) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 51) as usize;
+        let hash = ((a ^ b.rotate_left(29) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 51) as usize;
+        let mut i = hash;
         loop {
             let slot = *self.table.get_unchecked(i);
             if slot == 0 {
-                return self.insert(es, ee, i, names);
+                return self.insert(es, ee, i, hash, names);
             }
-            if (slot >> 32) as u8 as usize == len && same(base.add(es), self.store.as_ptr().add(slot as u32 as usize), len) {
+            if holds(slot, self.store.as_ptr(), base.add(es), len) {
                 return (slot >> 40) as u32;
             }
             i = (i + 1) % SLOTS;
@@ -165,18 +175,27 @@ impl Worker {
     }
 
     #[cold]
-    fn insert(&mut self, es: usize, ee: usize, i: usize, names: &Mutex<Names>) -> u32 {
-        let mut shared = names.lock().unwrap();
-        let next = shared.list.len() as u32;
-        let id = *shared.ids.entry(&self.d[es..ee]).or_insert(next);
-        if id == next {
-            shared.list.push(&self.d[es..ee]);
-        }
-        assert!((id as usize) < MAX_ENDPOINTS, "more endpoints than the spec's catalogue of 1,842");
+    fn insert(&mut self, es: usize, ee: usize, i: usize, hash: usize, names: &Names) -> u32 {
+        let (d, len, mut j) = (self.d.as_ptr(), ee - es, hash);
+        let id = loop {
+            let s = names.slots[j].load(Acquire);
+            // SAFETY: the shared name is a first occurrence, inside the mapped input like this one.
+            if s != 0 && s != BUSY {
+                if unsafe { holds(s, d, d.add(es), len) } {
+                    break (s >> 40) as u32;
+                }
+                j = (j + 1) % SLOTS;
+            } else if s == 0 && names.slots[j].compare_exchange(0, BUSY, Acquire, Relaxed).is_ok() {
+                let id = names.next.fetch_add(1, Relaxed);
+                assert!(id < MAX_ENDPOINTS, "more endpoints than the spec's catalogue of 1,842");
+                names.slots[j].store(es as u64 | (len as u64) << 32 | (id as u64) << 40, Release);
+                break id as u32;
+            }
+        };
         let off = self.store.len();
         self.store.extend_from_slice(&self.d[es..ee]);
         self.store.reserve(32);
-        self.table[i] = off as u64 | ((ee - es) as u64) << 32 | u64::from(id) << 40;
+        self.table[i] = off as u64 | (len as u64) << 32 | u64::from(id) << 40;
         id
     }
 
@@ -184,7 +203,7 @@ impl Worker {
     /// delimiters (spaces and the line feed), so the delimiters of a stretch of input are first listed as offsets
     /// (about 4 per 64 bytes, 8 written unconditionally), and the lines are then read from that list five at a time:
     /// no line has to be parsed to find the next.
-    fn scan(&mut self, start: usize, end: usize, names: &Mutex<Names>) {
+    fn scan(&mut self, start: usize, end: usize, names: &Names) {
         let base = self.d.as_ptr();
         let first = self.part.arena.as_mut_ptr();
         let mut pos = std::mem::take(&mut self.pos);
@@ -290,7 +309,7 @@ struct Plan {
     order: Vec<u32>,
 }
 
-fn make_plan(parts: &'static [OnceLock<Part>], names: &Mutex<Names>) -> Plan {
+fn make_plan(d: &'static [u8], parts: &'static [OnceLock<Part>], names: &Names) -> Plan {
     let mut by_hour: BTreeMap<[u8; 13], Vec<&'static [u32]>> = BTreeMap::new();
     for part in parts.iter().map(|p| p.get().unwrap()) {
         for (i, run) in part.runs.iter().enumerate() {
@@ -298,7 +317,11 @@ fn make_plan(parts: &'static [OnceLock<Part>], names: &Mutex<Names>) -> Plan {
             by_hour.entry(hour_text((run.0, run.1))).or_default().push(&part.arena[run.2..end]);
         }
     }
-    let names = std::mem::take(&mut names.lock().unwrap().list);
+    let mut list: Vec<&'static [u8]> = vec![&[]; names.next.load(Relaxed)];
+    for v in names.slots.iter().map(|s| s.load(Relaxed)).filter(|&v| v != 0) {
+        list[(v >> 40) as usize] = &d[v as u32 as usize..][..(v >> 32) as u8 as usize];
+    }
+    let names = list;
     let mut order: Vec<u32> = (0..names.len() as u32).collect();
     order.sort_unstable_by_key(|&id| names[id as usize]);
     Plan { hours: by_hour.into_iter().collect(), names, order }
@@ -385,7 +408,7 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
     // The first line start at or after `x` (a line start exactly at `x` goes to the chunk before): adjacent chunks agree.
     let snap = |x: usize| if x >= n { n } else if x == 0 { 0 } else { x + d[x..].iter().position(|&b| b == b'\n').unwrap() + 1 };
     let (cursor, next, barrier) = (AtomicUsize::new(0), AtomicUsize::new(0), Barrier::new(threads));
-    let names = Mutex::new(Names::default());
+    let names = Names { slots: (0..SLOTS).map(|_| AtomicU64::new(0)).collect(), next: AtomicUsize::new(0) };
     let parts: &'static [OnceLock<Part>] = Box::leak((0..threads).map(|_| OnceLock::new()).collect());
     let plan: &'static OnceLock<Plan> = Box::leak(Box::default());
     let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
@@ -403,7 +426,7 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
                 }
                 parts[t].set(worker.part).ok();
                 barrier.wait();
-                let plan = plan.get_or_init(|| make_plan(parts, names));
+                let plan = plan.get_or_init(|| make_plan(d, parts, names));
                 let mut scratch = Scratch::default();
                 loop {
                     let hour = next.fetch_add(1, Relaxed);
