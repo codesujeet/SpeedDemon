@@ -3,8 +3,8 @@
 //! log (`ts method endpoint status latency_us`), as in specs/a-ingest.md.
 //!
 //! The input is mapped and cut into morsels that workers take from an atomic
-//! cursor. A worker turns each line into one packed `u64` (endpoint number,
-//! error flag, latency) and appends it to its own list for the line's hour;
+//! cursor. A worker turns each line into one packed `u32` (endpoint number,
+//! error flag, latency, the latency kept in a side list when it is 65535 or more) and appends it to its own list for the line's hour;
 //! endpoint numbers come from a table the worker keeps for the whole run,
 //! backed by one shared table that hands out the numbers. When the scan is
 //! done, workers take one hour at a time: they count its lines per endpoint
@@ -149,13 +149,17 @@ struct Slot {
     id: u32,
 }
 
-/// What one worker found: for each hour it saw, the packed lines of that hour
-/// (`endpoint << 33 | error << 32 | latency`).
+/// The lines one worker found for one hour: one `u32` per line (`error << 31 |
+/// endpoint << 16 | latency`), where a latency of 65535 or more is stored as
+/// 65535 and its real value is the next entry of the second list.
+type Bucket = (Vec<u32>, Vec<u32>);
+
+/// What one worker found: for each hour it saw, the lines of that hour.
 struct Worker {
     d: &'static [u8],
     table: Vec<Slot>,
     used: usize,
-    hours: Vec<((u64, u64), Vec<u64>)>,
+    hours: Vec<((u64, u64), Bucket)>,
     cur_key: (u64, u64),
     cur: usize,
 }
@@ -195,6 +199,7 @@ impl Worker {
         let mut shared = names.lock().unwrap();
         let next = shared.list.len() as u32;
         let id = *shared.ids.entry(&d[s..e]).or_insert(next);
+        assert!(id < 1 << 15, "more than 32,768 distinct endpoints");
         if id == next {
             shared.list.push(&d[s..e]);
         }
@@ -222,17 +227,24 @@ impl Worker {
         while ls < end {
             let (es, ee, nl) = split(d, ls);
             let id = self.endpoint(es, ee, names);
-            let error = u64::from(d[ee + 1] >= b'5');
+            let error = u32::from(d[ee + 1] >= b'5');
             let latency = parse_latency(d, ee + 5, nl);
             let key = (load8(d, ls), load8(d, ls + 5));
             if key != self.cur_key {
                 self.cur_key = key;
                 self.cur = self.hours.iter().position(|h| h.0 == key).unwrap_or_else(|| {
-                    self.hours.push((key, Vec::with_capacity(8192)));
+                    self.hours.push((key, (Vec::with_capacity(8192), Vec::new())));
                     self.hours.len() - 1
                 });
             }
-            self.hours[self.cur].1.push(u64::from(id) << 33 | error << 32 | latency);
+            let bucket = &mut self.hours[self.cur].1;
+            let low = if latency < 0xFFFF {
+                latency as u32
+            } else {
+                bucket.1.push(latency as u32);
+                0xFFFF
+            };
+            bucket.0.push(error << 31 | id << 16 | low);
             ls = nl + 1;
         }
     }
@@ -317,12 +329,12 @@ fn write_u64(buf: &mut [u8; 20], mut v: u64) -> &[u8] {
 
 /// The output lines of one hour, given the packed lines of every worker for
 /// that hour. `order` lists the endpoint numbers by endpoint bytes.
-fn format_hour(text: &[u8; 13], parts: &[&[u64]], names: &[&[u8]], order: &[u32], scratch: &mut Scratch) -> Vec<u8> {
+fn format_hour(text: &[u8; 13], parts: &[&Bucket], names: &[&[u8]], order: &[u32], scratch: &mut Scratch) -> Vec<u8> {
     let (count, start, lat) = (&mut scratch.count, &mut scratch.start, &mut scratch.lat);
     count.clear();
     count.resize(names.len(), 0);
-    for &line in parts.iter().copied().flatten() {
-        count[(line >> 33) as usize] += 1 | (line >> 32 & 1) << 32;
+    for &line in parts.iter().flat_map(|b| &b.0) {
+        count[(line >> 16 & 0x7FFF) as usize] += 1 | u64::from(line >> 31) << 32;
     }
     let mut total = 0;
     for &id in order {
@@ -330,10 +342,13 @@ fn format_hour(text: &[u8; 13], parts: &[&[u64]], names: &[&[u8]], order: &[u32]
         total += count[id as usize] as u32 as usize;
     }
     lat.resize(total, 0);
-    for &line in parts.iter().copied().flatten() {
-        let at = &mut start[(line >> 33) as usize];
-        lat[*at] = line as u32;
-        *at += 1;
+    for (lines, big) in parts.iter().copied() {
+        let mut big = big.iter();
+        for &line in lines {
+            let at = &mut start[(line >> 16 & 0x7FFF) as usize];
+            lat[*at] = if line & 0xFFFF == 0xFFFF { *big.next().unwrap() } else { line & 0xFFFF };
+            *at += 1;
+        }
     }
     let mut out = Vec::with_capacity(total * 3 + 4096);
     let mut buf = [0u8; 20];
@@ -369,7 +384,7 @@ struct Scratch {
 /// Formats every hour in parallel and writes the blocks to `sink` in hour
 /// order, each as soon as it and all earlier hours are done.
 fn write_hours(workers: &[Worker], names: &[&[u8]], threads: usize, sink: &mut impl Write) -> std::io::Result<()> {
-    let mut by_hour: BTreeMap<[u8; 13], Vec<&[u64]>> = BTreeMap::new();
+    let mut by_hour: BTreeMap<[u8; 13], Vec<&Bucket>> = BTreeMap::new();
     for (key, lines) in workers.iter().flat_map(|w| &w.hours) {
         by_hour.entry(hour_text(*key)).or_default().push(lines);
     }

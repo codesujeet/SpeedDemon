@@ -29,6 +29,8 @@ that was tried, including the failures, is in
 | 9 | Line parsing uses the spec's fixed layout: a 27-byte timestamp and a 3-digit status are sliced by offset, so three delimiter scans per line instead of five (the parser no longer tolerates blank or malformed lines, which the spec rules out) | pending | 0.155 -> 0.130 (13 rounds) | 46 | pending |
 | 10 | One 64-byte AVX2 window per line finds the method, endpoint, status and line-feed delimiters at once (byte-wise path kept for lines near the end of the data), replacing three byte-wise scans | pending | 0.155 -> 0.134 (15 interleaved rounds) | 45 | pending |
 | 11 | No per-morsel results and no merge across morsels. Each worker appends one packed `u64` per line (endpoint number, error flag, latency) to its own list for the line's hour, with a worker-lifetime endpoint table backed by one shared table of numbers; after the scan each hour is counted per endpoint, placed in one run per endpoint, and visited in endpoint-byte order (sorted once). Latency parsed with SWAR, hour found by comparing 13 timestamp bytes, per-hour lists start with room for 8192 lines, the process skips freeing them | pending | 1 CPU (`--cpuset-cpus=2`): 0.42-0.57 -> 0.28 s wall/CPU (3 interleaved runs); 12 threads: no clear change on this loaded laptop (A/B medians 188 -> 185 ms, harness replica 0.132 -> 0.152 s, within the +-20% noise of four agents sharing the machine) | 46 -> 45 | pending |
+| 12 | Branchless endpoint check: four masked 32-byte compares replace the length-dependent `bcmp` | pending | 1 CPU, min of 8 interleaved runs: scan 189 -> 168 ms, user+sys 259 -> 235 ms | 45 | pending |
+| 13 | Lines are 4 bytes: `error << 31, endpoint << 16, latency in the low 16 bits`, with latencies of 65535 or more stored as 65535 and their real value in a side list per hour list (endpoint numbers must stay below 32,768; the spec's catalogue has 1,842) | pending | 1 CPU: scan 188 -> 187 ms, phase 2 78 -> 71 ms (min of 8); peak 45 -> 38.8 MB | 45 -> 39 | pending |
 
 Steps 6-9 together, measured the way the board measures (5 runs, mean of the
 middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
@@ -39,8 +41,8 @@ middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
 
 Full data, 3.1 M lines, 239 MB (Linux container, local): on one core the whole
 program takes about 0.28 s (scan about 0.2 s, about 58 ns per line; count,
-select and format about 0.06 s). Peak memory is 44-47 MB: about 25 MB of
-packed lines (8 bytes each), the endpoint tables and the output file's page
+select and format about 0.06 s). Peak memory is 44-47 MB: about 12 MB of
+packed lines (4 bytes each since step 13), the endpoint tables and the output file's page
 cache (10 MB), plus stacks.
 
 ## Tried and dropped
