@@ -22,7 +22,7 @@
 //! - The last few KB are copied behind zero padding so the SIMD loads never
 //!   run past the mapping.
 
-use std::arch::x86_64::{__m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8};
+use std::arch::x86_64::{__m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8, _mm256_storeu_si256};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 /// Maps `path` read-only for the life of the process. The harness
@@ -255,19 +255,36 @@ fn mum(a: u64, b: u64) -> u64 {
     p as u64 ^ (p >> 64) as u64
 }
 
+/// `data[at..at + 32]` as four words, the bytes from `left` on zeroed.
+#[inline]
+fn block(data: &[u8], at: usize, left: usize) -> [u64; 4] {
+    // The first `left` bytes of this 64-byte window's 32-byte slice are 0xFF.
+    static EDGE: [u8; 64] = {
+        let mut t = [0u8; 64];
+        let mut i = 0;
+        while i < 32 {
+            t[i] = 0xFF;
+            i += 1;
+        }
+        t
+    };
+    let (src, mask) = (&data[at..at + 32], &EDGE[32 - left.min(32)..][..32]);
+    let mut w = [0u64; 4];
+    // SAFETY: AVX2 is part of the build target; `src`, `mask` and `w` are 32 bytes each.
+    unsafe {
+        let v = _mm256_and_si256(_mm256_loadu_si256(src.as_ptr().cast::<__m256i>()), _mm256_loadu_si256(mask.as_ptr().cast::<__m256i>()));
+        _mm256_storeu_si256(w.as_mut_ptr().cast::<__m256i>(), v);
+    }
+    w
+}
+
 /// 64-bit hash of `data[from..to]`; `data` must extend 32 bytes past `to`.
 #[inline]
 fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
     let mut h = (to - from) as u64 ^ 0x9E37_79B9_7F4A_7C15;
     let mut at = from;
     loop {
-        let left = to.saturating_sub(at);
-        let mut w = [0u64; 4];
-        for (k, w) in w.iter_mut().enumerate() {
-            let n = left.saturating_sub(8 * k).min(8);
-            let x = u64::from_le_bytes(data[at + 8 * k..at + 8 * k + 8].try_into().unwrap());
-            *w = x & ((1u128 << (8 * n)) - 1) as u64;
-        }
+        let w = block(data, at, to.saturating_sub(at));
         h = mum(mum(w[0] ^ 0xA076_1D64_78BD_642F, w[1] ^ 0xE703_7ED1_A0B4_28DB) ^ h, mum(w[2] ^ 0x8EBC_6AF0_9C88_C6E3, w[3] ^ 0x5899_65CC_7537_4CC3));
         at += 32;
         if at >= to {
