@@ -12,7 +12,7 @@ version of steps 1-8 (commit `db4cc76`) measured **0.475 s, 382 MiB, 736 lines,
 K 9.48, 48.85 points on the live board** (run `run-890f67017a83`) and about
 0.96 s, 384 MB on this laptop. The **Run ID** column stays *pending* for
 steps without their own board run, and **Points** is only filled from board
-numbers. Step 9 has not been on the board yet. Everything that was tried,
+numbers. Steps 9-13 have not been on the board yet. Everything that was tried,
 including the failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 
 | Step | Change | Run ID | T (s), local | M (MB), local | Points |
@@ -28,6 +28,9 @@ including the failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 | 8 | Each parse part files its edges under the worker that owns their node range before the CSR is counted and placed, so a worker scans 1/12 of the edges per pass instead of all of them | `run-890f67017a83` (commit `db4cc76`, steps 1-8 together) | original CSR phase 81 -> 56 ms; total 837 -> 780 ms (9 interleaved rounds) | 380 | 48.85 (board) |
 | 9 | Each worker's distance labels are `[u32; 2]` instead of `[u64; 2]` (distance + 1; a distance that does not fit is marked `u32::MAX` and kept exactly in a small per-query table), halving the 12 per-worker arrays | pending | 1.04 -> 0.89 (9 interleaved rounds) | 384 -> 261 | pending |
 | 10 | The parse threads file every edge straight into per-owner buckets for the forward and the reverse graph, so the flat edge list and the separate bucketing copy never exist; the buckets are dropped as soon as each CSR is built. The query phase uses one worker per physical core (6) instead of 12 | pending | about equal (1017 vs 1075 ms median over 11 interleaved rounds) | 261 -> 192 | pending |
+| 11 | The serial BFS relabelling is replaced by a parallel region-growing order (workers race on a claimed byte per node and grow BFS regions of up to 1024 nodes); the reverse CSR is built from the renamed forward CSR instead of beside the BFS; the forward CSR is built with two parse passes and atomic row cursors | pending | harness replica on a loaded laptop 1.35 -> 0.89 together with steps 12-13 | 190 -> 181 | pending |
+| 12 | The per-side queue is a monotone radix heap instead of the 4-ary heap | pending | single-worker query phase 2100 -> about 1100 ms (native, same queries) | same | pending |
+| 13 | Edges are filed under their owner worker before the forward and reverse CSR builds, so counting and placing need no atomics | pending | native interleaved min of 8: forward CSR 153 -> 74 ms, total 589 -> 503 ms (reverse CSR 32 -> 45 ms) | same | pending |
 
 Step 9 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.867 s and 262 MB, against 0.964 s and
@@ -85,9 +88,48 @@ lines from 758 to 582.
   build (edge list, buckets, original CSRs), not the queries. After step 10,
   6 workers is the best balance; 4 workers saves 12 MB for about 2% time.
 
+## Steps 11-13 in detail
+
+Measured natively on the Windows laptop (same machine, other jobs running,
+so only interleaved or min-of-N comparisons mean anything) and with the
+Docker harness replica (`local_harness.py`, 5 runs, mean of the middle three):
+the version before step 11 gave **1.345 s, 190.5 MB** (a batch the harness flagged as too noisy: runs 1.10-1.79 s) and this version
+**0.892 s, 181.2 MB** in back-to-back batches while the laptop was loaded
+(source lines by the harness's counter: 572 -> about 520). The scoring box
+is faster than this laptop, so these are not board numbers.
+
+The phases now (native, min of 8, ms): original-id CSR 74, ordering 63,
+renaming 45, reverse CSR 45, queries about 205-230, plus reading the file
+(on Linux it is mapped, and costs nothing here). The ordering and CSR phases
+are limited by random memory access; the query phase was limited by the
+heap: single worker, 2000 queries, 7.6 M pops and 21 M relaxations, about
+280 ns per pop with the 4-ary heap and about 140 ns with the radix heap.
+
+## Tried and dropped in steps 11-13
+
+* **Queries in source order with chained regions** (each region's seed is
+  next to the end of the previous one, so ids are spatially coherent, and
+  queries are taken in source-id order in chunks of 1-64): no change in the
+  query phase (within +-5% noise), single worker or 6 workers. Cross-query
+  cache reuse is not what limits the search.
+* **Each worker scans the whole edge stream and keeps only its own keys**
+  (no filing, no atomics): forward CSR 150-165 ms and reverse CSR 176-320 ms
+  vs 100-170 and 33-46 ms, worse because 12 workers each walk 5 M edges twice.
+* **Hash labels** instead of the per-worker `[u32; 2]` array (open addressing,
+  a home slot that keeps runs of 32 consecutive ids together, doubling when
+  half full): 3 MB instead of 14 MB per worker, but 300-370 ms vs 245-285 ms
+  for the query phase at 12 workers (identity hash: 770-880 ms from
+  clustering). Dropped; about break-even in K once the extra time is counted.
+* **12 query workers with the radix heap** are about 20% faster in the query
+  phase than 6 (200-277 vs 256-384 ms) but would add 84 MB of label arrays,
+  so 6 stays.
+* **Atomic row cursors for the original-id CSR** (step 11's first build): about
+  60-75 ms for the placement pass because locked instructions serialise the
+  cache misses; replaced by step 13.
+
 ## Caveats
 
-* Step 9 has not run on the scoring box. Expect the board's T to differ.
+* Steps 9-13 have not run on the scoring box. Expect the board's T to differ.
 * The earlier "61x" figure from a synthetic random graph was wrong for the
   real road network and has been removed from this log.
 * Source size is the weak axis: the reference is 43 code lines.
