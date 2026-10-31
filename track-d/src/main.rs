@@ -233,9 +233,10 @@ fn load_graph(data: &[u8], threads: usize, mut phase: impl FnMut(&str)) -> (usiz
     let mut new_id = vec![0u32; n];
     let named = Disjoint(new_id.as_mut_ptr());
     par(threads, |w| {
-        for i in n * w / threads..n * (w + 1) / threads {
+        let lo = n * w / threads;
+        for (i, &old) in order[lo..n * (w + 1) / threads].iter().enumerate() {
             // SAFETY: `order` is a permutation, so no two workers write the same entry.
-            unsafe { named.put(order[i] as usize, i as u32) };
+            unsafe { named.put(old as usize, (lo + i) as u32) };
         }
     });
     phase("locality order");
