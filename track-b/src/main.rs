@@ -231,14 +231,17 @@ impl<'a> TermTable<'a> {
 
     /// The id of the term `term` (1..=32 bytes, lowercase), adding it if
     /// new. Any other length gets an id nothing in the corpus maps to.
+    #[cfg(test)]
     fn intern(&mut self, term: &'a [u8]) -> u32 {
-        let mut buf = [0u8; 40];
-        let len = term.len().min(buf.len());
-        buf[..len].copy_from_slice(&term[..len]);
-        let k = key(&buf, 0, if term.len() > MAX_TERM { 40 } else { len });
+        self.intern_at(term, 0, term.len())
+    }
+
+    /// [`Self::intern`] for the term `text[s..e]`.
+    fn intern_at(&mut self, text: &'a [u8], s: usize, e: usize) -> u32 {
+        let k = key(text, s, e);
         let id = self.terms.len() as u32;
         if k.2 != 0 {
-            let found = self.get(k, self.home(k), term, 0);
+            let found = self.get(k, self.home(k), text, s);
             if found != self.none() {
                 return found;
             }
@@ -256,7 +259,7 @@ impl<'a> TermTable<'a> {
             }
             self.place(k, id);
         }
-        self.terms.push(term);
+        self.terms.push(&text[s..e]);
         id
     }
 
@@ -341,42 +344,34 @@ impl Queries {
 fn parse_queries(data: &[u8]) -> (Queries, TermTable<'_>) {
     let mut table = TermTable::new(data.len());
     let mut qs = Queries {
-        entries: Vec::new(),
-        start: vec![0],
-        phrase: Vec::new(),
+        entries: Vec::with_capacity(data.len() / 8),
+        start: Vec::with_capacity(data.len() / 30),
+        phrase: Vec::with_capacity(data.len() / 30),
     };
-    for line in data.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
-        let mut words = line.split(|&b| b == b' ');
-        let kind = words.next();
-        let phrase = kind == Some(&b"PHRASE"[..]);
-        if kind == Some(&b"BOOL"[..]) {
-            let mut first = true;
-            let mut op = 0;
-            for w in words {
-                if first {
-                    qs.entries.push(table.intern(w));
-                } else if op == 0 {
-                    op = match w {
-                        b"AND" => 1,
-                        b"OR" => 2,
-                        _ => 3,
-                    };
-                } else {
-                    qs.entries.push((op - 1) << 30 | table.intern(w));
-                    op = 0;
-                }
-                first = false;
-            }
-        } else if phrase {
-            for w in words {
-                let t = w.strip_prefix(b"\"").unwrap_or(w);
-                qs.entries
-                    .push(table.intern(t.strip_suffix(b"\"").unwrap_or(t)));
-            }
+    // One SIMD pass over the file. The tokens are the keywords (upper case:
+    // BOOL, PHRASE, AND, OR, NOT) and the terms (lower case and digits);
+    // spaces and quotes separate them.
+    let (mut op, mut first, mut phrase) = (0u32, true, false);
+    scan_tokens(data, |s, e| {
+        let c = data[s];
+        if !c.is_ascii_uppercase() {
+            let id = table.intern_at(data, s, e);
+            qs.entries.push(if first || phrase { id } else { op << 30 | id });
+            first = false;
+        } else if c == b'B' || c == b'P' {
+            (phrase, first) = (c == b'P', true);
+            qs.start.push(qs.entries.len() as u32);
+            qs.phrase.push(phrase);
+        } else {
+            op = match c {
+                b'A' => 0,
+                b'O' => 1,
+                _ => 2,
+            };
         }
-        qs.start.push(qs.entries.len() as u32);
-        qs.phrase.push(phrase);
-    }
+        true
+    });
+    qs.start.push(qs.entries.len() as u32);
     (qs, table)
 }
 
