@@ -5,7 +5,8 @@ The task, the input files and the exact output format are in the [spec](https://
 ## Approach
 
 The graph file is mapped and split at line boundaries into one slice per
-thread. Each thread parses its slice and files every edge under the worker
+thread. Each thread parses its slice (a number of up to 7 digits from a single
+8-byte load, longer ones digit by digit) and files every edge under the worker
 that owns the edge's tail (workers own contiguous ranges of node ids) as one
 `u64` (key within the range, neighbour, weight; a weight too big for its
 field goes whole into a short side list). A worker then counts and places only
@@ -22,7 +23,8 @@ The node ids in the input are a random relabelling of a road-like lattice, so
 a search would hit a random cache line on every relaxation. The program gives
 every node a new id with a parallel ordering: workers race on one claimed byte
 per node and grow compact regions of up to 1024 nodes by breadth-first search
-from seeds (every 256th id first, then every node still unclaimed), and a
+from seeds (every 256th id first, then every node still unclaimed; the next
+rows and offsets are prefetched), and a
 region is a run of new ids in BFS order, so neighbours end up a few ids apart.
 A worker copies each finished region's rows into its own buffer while they are
 still in cache; after the growth, the buffers are renamed (neighbours mapped
@@ -51,7 +53,8 @@ sums of full-range `u32` weights pass 2^32; the few that do not fit a 32-bit
 label are marked in the page and kept exactly in a small per-query table.
 Answers are written in input order. Freed memory is returned to the system
 between the build phases (`malloc_trim`), so one phase's garbage does not add
-to the next phase's peak.
+to the next phase's peak; the CSRs and worker pools are not freed at the end,
+the exit does it.
 
 Assumptions: node ids fit `u32` with at least one weight bit to spare (n below
 2^31), edge words fit `u32` (the row offsets), and the graph is road-like so

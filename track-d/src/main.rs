@@ -50,6 +50,18 @@ fn release_memory() {
 #[cfg(not(target_os = "linux"))]
 fn release_memory() {}
 
+/// Asks the CPU to start loading the cache line at `p`; a hint with no effect on results.
+#[inline(always)]
+fn prefetch<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: a prefetch never faults, whatever the address.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(p.cast(), std::arch::x86_64::_MM_HINT_T0)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = p;
+}
+
 /// Runs `f(0..parts)` on one thread each and returns the results in order.
 fn par<R: Send>(parts: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     std::thread::scope(|s| {
@@ -72,6 +84,10 @@ impl<T> Disjoint<T> {
 }
 
 /// The `N` numbers of every line of `data`, in order (the lines hold exactly `N` unsigned decimals).
+/// A number of up to 7 digits is read from one 8-byte load: the separators (space, line
+/// feed) are the only bytes in the input without bit 4 set, which gives its length, and the
+/// digits are folded together three multiplications deep. Longer numbers, and any
+/// number within 8 bytes of the end of `data`, are read digit by digit.
 fn numbers<const N: usize>(data: &[u8]) -> impl Iterator<Item = [u32; N]> + '_ {
     let mut i = 0;
     std::iter::from_fn(move || {
@@ -82,6 +98,17 @@ fn numbers<const N: usize>(data: &[u8]) -> impl Iterator<Item = [u32; N]> + '_ {
             }
             if i == data.len() {
                 return None;
+            }
+            if let Some(chunk) = data.get(i..i + 8) {
+                let word = u64::from_le_bytes(chunk.try_into().unwrap());
+                let len = ((!word & 0x1010_1010_1010_1010).trailing_zeros() / 8) as usize;
+                if len < 8 {
+                    let mut v = (word << (64 - 8 * len) & 0x0F0F_0F0F_0F0F_0F0F).wrapping_mul(2561) >> 8;
+                    v = (v & 0x00FF_00FF_00FF_00FF).wrapping_mul(6_553_601) >> 16;
+                    *x = ((v & 0x0000_FFFF_0000_FFFF).wrapping_mul(42_949_672_960_001) >> 32) as u32;
+                    i += len;
+                    continue;
+                }
             }
             while i < data.len() && data[i].is_ascii_digit() {
                 *x = *x * 10 + (data[i] - b'0') as u32;
@@ -308,8 +335,13 @@ fn grow_regions(g: &Csr, workers: usize) -> Vec<Run> {
                 let mut region = vec![seed];
                 let mut head = 0;
                 while head < region.len() && region.len() < REGION {
+                    // Rows are read a while after their node is claimed: start loading them early.
+                    if let Some(&ahead) = region.get(head + 6) {
+                        prefetch(g.adj.as_ptr().wrapping_add(g.row_offset[ahead as usize] as usize));
+                    }
                     for (v, _) in g.edges(region[head]) {
                         if region.len() < REGION && claim(v) {
+                            prefetch(g.row_offset.as_ptr().wrapping_add(v as usize));
                             region.push(v);
                         }
                     }
@@ -601,6 +633,7 @@ fn answer_queries(fwd: &Csr, rev: &Csr, queries: &[(u32, u32)], n: usize, thread
             let Some(&(src, dst)) = queries.get(i) else { break };
             mine.push((i, bidirectional_dijkstra(fwd, rev, src, dst, &mut scratch)));
         }
+        std::mem::forget(scratch); // the process is about to end; freeing the pools is wasted time
         mine
     });
     let mut answers = vec![None; queries.len()];
@@ -659,6 +692,7 @@ fn run(graph_path: &str, queries_path: &str, output_path: &str, threads: usize) 
     }
     std::fs::write(output_path, out)?;
     phase("write output");
+    std::mem::forget((fwd, rev)); // freed by the exit anyway
     Ok(())
 }
 
