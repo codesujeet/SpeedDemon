@@ -27,7 +27,10 @@ use std::arch::x86_64::{
     __m256i, _mm256_and_si256, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8,
     _mm256_set1_epi8, _mm256_storeu_si256,
 };
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU64, AtomicUsize,
+    Ordering::{AcqRel, Acquire, Relaxed},
+};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -161,6 +164,8 @@ impl Agg {
 struct Names {
     slots: Vec<AtomicU64>,
     bits: Vec<AtomicU64>,
+    /// Per number: a second, independent 64-bit hash of the name.
+    fp: Vec<AtomicU64>,
     issued: AtomicUsize,
     full: AtomicBool,
     id_bits: u32,
@@ -179,6 +184,7 @@ impl Names {
         Names {
             slots: zeroed(2 << id_bits),
             bits: zeroed(groups << (id_bits - 6)),
+            fp: zeroed(1 << id_bits),
             issued: AtomicUsize::new(0),
             full: AtomicBool::new(false),
             id_bits,
@@ -188,20 +194,21 @@ impl Names {
     /// The number of the name with hash `h`, assigning the next free one to
     /// a new name; 0 if the table has run out of numbers.
     #[inline]
-    fn number(&self, h: u64) -> usize {
+    fn number(&self, h: u64, h2: u64) -> usize {
         let mask = self.slots.len() - 1;
         let mut s = h as usize & mask;
         loop {
-            let mut cur = self.slots[s].load(Relaxed);
+            let mut cur = self.slots[s].load(Acquire);
             if cur == 0 {
                 let id = self.issued.fetch_add(1, Relaxed) + 1;
                 if id >= 1 << self.id_bits {
                     self.full.store(true, Relaxed);
                     return 0;
                 }
+                self.fp[id].store(h2, Relaxed);
                 let new = (h >> self.id_bits << self.id_bits) | id as u64;
                 cur = self.slots[s]
-                    .compare_exchange(0, new, Relaxed, Relaxed)
+                    .compare_exchange(0, new, AcqRel, Acquire)
                     .unwrap_or_else(|other| other);
                 if cur == 0 {
                     cur = new;
@@ -230,7 +237,7 @@ const BATCH: usize = 16;
 /// batch ahead) instead of each stalling the parser.
 struct Sightings<'a> {
     names: &'a Names,
-    seen: [(usize, u64); BATCH],
+    seen: [(usize, u64, u64); BATCH],
     seen_len: usize,
     bits: [(usize, u64); BATCH],
     bits_len: usize,
@@ -240,7 +247,7 @@ impl<'a> Sightings<'a> {
     fn new(names: &'a Names) -> Self {
         Sightings {
             names,
-            seen: [(0, 0); BATCH],
+            seen: [(0, 0, 0); BATCH],
             seen_len: 0,
             bits: [(0, 0); BATCH],
             bits_len: 0,
@@ -248,7 +255,7 @@ impl<'a> Sightings<'a> {
     }
 
     #[inline]
-    fn push(&mut self, group: usize, h: u64) {
+    fn push(&mut self, group: usize, h: u64, h2: u64) {
         let slot = &self.names.slots[h as usize & (self.names.slots.len() - 1)];
         // SAFETY: a prefetch is a hint; it never faults or changes memory.
         unsafe {
@@ -256,7 +263,7 @@ impl<'a> Sightings<'a> {
                 (slot as *const AtomicU64).cast(),
             )
         };
-        self.seen[self.seen_len] = (group, h);
+        self.seen[self.seen_len] = (group, h, h2);
         self.seen_len += 1;
         if self.seen_len == BATCH {
             self.flush();
@@ -269,8 +276,8 @@ impl<'a> Sightings<'a> {
             self.names.bits[word].fetch_or(bit, Relaxed);
         }
         self.bits_len = 0;
-        for &(group, h) in &self.seen[..self.seen_len] {
-            let id = self.names.number(h);
+        for &(group, h, h2) in &self.seen[..self.seen_len] {
+            let id = self.names.number(h, h2);
             if id != 0 {
                 let word = (group << (self.names.id_bits - 6)) + id / 64;
                 let ptr: *const AtomicU64 = &self.names.bits[word];
@@ -325,8 +332,9 @@ fn block(data: &[u8], at: usize, left: usize) -> [u64; 4] {
 
 /// 64-bit hash of `data[from..to]`; `data` must extend 32 bytes past `to`.
 #[inline]
-fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
+fn hash_name(data: &[u8], from: usize, to: usize) -> (u64, u64) {
     let mut h = (to - from) as u64 ^ 0x9E37_79B9_7F4A_7C15;
+    let mut h2 = (to - from) as u64 ^ 0x2545_F491_4F6C_DD1D;
     let mut at = from;
     loop {
         let w = block(data, at, to.saturating_sub(at));
@@ -334,9 +342,13 @@ fn hash_name(data: &[u8], from: usize, to: usize) -> u64 {
             mum(w[0] ^ 0xA076_1D64_78BD_642F, w[1] ^ 0xE703_7ED1_A0B4_28DB) ^ h,
             mum(w[2] ^ 0x8EBC_6AF0_9C88_C6E3, w[3] ^ 0x5899_65CC_7537_4CC3),
         );
+        h2 = mum(
+            mum(w[0] ^ 0xD6E8_FEB8_6659_FD93, w[3] ^ 0xCF1B_BCDC_B7A5_6463) ^ h2,
+            mum(w[1] ^ 0x9FB2_1C65_1E98_DF25, w[2] ^ 0xFF51_AFD7_ED55_8CCD),
+        );
         at += 32;
         if at >= to {
-            return h;
+            return (h, h2);
         }
     }
 }
@@ -454,7 +466,10 @@ fn parse_records(
         agg.amount_max = agg.amount_max.max(cents);
         agg.name_bytes += (ne - ns - npairs) as u64;
         agg.note_bytes += (te - ts - tpairs) as u64;
-        sightings.push(g, hash_name(data, ns, ne));
+        {
+            let (h, h2) = hash_name(data, ns, ne);
+            sightings.push(g, h, h2)
+        };
     }
 }
 
