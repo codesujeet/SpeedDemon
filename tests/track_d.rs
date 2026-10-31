@@ -135,7 +135,7 @@ fn parses_header_and_edges() {
 fn csr_rows_hold_the_edges_of_each_node() {
     let (fwd, rev, id) = graphs(4, &[(0, 1, 10), (0, 1, 3), (2, 0, 7), (3, 3, 1)], 2);
     let row = |g: &Csr, u: u32| {
-        let mut r: Vec<_> = g.row(id[u as usize]).iter().map(|&(v, w)| (id.iter().position(|&x| x == v).unwrap() as u32, w)).collect();
+        let mut r: Vec<_> = g.edges(id[u as usize]).map(|(v, w)| (id.iter().position(|&x| x == v).unwrap() as u32, w)).collect();
         r.sort();
         r
     };
@@ -144,6 +144,33 @@ fn csr_rows_hold_the_edges_of_each_node() {
     assert_eq!(row(&rev, 1), vec![(0, 3), (0, 10)]);
     assert_eq!(row(&fwd, 3), vec![(3, 1)]);
     assert!(row(&fwd, 1).is_empty());
+}
+
+/// Weights around the edge of the weight field (all ones is the escape marker) and the
+/// extremes round-trip through build, renaming and transpose, with several words per row.
+#[test]
+fn weights_at_the_field_limit_survive_every_copy() {
+    let n = 5000u32;
+    assert_eq!(Csr::with_nodes(1_740_512).wb, 11);
+    let mask = (1u32 << Csr::with_nodes(n as usize).wb) - 1;
+    let weights = [0, 1, mask - 1, mask, mask + 1, u32::MAX - 1, u32::MAX];
+    let edges: Vec<Edge> = (0..n).flat_map(|u| weights.iter().map(move |&w| (u, (u * 7 + w % 4999 + 1) % n, w))).collect();
+    let (fwd, rev, id) = graphs(n, &edges, 5);
+    for (g, flip) in [(&fwd, false), (&rev, true)] {
+        let mut got: Vec<Edge> = (0..n).flat_map(|u| g.edges(id[u as usize]).map(move |(v, w)| (u, v, w))).collect();
+        let mut inv = vec![0; n as usize];
+        for (old, &new) in id.iter().enumerate() {
+            inv[new as usize] = old as u32;
+        }
+        got.iter_mut().for_each(|e| e.1 = inv[e.1 as usize]);
+        let mut want = edges.clone();
+        if flip {
+            want.iter_mut().for_each(|e| *e = (e.1, e.0, e.2));
+        }
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
 }
 
 #[test]

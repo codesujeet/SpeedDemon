@@ -63,20 +63,23 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
 /// "no such region").
 struct Regions {
     countries: Vec<[u8; 3]>,
-    group_of: Vec<u16>,
+    /// Group + 1 as one byte, 255 for the rare group beyond the 254th (then see `spill`).
+    group_of: Vec<u8>,
+    spill: std::collections::HashMap<usize, u16>,
 }
 
 fn parse_regions(data: &[u8]) -> Regions {
     // Spec 2.3: a code is three bytes `A`-`Z`, so five bits each identify it.
     let mut index = vec![0u16; 1 << 15];
     let mut countries = Vec::new();
+    let mut spill = std::collections::HashMap::new();
     // Ids ascend, so the last line has the largest; size the table once.
     let last = data.rsplit(|&b| b == b'\n').nth(1).unwrap_or(&[]);
     let max_id = last
         .iter()
         .take_while(|d| d.is_ascii_digit())
         .fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
-    let mut group_of = vec![0u16; max_id + 1];
+    let mut group_of = vec![0u8; max_id + 1];
     let mut at = data
         .iter()
         .position(|&b| b == b'\n')
@@ -96,7 +99,10 @@ fn parse_regions(data: &[u8]) -> Regions {
         if id >= group_of.len() {
             group_of.resize(id + 1, 0);
         }
-        group_of[id] = *slot;
+        group_of[id] = (*slot).min(255) as u8;
+        if *slot >= 255 {
+            spill.insert(id, *slot);
+        }
         at += 4;
         while data[at] != b'\n' {
             at += 1;
@@ -106,6 +112,7 @@ fn parse_regions(data: &[u8]) -> Regions {
     Regions {
         countries,
         group_of,
+        spill,
     }
 }
 
@@ -417,6 +424,7 @@ fn parse_records(
         i = j + 1 + (data[j] == b'\r') as usize;
 
         let g = match regions.group_of.get(region as usize) {
+            Some(&255) => regions.spill[&(region as usize)] as usize - 1,
             Some(&g) if g != 0 => g as usize - 1,
             _ => unmatched,
         };

@@ -5,7 +5,7 @@
 //! Dijkstra, in input order. See README.md for the approach.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 
 /// Maps `path` read-only for the life of the process. The harness
 /// pre-warms `/data` into the page cache before the run, so those pages
@@ -34,6 +34,21 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
 fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     Ok(Box::leak(std::fs::read(path)?.into_boxed_slice()))
 }
+
+/// Hands the allocator's free memory back to the system. Worker threads allocate
+/// from arenas of their own, and what one phase frees would otherwise stay
+/// resident next to what the next phase allocates, adding up in the peak.
+#[cfg(target_os = "linux")]
+fn release_memory() {
+    extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    // SAFETY: glibc's `malloc_trim` takes no pointers and may be called at any time.
+    unsafe { malloc_trim(0) };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_memory() {}
 
 /// Runs `f(0..parts)` on one thread each and returns the results in order.
 fn par<R: Send>(parts: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
@@ -100,15 +115,56 @@ fn split_graph(data: &[u8], parts: usize) -> (usize, Vec<&[u8]>) {
     (n, cuts.windows(2).map(|w| &body[w[0]..w[1]]).collect())
 }
 
+/// Adjacency in CSR form with 4-byte edges. An edge is one word holding the
+/// neighbour in its high bits and the weight in its low `wb` bits, where
+/// `wb` is what is left of 32 after the bits a node id needs (11 for the
+/// full graph). A weight that does not fit (all ones in the field, or more)
+/// puts the all-ones marker in the word and the exact weight in the word after
+/// it, so any `u32` weight is exact. `row_offset` counts words.
 struct Csr {
     row_offset: Vec<u32>,
-    /// `(neighbour, weight)` of every edge, grouped by node.
-    adj: Vec<(u32, u32)>,
+    adj: Vec<u32>,
+    wb: u32,
 }
 
 impl Csr {
-    fn row(&self, u: u32) -> &[(u32, u32)] {
+    /// Layout for a graph of `n` nodes: `wb` weight bits, no rows yet.
+    fn with_nodes(n: usize) -> Self {
+        let id_bits = (usize::BITS - n.saturating_sub(1).leading_zeros()).max(1);
+        Csr { row_offset: Vec::new(), adj: Vec::new(), wb: 32 - id_bits }
+    }
+
+    /// Words an edge of weight `w` takes.
+    fn words(&self, w: u32) -> u32 {
+        1 + u32::from(w >= (1 << self.wb) - 1)
+    }
+
+    /// Writes the edge to `other` at word `at` (`self.words(w)` words).
+    ///
+    /// # Safety
+    /// The words `at..at + self.words(w)` must be in bounds and written by no other thread.
+    unsafe fn put_edge(&self, out: &Disjoint<u32>, at: usize, other: u32, w: u32) {
+        let mask = (1 << self.wb) - 1;
+        out.put(at, other << self.wb | w.min(mask));
+        if w >= mask {
+            out.put(at + 1, w);
+        }
+    }
+
+    /// The words of the edges of `u`.
+    fn row(&self, u: u32) -> &[u32] {
         &self.adj[self.row_offset[u as usize] as usize..self.row_offset[u as usize + 1] as usize]
+    }
+
+    /// `(neighbour, weight)` of every edge of `u`.
+    fn edges(&self, u: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let mask = (1 << self.wb) - 1;
+        let mut words = self.row(u).iter();
+        std::iter::from_fn(move || {
+            let e = *words.next()?;
+            let w = e & mask;
+            Some((e >> self.wb, if w == mask { *words.next()? } else { w }))
+        })
     }
 }
 
@@ -117,20 +173,49 @@ impl Csr {
 /// owns their key (worker `w` owns keys `n*w/workers..n*(w+1)/workers`); then
 /// each worker counts and places only its own edges, into its own slice of the
 /// adjacency array, so no counter or slot is shared and nothing is atomic.
+/// A filed edge is one `u64`: key within the worker's range, neighbour and
+/// weight in a field of whatever bits are left. A weight that does not fit
+/// (all ones, or more) is filed whole in the part's short `heavy` list.
 /// `hint` is the expected number of edges a part files per worker.
 fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, parts: usize, hint: usize, scan: impl Fn(usize) -> I + Sync) -> Csr {
-    let filed = par(parts, |p| {
-        let mut owned: Vec<Vec<(u32, u32, u32)>> = (0..workers).map(|_| Vec::with_capacity(hint)).collect();
-        scan(p).for_each(|e| owned[e.0 as usize * workers / n].push(e));
-        owned
-    });
     let bounds = |w: usize| (n * w).div_ceil(workers);
+    let layout = Csr::with_nodes(n);
+    let id_bits = 32 - layout.wb;
+    let key_bits = (usize::BITS - n.div_ceil(workers).saturating_sub(1).leading_zeros()).max(1);
+    let weight_bits = 64 - id_bits - key_bits;
+    let (id_mask, weight_mask) = ((1u64 << id_bits) - 1, (1u64 << weight_bits) - 1);
+    let filed = par(parts, |p| {
+        let mut owned: Vec<Vec<u64>> = (0..workers).map(|_| Vec::with_capacity(hint)).collect();
+        let mut heavy = Vec::new();
+        for e in scan(p) {
+            let owner = e.0 as usize * workers / n;
+            let key = (e.0 as usize - bounds(owner)) as u64;
+            owned[owner].push(key << (id_bits + weight_bits) | (e.1 as u64) << weight_bits | (e.2 as u64).min(weight_mask));
+            if e.2 as u64 >= weight_mask {
+                heavy.push(e);
+            }
+        }
+        (owned, heavy)
+    });
+    // Calls `f(key, neighbour, weight)` for each edge worker `w` owns.
+    let each_edge = |w: usize, f: &mut dyn FnMut(usize, u32, u32)| {
+        let lo = bounds(w);
+        for (owned, heavy) in &filed {
+            for &e in &owned[w] {
+                let weight = e & weight_mask;
+                if weight != weight_mask {
+                    f(lo + (e >> (id_bits + weight_bits)) as usize, (e >> weight_bits & id_mask) as u32, weight as u32);
+                }
+            }
+            for &(k, o, wt) in heavy.iter().filter(|e| e.0 as usize * workers / n == w) {
+                f(k as usize, o, wt);
+            }
+        }
+    };
     let degrees = par(workers, |w| {
         let lo = bounds(w);
         let mut degree = vec![0u32; bounds(w + 1) - lo];
-        for e in filed.iter().flat_map(|owned| &owned[w]) {
-            degree[e.0 as usize - lo] += 1;
-        }
+        each_edge(w, &mut |key, _, weight| degree[key - lo] += layout.words(weight));
         degree
     });
     let mut row_offset = vec![0u32; n + 1];
@@ -139,42 +224,83 @@ fn build_csr<I: Iterator<Item = (u32, u32, u32)>>(n: usize, workers: usize, part
             row_offset[bounds(w) + i + 1] = row_offset[bounds(w) + i] + d;
         }
     }
-    let mut adj = vec![(0u32, 0u32); row_offset[n] as usize];
+    let mut adj = vec![0u32; row_offset[n] as usize];
     let out = Disjoint(adj.as_mut_ptr());
     par(workers, |w| {
         let lo = bounds(w);
         let mut cursor = row_offset[lo..bounds(w + 1)].to_vec();
-        for &(key, other, weight) in filed.iter().flat_map(|owned| &owned[w]) {
-            let c = &mut cursor[key as usize - lo];
+        each_edge(w, &mut |key, other, weight| {
+            let c = &mut cursor[key - lo];
             // SAFETY: the slots of rows [lo, hi) belong to this worker alone, and `*c` walks
-            // exactly the `degree` slots of the row.
-            unsafe { out.put(*c as usize, (other, weight)) };
-            *c += 1;
-        }
+            // exactly the words counted for the row.
+            unsafe { layout.put_edge(&out, *c as usize, other, weight) };
+            *c += layout.words(weight);
+        });
     });
-    Csr { row_offset, adj }
+    Csr { row_offset, adj, ..layout }
 }
 
-/// New node order (`order[new] = old`) that puts neighbours close together.
-/// Node ids are a random relabelling of a road-like lattice, so with the input
-/// ids every relaxation lands on a random cache line. Workers grow compact
-/// regions of up to `REGION` nodes by breadth-first search from seeds, racing
-/// on a claimed flag per node; a region is a run of ids in BFS order. Every
+/// The reverse of `g`. Its edges are in local order after the renaming, so
+/// counting the in-degrees and then placing each edge at an atomically claimed
+/// slot of its head's row touches few distinct cache lines, and no copy of the
+/// edge list is needed (the order of edges within a row is arbitrary).
+fn transpose(g: &Csr, parts: usize) -> Csr {
+    let n = g.row_offset.len() - 1;
+    let rows = |p: usize| (n * p / parts) as u32..(n * (p + 1) / parts) as u32;
+    let degree: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
+    par(parts, |p| {
+        for (v, w) in rows(p).flat_map(|u| g.edges(u)) {
+            degree[v as usize + 1].fetch_add(g.words(w), Relaxed);
+        }
+    });
+    let mut row_offset: Vec<u32> = degree.into_iter().map(AtomicU32::into_inner).collect();
+    for i in 0..n {
+        row_offset[i + 1] += row_offset[i];
+    }
+    let cursor: Vec<AtomicU32> = row_offset.iter().map(|&o| AtomicU32::new(o)).collect();
+    let mut adj = vec![0u32; row_offset[n] as usize];
+    let out = Disjoint(adj.as_mut_ptr());
+    par(parts, |p| {
+        for u in rows(p) {
+            for (v, w) in g.edges(u) {
+                // SAFETY: each edge claims its own words of row `v`, which has room for every edge counted.
+                unsafe { g.put_edge(&out, cursor[v as usize].fetch_add(g.words(w), Relaxed) as usize, u, w) };
+            }
+        }
+    });
+    Csr { row_offset, adj, wb: g.wb }
+}
+
+/// A worker's share of the new order: its nodes in order, each node's row
+/// length in words, and the rows themselves (still naming neighbours by old id).
+#[derive(Default)]
+struct Run {
+    nodes: Vec<u32>,
+    lens: Vec<u32>,
+    words: Vec<u32>,
+}
+
+/// Grows the new node order and copies the rows into it. Node ids are a
+/// random relabelling of a road-like lattice, so with the input ids every
+/// relaxation lands on a random cache line. Workers grow compact regions of
+/// up to `REGION` nodes by breadth-first search from seeds, racing on a
+/// claimed flag per node; a region is a run of ids in BFS order. Every
 /// `STRIDE`-th id is a seed in the first round, then every node still
-/// unclaimed is one, so each node ends up in some region. The result is
+/// unclaimed is one, so each node ends up in some region. A finished
+/// region's rows are copied out while they are still in cache. The result is
 /// not deterministic, which is fine: distances do not depend on labels.
-fn region_order(g: &Csr, workers: usize) -> Vec<u32> {
+fn grow_regions(g: &Csr, workers: usize) -> Vec<Run> {
     const REGION: usize = 1024;
     const STRIDE: usize = 256;
     let n = g.row_offset.len() - 1;
     let claimed: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
     let claim = |v: u32| claimed[v as usize].swap(1, Relaxed) == 0;
-    let mut regions: Vec<Vec<u32>> = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
     let mut seeds: Vec<u32> = (0..n as u32).step_by(STRIDE).collect();
     while !seeds.is_empty() {
         let next = AtomicUsize::new(0);
-        let found = par(workers, |_| {
-            let mut mine = Vec::new();
+        runs.extend(par(workers, |_| {
+            let mut run = Run::default();
             while let Some(&seed) = seeds.get(next.fetch_add(1, Relaxed)) {
                 if !claim(seed) {
                     continue;
@@ -182,45 +308,63 @@ fn region_order(g: &Csr, workers: usize) -> Vec<u32> {
                 let mut region = vec![seed];
                 let mut head = 0;
                 while head < region.len() && region.len() < REGION {
-                    for &(v, _) in g.row(region[head]) {
+                    for (v, _) in g.edges(region[head]) {
                         if region.len() < REGION && claim(v) {
                             region.push(v);
                         }
                     }
                     head += 1;
                 }
-                mine.push(region);
+                for &u in &region {
+                    let row = g.row(u);
+                    run.lens.push(row.len() as u32);
+                    run.words.extend_from_slice(row);
+                }
+                run.nodes.extend(region);
             }
-            mine
-        });
-        regions.extend(found.into_iter().flatten());
+            run
+        }));
         seeds = (0..n as u32).filter(|&v| claimed[v as usize].load(Relaxed) == 0).collect();
     }
-    regions.concat()
+    runs
 }
 
-/// Renames the nodes of `g` so node `order[i]` becomes `i`, mapping every
-/// neighbour through `new_id`. One pass over the rows; each worker fills the
-/// disjoint slice of its own run of new rows.
-fn permute_csr(g: &Csr, order: &[u32], new_id: &[u32], workers: usize) -> Csr {
-    let n = order.len();
+/// Assembles the CSR in the new order from the runs, in parallel: run after
+/// run, node `i` of the order is named `i`, and every neighbour is mapped to
+/// its new name. Returns the CSR and `new_id[old]`.
+fn rename(wb: u32, n: usize, runs: &[Run]) -> (Csr, Vec<u32>) {
+    let starts: Vec<(usize, usize)> = runs
+        .iter()
+        .scan((0, 0), |at, r| Some(std::mem::replace(at, (at.0 + r.nodes.len(), at.1 + r.words.len()))))
+        .collect();
+    let mut new_id = vec![0u32; n];
+    let named = Disjoint(new_id.as_mut_ptr());
+    par(runs.len(), |r| {
+        for (i, &old) in runs[r].nodes.iter().enumerate() {
+            // SAFETY: the runs partition the nodes, so no two workers write the same entry.
+            unsafe { named.put(old as usize, (starts[r].0 + i) as u32) };
+        }
+    });
     let mut row_offset = vec![0u32; n + 1];
-    for (i, &old) in order.iter().enumerate() {
-        row_offset[i + 1] = row_offset[i] + g.row_offset[old as usize + 1] - g.row_offset[old as usize];
+    for (i, len) in runs.iter().flat_map(|r| &r.lens).enumerate() {
+        row_offset[i + 1] = row_offset[i] + len;
     }
-    let mut adj = vec![(0u32, 0u32); g.adj.len()];
+    let mut adj = vec![0u32; row_offset[n] as usize];
     let out = Disjoint(adj.as_mut_ptr());
-    par(workers, |w| {
-        let mut at = row_offset[n * w / workers] as usize;
-        for &old in &order[n * w / workers..n * (w + 1) / workers] {
-            for &(v, weight) in g.row(old) {
-                // SAFETY: new rows [lo, hi) of worker `w` occupy exactly the slots it walks.
-                unsafe { out.put(at, (new_id[v as usize], weight)) };
-                at += 1;
+    let mask = (1u32 << wb) - 1;
+    par(runs.len(), |r| {
+        let mut words = runs[r].words.iter().enumerate();
+        while let Some((i, &e)) = words.next() {
+            // SAFETY: run `r` owns the words from its start to the next run's start.
+            unsafe { out.put(starts[r].1 + i, new_id[(e >> wb) as usize] << wb | (e & mask)) };
+            if e & mask == mask {
+                // The exact weight follows in the next word.
+                let (i, &weight) = words.next().expect("weight word");
+                unsafe { out.put(starts[r].1 + i, weight) }; // SAFETY: as above.
             }
         }
     });
-    Csr { row_offset, adj }
+    (Csr { row_offset, adj, wb }, new_id)
 }
 
 /// Reads the graph and returns `(node count, forward CSR, reverse CSR, new_id)`,
@@ -228,25 +372,18 @@ fn permute_csr(g: &Csr, order: &[u32], new_id: &[u32], workers: usize) -> Csr {
 fn load_graph(data: &[u8], threads: usize, mut phase: impl FnMut(&str)) -> (usize, Csr, Csr, Vec<u32>) {
     let (n, slices) = split_graph(data, threads);
     let original = build_csr(n, threads, slices.len(), data.len() / 16 / threads / threads + 16, |p| parse_edges(slices[p]));
+    release_memory();
     phase("forward CSR on the input ids");
-    let order = region_order(&original, threads);
-    let mut new_id = vec![0u32; n];
-    let named = Disjoint(new_id.as_mut_ptr());
-    par(threads, |w| {
-        let lo = n * w / threads;
-        for (i, &old) in order[lo..n * (w + 1) / threads].iter().enumerate() {
-            // SAFETY: `order` is a permutation, so no two workers write the same entry.
-            unsafe { named.put(old as usize, (lo + i) as u32) };
-        }
-    });
+    let runs = grow_regions(&original, threads);
+    let wb = original.wb;
+    drop(original);
+    release_memory();
     phase("locality order");
-    let fwd = permute_csr(&original, &order, &new_id, threads);
-    drop((original, order));
-    phase("permute");
-    let pieces = threads.clamp(1, n.max(1));
-    let rev = build_csr(n, threads, pieces, fwd.adj.len() / pieces / threads * 2 + 16, |p| {
-        (n * p / pieces..n * (p + 1) / pieces).flat_map(|u| fwd.row(u as u32).iter().map(move |&(v, w)| (v, u as u32, w)))
-    });
+    let (fwd, new_id) = rename(wb, n, &runs);
+    drop(runs);
+    release_memory();
+    phase("rename");
+    let rev = transpose(&fwd, threads);
     phase("reverse CSR");
     (n, fwd, rev, new_id)
 }
@@ -319,45 +456,64 @@ impl RadixHeap {
     }
 }
 
-/// Per-worker search state, reused by every query so nothing is allocated
-/// or zeroed per query. `label[v]` holds node `v`'s tentative distance
-/// from the source (`[0]`) and to the target (`[1]`), each stored as
-/// distance + 1 so that 0 means "not reached": a fresh calloc'd array is
-/// valid as is, with no initialisation pass. Both directions of a node share
-/// a cache line, which is what a relaxation reads (its own side, then the
-/// other side for `best`). Almost every distance fits 32 bits, which halves
-/// the array that every worker keeps; the few that do not (paths through
-/// the edges of weight near 2^32) are marked `u32::MAX` and held exactly in
-/// `big`. `touched` lists the nodes to clear before the next query.
+/// Labels of one page of `PAGE` consecutive node ids.
+const PAGE: usize = 16;
+
+/// Per-worker search state, reused by every query. The numbering puts a
+/// node's neighbours a few ids away, so a search touches runs of consecutive
+/// ids. Labels live in pages of `PAGE` ids, allocated from a pool the first
+/// time a search touches any id of the page (`page_of` maps id / `PAGE` to
+/// the page, 0 for none), so a worker holds a few MB instead of an array over
+/// all nodes. A label pair holds the node's tentative distance from the
+/// source (`[0]`) and to the target (`[1]`) as distance + 1, so 0 means "not
+/// reached" and a fresh page is all zeros. Almost every distance fits 32 bits;
+/// the few that do not (paths through the edges of weight near 2^32) are
+/// marked `u32::MAX` and held exactly in `big`.
 struct Scratch {
-    label: Vec<[u32; 2]>,
+    page_of: Vec<u32>,
+    pool: Vec<[u32; 2]>,
+    /// Pages handed out, to give back before the next query.
+    pages: Vec<u32>,
     big: HashMap<(u32, usize), u64>,
-    touched: Vec<u32>,
     heaps: [RadixHeap; 2],
 }
 impl Scratch {
     fn new(n: usize) -> Self {
-        Scratch { label: vec![[0; 2]; n], big: HashMap::new(), touched: Vec::new(), heaps: [RadixHeap::new(), RadixHeap::new()] }
+        Scratch {
+            page_of: vec![0; n.div_ceil(PAGE)],
+            pool: Vec::new(),
+            pages: Vec::new(),
+            big: HashMap::new(),
+            heaps: [RadixHeap::new(), RadixHeap::new()],
+        }
     }
 
     fn reset(&mut self) {
-        // A wide search is cleared by one sequential sweep, a narrow one node by node.
-        if self.touched.len() > self.label.len() / 16 {
-            self.label.fill([0; 2]);
-        } else {
-            for &v in &self.touched {
-                self.label[v as usize] = [0; 2];
-            }
+        for &p in &self.pages {
+            self.page_of[p as usize] = 0;
         }
+        self.pages.clear();
+        self.pool.clear();
         self.big.clear();
-        self.touched.clear();
         self.heaps.iter_mut().for_each(RadixHeap::clear);
     }
 
-    /// Distance label of `v` on `side`, or `u64::MAX` if unreached.
+    /// Index in the pool of the label pair of `v`, giving its page a zeroed slot first if needed.
     #[inline]
-    fn get(&self, side: usize, v: u32) -> u64 {
-        match self.label[v as usize][side] {
+    fn slot(&mut self, v: u32) -> usize {
+        let page = (v as usize) / PAGE;
+        if self.page_of[page] == 0 {
+            self.pool.resize(self.pool.len() + PAGE, [0; 2]);
+            self.page_of[page] = (self.pool.len() / PAGE) as u32;
+            self.pages.push(page as u32);
+        }
+        (self.page_of[page] as usize - 1) * PAGE + v as usize % PAGE
+    }
+
+    /// Distance label of node `v` (in slot `i`) on `side`, or `u64::MAX` if unreached.
+    #[inline]
+    fn get(&self, i: usize, v: u32, side: usize) -> u64 {
+        match self.pool[i][side] {
             0 => u64::MAX,
             u32::MAX => self.big[&(v, side)],
             label => label as u64 - 1,
@@ -365,15 +521,11 @@ impl Scratch {
     }
 
     #[inline]
-    fn set(&mut self, side: usize, v: u32, dist: u64) {
-        let label = &mut self.label[v as usize];
-        if label[0] | label[1] == 0 {
-            self.touched.push(v);
-        }
+    fn set(&mut self, i: usize, v: u32, side: usize, dist: u64) {
         if dist < u32::MAX as u64 - 1 {
-            label[side] = dist as u32 + 1;
+            self.pool[i][side] = dist as u32 + 1;
         } else {
-            label[side] = u32::MAX;
+            self.pool[i][side] = u32::MAX;
             self.big.insert((v, side), dist);
         }
     }
@@ -395,7 +547,8 @@ fn bidirectional_dijkstra(fwd: &Csr, rev: &Csr, source: u32, target: u32, s: &mu
     s.reset();
     let graphs = [fwd, rev];
     for (side, node) in [source, target].into_iter().enumerate() {
-        s.set(side, node, 0);
+        let i = s.slot(node);
+        s.set(i, node, side, 0);
         s.heaps[side].push(State { dist: 0, node });
     }
 
@@ -406,19 +559,21 @@ fn bidirectional_dijkstra(fwd: &Csr, rev: &Csr, source: u32, target: u32, s: &mu
         }
         let side = usize::from(s.heaps[0].len() > s.heaps[1].len());
         let State { dist, node } = s.heaps[side].pop().unwrap();
-        if dist > s.get(side, node) {
+        let at = s.slot(node);
+        if dist > s.get(at, node, side) {
             continue;
         }
-        for &(v, w) in graphs[side].row(node) {
+        for (v, w) in graphs[side].edges(node) {
             let nd = dist + w as u64;
             if nd >= best {
                 continue;
             }
-            if nd < s.get(side, v) {
-                s.set(side, v, nd);
+            let i = s.slot(v);
+            if nd < s.get(i, v, side) {
+                s.set(i, v, side, nd);
                 s.heaps[side].push(State { dist: nd, node: v });
             }
-            let other = s.get(1 - side, v);
+            let other = s.get(i, v, 1 - side);
             if other != u64::MAX {
                 best = best.min(nd + other);
             }
@@ -491,10 +646,8 @@ fn run(graph_path: &str, queries_path: &str, output_path: &str, threads: usize) 
     drop(new_id);
     phase("parse queries");
 
-    // One worker per physical core: the two hardware threads of a core share its
-    // caches, and the 14 MB of labels each worker keeps is the largest memory
-    // cost of this phase. Measured no slower than 12 workers.
-    let answers = answer_queries(&fwd, &rev, &queries, node_count, threads.div_ceil(2));
+    // One worker per hardware thread: a worker's labels are a few MB, so they are cheap.
+    let answers = answer_queries(&fwd, &rev, &queries, node_count, threads);
     phase("answer queries");
     let mut out: Vec<u8> = Vec::with_capacity(queries.len() * 12);
     for answer in answers {
