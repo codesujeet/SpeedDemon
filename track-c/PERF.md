@@ -29,6 +29,7 @@ board yet. Everything that was tried, including the failures, is in
 | 9 | Name sightings are batched (16): each is looked up in the table, and one batch later its bit is set, with prefetches (`prefetcht0` for the slot, `prefetchw` for the bit) issued a batch ahead so cache misses overlap | pending | 0.194 -> 0.157 median, 0.148 -> 0.106 min (11 interleaved rounds) | 12 -> 12 | pending |
 | 10 | `regions.csv` parsed in one tight loop into a table sized from the last line, codes mapped through a 15-bit table instead of a `HashMap` | pending | parse regions phase 10 -> 3 ms | 12 | pending |
 | 11 | Names hashed from one masked AVX2 load (a 64-byte window of constants supplies the mask) instead of four masked scalar loads | pending | 0.111 -> 0.105 median, cpu 1042 -> 991 ms (7 interleaved rounds) | 12 | pending |
+| 12 | Region table is one byte per region id (2 MB -> 1 MB, so it stays in L2); the rare group beyond the 254th goes to a spill map | pending | 0.123 -> 0.106 median, cpu 1126 -> 992 ms (13 interleaved rounds) | 11 -> 10 | pending |
 
 Step 5 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.139 s and 47 MB, against 0.213 s and

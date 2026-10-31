@@ -105,3 +105,28 @@ fn name_table_grows_when_there_are_too_many_names() {
     assert!(out.starts_with("AAA 140000 "), "{out}");
     assert!(out.contains(" 140000 "), "{out}");
 }
+
+/// More than 254 countries: the one-byte region table spills to a map.
+#[test]
+fn more_than_254_countries() {
+    let code = |i: usize| {
+        format!(
+            "{}{}A",
+            (b'A' + (i / 26) as u8) as char,
+            (b'A' + (i % 26) as u8) as char
+        )
+    };
+    let mut regions = b"region_id,country\n".to_vec();
+    let mut records = b"id,name,note,region_id,amount\n".to_vec();
+    for i in 0..300 {
+        regions.extend_from_slice(format!("{},{}\n", i + 1, code(i)).as_bytes());
+        records.extend_from_slice(format!("{},\"n\",\"x\",{},1.00\n", i + 1, i + 1).as_bytes());
+    }
+    let out = run_on(&records, &regions, 2);
+    assert_eq!(out.lines().count(), 300);
+    assert!(
+        out.lines()
+            .all(|l| l.contains(" 1 ") && l.contains(" 1.00 ")),
+        "{out}"
+    );
+}
