@@ -66,25 +66,32 @@ fn parse_regions(data: &[u8]) -> Regions {
     // Spec 2.3: a code is three bytes `A`-`Z`, so five bits each identify it.
     let mut index = vec![0u16; 1 << 15];
     let mut countries = Vec::new();
-    let mut group_of: Vec<u16> = Vec::new();
-    for line in data.split(|&b| b == b'\n').skip(1) {
-        let Some(comma) = line.iter().position(|&b| b == b',') else {
-            continue;
-        };
-        let id = line[..comma].iter().fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
-        let code: [u8; 3] = match line[comma + 1..].try_into() {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+    // Ids ascend, so the last line has the largest; size the table once.
+    let last = data.rsplit(|&b| b == b'\n').nth(1).unwrap_or(&[]);
+    let max_id = last.iter().take_while(|d| d.is_ascii_digit()).fold(0usize, |a, &d| a * 10 + (d - b'0') as usize);
+    let mut group_of = vec![0u16; max_id + 1];
+    let mut at = data.iter().position(|&b| b == b'\n').map_or(data.len(), |p| p + 1);
+    while at < data.len() {
+        let mut id = 0usize;
+        while data[at] != b',' {
+            id = id * 10 + (data[at] - b'0') as usize;
+            at += 1;
+        }
+        let code = &data[at + 1..at + 4];
         let slot = &mut index[code.iter().fold(0usize, |a, &c| a << 5 | (c & 31) as usize)];
         if *slot == 0 {
-            countries.push(code);
+            countries.push([code[0], code[1], code[2]]);
             *slot = countries.len() as u16;
         }
-        if group_of.len() <= id {
+        if id >= group_of.len() {
             group_of.resize(id + 1, 0);
         }
         group_of[id] = *slot;
+        at += 4;
+        while data[at] != b'\n' {
+            at += 1;
+        }
+        at += 1;
     }
     Regions { countries, group_of }
 }
