@@ -76,6 +76,8 @@ costs one comparison instead of a wrong answer.
 * **A fingerprint-only distinct count** (not exact): 266 -> 177 ms, only as
   an upper bound for step 4; not kept because it is not exact.
 * **Two-stage parse (steps 8-11's parser variant)**: stage 1 finds every `,` and LF outside quotes in 64-byte blocks with a prefix-XOR of the quote mask (carrying the quote count with each position), stage 2 parses each record from its five positions with no search. Output was identical, single-thread parse-only time in a native benchmark was about the same (235 vs 210-245 ms) and the docker A/B was no faster (128 vs 105 ms median, noisy; cpu 889 vs 872 ms min), with more code. Dropped.
+* **One cache line per name (hash and 240-bit country set in one table entry, 40 bytes)**: 2^17 entries 119 -> 144 ms median, 2^18 entries (10.5 MB) 129 -> 149 ms (11 interleaved rounds each). Worse: the hash words that were read-mostly now share lines with the written bits, so every bit write invalidates the lookups of other cores. Dropped.
+* **Batch size 8 / 32 instead of 16**: 124 -> 113 / 109 ms median against 16, but the same image measured 106-123 in other runs, so inside the noise. Left at 16.
 * **`MAP_POPULATE` on the records mapping**: 121 -> 127 ms median (11 rounds), no gain. Dropped.
 * **2 MB-aligned `MADV_HUGEPAGE` tables** for the name table and bitsets: 133 -> 131 ms median (11 rounds), and peak memory rose from 12 to 15-16 MB because of the rounding. Dropped.
 * **Single-thread cost split (native, warm RAM, T=1, noisy)**: parse-only about 235 ms of about 335 ms; the name table and bitset about 100 ms; hashing 16 ms with the SWAR version (about 115 ms with four masked scalar loads, before step 11).

@@ -5,7 +5,7 @@ The task, the input files and the exact output format are in the [spec](https://
 ## Approach
 
 `regions.csv` becomes a dense array from `region_id` to country group;
-any id outside it is unmatched. `records.csv` is mapped read-only and cut
+any id outside it is unmatched (one byte per id; the rare group beyond the 254th is kept in a small map). `records.csv` is mapped read-only and cut
 into many more chunks than threads (8 per thread); workers claim chunks from
 an atomic counter, so fast and slow cores (P and E cores) finish together. A
 chunk cut must not land inside a quoted field. The spec makes names letters
@@ -60,8 +60,5 @@ None.
 The parse is about two thirds of the work and the name table and bitset the
 rest. A two-stage parse (find separators with a prefix-XOR of the quote mask,
 then parse records from known positions) was tried and was no faster in this
-form (see `PERF.md`). The next things to try are a combined table entry that
-keeps a name's hash and its 240-bit country set in one cache line (one miss
-per record instead of two), a one-byte-per-region lookup to shrink the
-2 MB region table, and an exact (key-comparing) variant of the name table
+form (see `PERF.md`). The next thing to try is an exact (key-comparing) variant of the name table
 to remove the 64-bit-hash assumption.
