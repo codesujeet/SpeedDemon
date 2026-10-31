@@ -478,25 +478,6 @@ fn release(data: &[u8], from: usize, to: usize) {
 #[cfg(not(unix))]
 fn release(_: &[u8], _: usize, _: usize) {}
 
-/// Pins the calling thread to CPU `2 * w` (one SMT sibling per core); a failure
-/// (CPU not in the allowed set) just leaves the thread unpinned.
-#[cfg(target_os = "linux")]
-fn pin(w: usize) {
-    extern "C" {
-        fn sched_setaffinity(pid: i32, size: usize, mask: *const u64) -> i32;
-    }
-    let cpu = 2 * w;
-    if cpu < 1024 {
-        let mut mask = [0u64; 16];
-        mask[cpu / 64] = 1 << (cpu % 64);
-        // SAFETY: mask is a valid 128-byte CPU set; pid 0 is the calling thread.
-        unsafe { sched_setaffinity(0, 128, mask.as_ptr()) };
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn pin(_: usize) {}
-
 fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Names) -> Vec<Agg> {
     let n_groups = regions.countries.len() + 1;
     let tail_at = if data.len() - body > 2 * TAIL {
@@ -510,12 +491,11 @@ fn scan(data: &[u8], body: usize, regions: &Regions, threads: usize, names: &Nam
         k if k == chunks => tail_at,
         k => cut(data, body + (tail_at - body) * k / chunks).min(tail_at),
     };
-    let next = &AtomicUsize::new(0);
+    let next = AtomicUsize::new(0);
     let mut parts: Vec<Vec<Agg>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..threads)
-            .map(|w| {
-                s.spawn(move || {
-                    pin(w);
+            .map(|_| {
+                s.spawn(|| {
                     let mut groups = vec![Agg::new(); n_groups];
                     let mut sightings = Sightings::new(names);
                     loop {
@@ -654,8 +634,7 @@ fn main() {
         var("REGIONS_PATH", "/data/regions.csv"),
         var("OUTPUT_PATH", "/out/aggregates.txt"),
     );
-    // One worker per physical core: assume SMT siblings are adjacent CPU ids.
-    let threads = (std::thread::available_parallelism().map_or(1, |n| n.get()) / 2).max(1);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let result = map_file(&regions).and_then(|regions_data| {
         let regions = parse_regions(regions_data);
         let groups = aggregate(map_file(&records)?, &regions, threads);
