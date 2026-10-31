@@ -2,6 +2,7 @@
 //! compiled into the binary's test build only (`#[path]` in main.rs).
 
 use super::*;
+use std::collections::BTreeMap;
 
 /// The input followed by `PAD` zero bytes, as `process` requires.
 fn padded(data: &[u8]) -> &'static [u8] {
@@ -13,7 +14,7 @@ fn padded(data: &[u8]) -> &'static [u8] {
 /// Runs the scan and the output phase on `data` and returns the output bytes.
 fn summarize(data: &[u8], threads: usize, chunk: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    process(padded(data), threads, chunk, &mut out).unwrap();
+    process(padded(data), threads, chunk, false, &mut out).unwrap();
     out
 }
 
@@ -30,7 +31,7 @@ fn reference(data: &[u8]) -> Vec<u8> {
     for ((hour, endpoint), (mut lat, errors)) in groups {
         lat.sort_unstable();
         let n = lat.len() as u64;
-        let rank = |p: u64| lat[((p * n + 99) / 100 - 1) as usize];
+        let rank = |p: u64| lat[((p * n).div_ceil(100) - 1) as usize];
         out += &format!(
             "{hour}:00:00Z {endpoint} {n} {} {} {} {errors} {}\n",
             rank(50),
@@ -55,15 +56,14 @@ fn parse_latency_reads_one_to_ten_digits() {
 #[test]
 fn percentiles_match_a_full_sort() {
     for n in [1usize, 2, 3, 4, 5, 20, 21, 99, 100, 101, 1000] {
-        let mut data: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(2_654_435_761) % 50).collect();
-        let mut sorted = data.clone();
-        sorted.sort_unstable();
-        let rank = |p: usize| sorted[(p * n).div_ceil(100) - 1];
-        assert_eq!(percentiles(&mut data), [rank(50), rank(95), rank(99)], "n={n}");
+        let data: Vec<u8> = (0..n as u64)
+            .flat_map(|i| format!("2026-10-30T18:00:00.000000Z GET /x {} {}\n", 200 + i % 400, i.wrapping_mul(2_654_435_761) % 50 * 90_000).into_bytes())
+            .collect();
+        assert_eq!(summarize(&data, 2, 1000), reference(&data), "n={n}");
     }
-    // Spec section 3.4: with n = 1 all three equal the single value; with n = 101 the ranks are 51, 96 and 100.
-    assert_eq!(percentiles(&mut [42]), [42, 42, 42]);
-    assert_eq!(percentiles(&mut (1..=101).rev().collect::<Vec<u32>>()), [51, 96, 100]);
+    // Spec section 3.4: with n = 101 the ranks are 51, 96 and 100.
+    let data: Vec<u8> = (1..=101).rev().flat_map(|i| format!("2026-10-30T18:00:00.000000Z GET /x 200 {i}\n").into_bytes()).collect();
+    assert_eq!(summarize(&data, 1, 1 << 20), b"2026-10-30T18:00:00Z /x 101 51 96 100 0 0\n");
 }
 
 #[test]
