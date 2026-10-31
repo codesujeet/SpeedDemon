@@ -39,6 +39,7 @@ failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 | 18 | The endpoint numbers are handed out by a lock-free table (compare-and-swap on a slot, same hash as the private tables) instead of a `Mutex<HashMap>`: every worker takes each of the 1,842 names once, 22,104 lock acquisitions in the first few chunks, all workers waiting for each other (+23 lines after the harness formatter) | pending | 12 CPUs, TSC cycles per worker for the scan (instrumented copies, 4 interleaved A/B rounds of 3-4 runs): lock wait was 18-20 M of 54 M cycles per worker (a third of the scan, about 7 ms) on a warm run; mean per-worker scan 76-94 M -> 33-69 M cycles on the loaded laptop; wall 57-80 -> 38-71 ms | 24 | pending |
 | 19 | Each worker gives the page table entries of a twelfth of the mapped input back to the system (`madvise(MADV_DONTNEED)`; pages are read again from the page cache if used) when its scan is done, so the exit does not take apart 58,000 mapped pages on one core | pending | 12 CPUs, `munmap` of the input after the run, TSC: 9-19 M cycles (about 4-7 ms, one core) -> 1 M after the drop; interleaved A/B, 30 runs each: wall median about 55 -> 46 ms, min 36 -> 32 ms (loaded laptop under WSL2, whose page and IPI costs are above the board's); +16 lines after the harness formatter | 23 | pending |
 | 20 | The writer thread ends the process as soon as the last block is written, instead of returning through the thread scope (which joins 12 threads, unmaps their stacks and frees their buffers first; +7 lines) | pending | 12 CPUs, 25 interleaved A/B runs with TSC marks (loaded laptop): exec-to-exit median 96 -> 93 ms, time from last worker done to the end of `process` 5.2 -> 4.5 ms; inside the noise of one run, kept because it removes work and costs nothing | 23 | pending |
+| 21 | `mallopt(M_MMAP_THRESHOLD, 32 KiB)` before the threads start: the hour buffers (placement buffer, output block) are mapped on their own and unmapped when freed, instead of staying in 12 thread arenas for the rest of the run (at the end of the output phase 8.5 MiB of anonymous memory was still resident in them; +4 lines) | pending | 12 CPUs, cgroup CPU user+system, median of 12 interleaved runs: 566 -> 571 ms (user 378 -> 361 ms, system 189 -> 210 ms): no more work; wall on the loaded laptop is within noise | `memory.peak` median 23.0 -> 20.4 MiB (max 24.1 -> 20.6; 12 runs, tmpfs /out) | pending |
 
 Steps 6-9 together, measured the way the board measures (5 runs, mean of the
 middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
@@ -137,15 +138,5 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `33b8455` | Track B: postings fill uses the term offset as its own cursor (agent-b d49c673) | `run-aba44205a125` | 0.0289 | 26.8 | 508 | 78.02 |
 | `b208288` | Track A: workers write their own hour block at its final offset; no writer thread (agent-a | `run-f6f7bcc42a1c` | 0.0254 | 27.4 | 516 | 79.29 |
 | `cd4c35e` | Revert "Track A: workers write their own hour block at its final offset; no writer thread  | `run-5156e7ee3367` | 0.0272 | 23.7 | 508 | 79.22 |
-| `e804869` | PERF.md: add a Board runs table with real run IDs from the public feed to every track | `run-35c07889b928` | 0.0278 | 24.7 | 508 | 78.81 |
-| `36f4296` | Tracks A and C: profile-guided optimization from a committed profile (no source or Dockerf | `run-bac39780b486` | 0.0274 | 21.8 | 508 | 79.52 |
-| `158f18f` | Track B: 32-byte token mask (agent-b 0054521); Track A PERF.md header with current board n | `run-7cf129aecf02` | 0.0292 | 27.0 | 508 | 77.90 |
-| `49548fa` | Track B: merge and render in parallel from per-range logs (agent-b a34f4cf) | `run-f1548a29e949` | 0.0302 | 30.1 | 508 | 77.04 |
-| `3286475` | Track C: 111-bit name fingerprint (second independent hash compared on every tag match), d | `run-fdef798466b5` | 0.0314 | 27.7 | 508 | 76.97 |
-| `280509c` | Track B: vector-compare term lookup, CRC32C hash, fused dedupe (agent-b) | `run-861ceb90812d` | 0.0316 | 22.9 | 508 | 77.73 |
-| `892d831` | Track C: regenerate the PGO profile for the 111-bit fingerprint source | `run-44baf3d9c9ef` | 0.0287 | 26.9 | 508 | 78.08 |
-| `2ca5698` | Track C: back to the 36f4296 source and profile (the wider fingerprint cost 3-5 ms on the  | `run-021bc02d8c03` | 0.0260 | 26.2 | 508 | 79.29 |
-| `b1497a5` | Track B: 2 MB pieces (agent-b c51c3b0) | `run-474389647c4a` | 0.0282 | 27.9 | 508 | 78.11 |
-| `f00df83` | Revert Track B 2 MB pieces: T -17 ms but M +12 MiB, 65.82 vs 65.94 on the board | `run-b9b556122cc2` | 0.0285 | 24.8 | 508 | 78.52 |
 
 <!-- board-runs:end -->
