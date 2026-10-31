@@ -20,11 +20,10 @@ use std::sync::{mpsc, Barrier, Mutex, OnceLock};
 /// A stored line is `endpoint << 21 | error << 20 | latency`; a latency that does not fit 20 bits is stored as
 /// `LAT_MASK` and followed by a whole `u32` holding the latency.
 const LAT_MASK: u32 = (1 << 20) - 1;
-const ERR: u32 = 1 << 20;
 /// The spec gives every seed a catalogue of exactly 1,842 endpoints, so 11 bits of endpoint number are enough.
 const MAX_ENDPOINTS: usize = 1 << 11;
 /// Slots of a worker's endpoint table (at most a quarter used).
-const SLOTS: usize = 1 << 13;
+const SLOTS: usize = 1 << 14;
 /// Bytes after the end of the input that may be read (the vector loads of the last line).
 const PAD: usize = 128;
 
@@ -81,41 +80,6 @@ unsafe fn delimiters(p: *const u8) -> u64 {
     half(0) | half(32) << 32
 }
 
-/// (endpoint start, endpoint end, line feed) of the line at `ls`. The 27-byte timestamp is skipped; the next four
-/// delimiters (after the method, the endpoint, the status, and the line feed) are almost always in one 64-byte window.
-#[inline(always)]
-unsafe fn split(base: *const u8, ls: usize) -> (usize, usize, usize) {
-    let mut m = delimiters(base.add(ls + 28));
-    let a = m.trailing_zeros();
-    m &= m.wrapping_sub(1);
-    let b = m.trailing_zeros();
-    m &= m.wrapping_sub(1);
-    m &= m.wrapping_sub(1);
-    let c = m.trailing_zeros();
-    if c < 64 {
-        return (ls + 29 + a as usize, ls + 28 + b as usize, ls + 28 + c as usize);
-    }
-    split_long(base, ls)
-}
-
-/// `split` for a line whose delimiters do not all fit in the first window (an endpoint over about 45 bytes).
-#[inline(never)]
-unsafe fn split_long(base: *const u8, ls: usize) -> (usize, usize, usize) {
-    let (mut at, mut found, mut n) = (ls + 28, [0usize; 4], 0);
-    loop {
-        let mut bits = delimiters(base.add(at));
-        while bits != 0 && n < 4 {
-            found[n] = at + bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            n += 1;
-        }
-        if n == 4 {
-            return (found[0] + 1, found[1], found[3]);
-        }
-        at += 64;
-    }
-}
-
 /// The decimal number at `s..e` (1 to 10 digits): the last eight digits by SWAR on one 8-byte load that ends at `e`.
 #[inline(always)]
 unsafe fn parse_latency(base: *const u8, s: usize, e: usize) -> u32 {
@@ -131,19 +95,17 @@ unsafe fn parse_latency(base: *const u8, s: usize, e: usize) -> u32 {
     v as u32
 }
 
-/// Whether the `len` bytes at `p` and `q` are equal (`len` >= 1): one masked 32-byte compare, or 32-byte
-/// blocks plus one that ends at the last byte.
+/// Whether the `len` bytes at `p` and `q` are equal (`len` >= 1): the first and the last 32 bytes (masked to the
+/// name when it is shorter), and 32-byte blocks between them for the rare name over 64 bytes.
 #[inline(always)]
 unsafe fn same(p: *const u8, q: *const u8, len: usize) -> bool {
     use std::arch::x86_64::*;
-    let eq = |o: usize| _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p.add(o).cast()), _mm256_loadu_si256(q.add(o).cast()))) as u32;
-    if len <= 32 {
-        let want = u32::MAX >> (32 - len);
-        return eq(0) & want == want;
-    }
-    let mut ok = eq(len - 32) == u32::MAX;
-    for o in (0..len - 32).step_by(32) {
-        ok &= eq(o) == u32::MAX;
+    let eq = |o: isize| _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p.offset(o).cast()), _mm256_loadu_si256(q.offset(o).cast()))) as u32;
+    // Name bytes `0..min(len, 32)` are the low bits of the first load, the last `min(len, 32)` the high bits of the second.
+    let (low, high) = (u32::MAX >> (32 - len.min(32)), u32::MAX << (32 - len.min(32)));
+    let mut ok = (eq(0) & low == low) & (eq(len as isize - 32) & high == high);
+    if len > 64 {
+        ok = ok && (32..len as isize - 32).step_by(32).all(|o| eq(o) == u32::MAX);
     }
     ok
 }
@@ -164,17 +126,21 @@ struct Part {
 
 struct Worker {
     d: &'static [u8],
-    /// Endpoint table: `offset of first occurrence | length << 32 | number << 40`; 0 is a free slot.
+    /// Endpoint table: `offset of the name in store | length << 32 | number << 40`; 0 is a free slot.
     table: Vec<u64>,
+    /// A copy of each name this worker has seen (so that the names the lines are compared with sit together),
+    /// with 32 zero bytes before and after.
+    store: Vec<u8>,
     part: Part,
     key: (u64, u64),
+    pos: Vec<u32>,
 }
 
 impl Worker {
     fn new(d: &'static [u8]) -> Self {
         // A line has at least 40 bytes and takes at most two words.
         let arena = Vec::with_capacity(d.len() / 20 + 16);
-        Worker { d, table: vec![0; SLOTS], part: Part { arena, runs: Vec::new() }, key: (0, 0) }
+        Worker { d, table: vec![0; SLOTS], store: Vec::with_capacity(MAX_ENDPOINTS * 190), part: Part { arena, runs: Vec::new() }, key: (0, 0), pos: vec![0; 1016] }
     }
 
     /// The number of the endpoint `d[es..ee]`, taken from the shared names the first time this worker sees it.
@@ -184,13 +150,13 @@ impl Worker {
         let bits = 8 * len.min(8) as u32;
         let a = load8(base.add(es)) & (u64::MAX >> (64 - bits));
         let b = load8(base.add(ee - 8)) & (u64::MAX << (64 - bits));
-        let mut i = ((a ^ b.rotate_left(29) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 51) as usize;
+        let mut i = ((a ^ b.rotate_left(29) ^ len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 50) as usize;
         loop {
             let slot = *self.table.get_unchecked(i);
             if slot == 0 {
                 return self.insert(es, ee, i, names);
             }
-            if (slot >> 32) as u8 as usize == len && same(base.add(es), base.add(slot as u32 as usize), len) {
+            if (slot >> 32) as u8 as usize == len && same(base.add(es), self.store.as_ptr().add(slot as u32 as usize), len) {
                 return (slot >> 40) as u32;
             }
             i = (i + 1) % SLOTS;
@@ -206,41 +172,70 @@ impl Worker {
             shared.list.push(&self.d[es..ee]);
         }
         assert!((id as usize) < MAX_ENDPOINTS, "more endpoints than the spec's catalogue of 1,842");
-        self.table[i] = es as u64 | ((ee - es) as u64) << 32 | u64::from(id) << 40;
+        self.store.resize(self.store.len() + 32, 0);
+        let off = self.store.len();
+        self.store.extend_from_slice(&self.d[es..ee]);
+        self.store.resize(self.store.len() + 32, 0);
+        self.table[i] = off as u64 | ((ee - es) as u64) << 32 | u64::from(id) << 40;
         id
     }
 
-    /// Parses the lines that start in `[start, end)`.
+    /// Parses the lines that start in `[start, end)` (`end` is a line start). Every line has exactly five
+    /// delimiters (spaces and the line feed), so the delimiters of a stretch of input are first listed as offsets
+    /// (about 4 per 64 bytes, 8 written unconditionally), and the lines are then read from that list five at a time:
+    /// no line has to be parsed to find the next.
     fn scan(&mut self, start: usize, end: usize, names: &Mutex<Names>) {
         let base = self.d.as_ptr();
         let first = self.part.arena.as_mut_ptr();
-        // SAFETY: the arena has room for two words per line of the whole input; see `PAD` for the reads.
+        let mut pos = std::mem::take(&mut self.pos);
+        // SAFETY: the arena has room for two words per line of the whole input, `pos` for 1000 offsets plus the
+        // 16 a window can add, and see `PAD` for the reads.
         unsafe {
             let mut w = first.add(self.part.arena.len());
-            let mut ls = start;
-            while ls < end {
-                let (es, ee, nl) = split(base, ls);
-                let id = self.endpoint(es, ee, names);
-                let error = u32::from(*base.add(ee + 1) >= b'5');
-                let latency = parse_latency(base, ee + 5, nl);
-                let key = (load8(base.add(ls)), load8(base.add(ls + 5)));
-                if key != self.key {
-                    self.key = key;
-                    self.part.runs.push((key.0, key.1, w.offset_from(first) as usize));
+            let (mut at, mut have) = (start, 0);
+            while at < end || have >= 5 {
+                while have < 1000 && at < end {
+                    let mut m = delimiters(base.add(at));
+                    if end - at < 64 {
+                        m &= (1 << (end - at)) - 1;
+                    }
+                    let (out, count) = (pos.as_mut_ptr().add(have), m.count_ones() as usize);
+                    for k in 0..16 {
+                        if k < 8 || count > 8 {
+                            *out.add(k) = (at as u32).wrapping_add(m.trailing_zeros());
+                            m &= m.wrapping_sub(1);
+                        }
+                    }
+                    have += count;
+                    at += 64;
                 }
-                let line = id << 21 | error << 20;
-                if latency < LAT_MASK {
-                    *w = line | latency;
-                    w = w.add(1);
-                } else {
-                    *w = line | LAT_MASK;
-                    *w.add(1) = latency;
-                    w = w.add(2);
+                for i in 0..have / 5 {
+                    let p = pos.as_ptr().add(5 * i);
+                    let (ls, es, ee, nl) = ((*p - 27) as usize, (*p.add(1) + 1) as usize, *p.add(2) as usize, *p.add(4) as usize);
+                    let id = self.endpoint(es, ee, names);
+                    let error = u32::from(*base.add(ee + 1) >= b'5');
+                    let latency = parse_latency(base, ee + 5, nl);
+                    let key = (load8(base.add(ls)), load8(base.add(ls + 5)));
+                    if key != self.key {
+                        self.key = key;
+                        self.part.runs.push((key.0, key.1, w.offset_from(first) as usize));
+                    }
+                    let line = id << 21 | error << 20;
+                    if latency < LAT_MASK {
+                        *w = line | latency;
+                        w = w.add(1);
+                    } else {
+                        *w = line | LAT_MASK;
+                        *w.add(1) = latency;
+                        w = w.add(2);
+                    }
                 }
-                ls = nl + 1;
+                pos.copy_within(have / 5 * 5..have, 0);
+                have %= 5;
             }
             self.part.arena.set_len(w.offset_from(first) as usize);
         }
+        self.pos = pos;
     }
 }
 
