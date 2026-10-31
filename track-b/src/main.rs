@@ -200,10 +200,13 @@ fn bucket_hash(k: (u64, u64, u32)) -> u64 {
 }
 
 impl<'a> TermTable<'a> {
-    fn new() -> Self {
+    /// `hint` is the size of the query file, which bounds the number of terms
+    /// (about one per 23 bytes); it only avoids regrowing the table.
+    fn new(hint: usize) -> Self {
+        let buckets = (hint / 32).next_power_of_two().max(1 << 10);
         TermTable {
-            buckets: vec![Bucket::default(); 1 << 10],
-            terms: Vec::new(),
+            buckets: vec![Bucket::default(); buckets],
+            terms: Vec::with_capacity(hint / 20),
         }
     }
 
@@ -336,7 +339,7 @@ impl Queries {
 }
 
 fn parse_queries(data: &[u8]) -> (Queries, TermTable<'_>) {
-    let mut table = TermTable::new();
+    let mut table = TermTable::new(data.len());
     let mut qs = Queries {
         entries: Vec::new(),
         start: vec![0],
@@ -409,9 +412,8 @@ struct Piece {
     /// small array that stays in L1, unlike `off`.
     present: Vec<u64>,
     /// Per term: the stamp of the last document seen with it, and how many
-    /// documents of this piece contain it.
-    last: Vec<u32>,
-    count: Vec<u32>,
+    /// documents of this piece contain it (together, so one cache line).
+    seen: Vec<[u32; 2]>,
     stamp: u32,
     /// Scratch: the current document's token keys, start offsets and home
     /// buckets.
@@ -466,9 +468,9 @@ impl Piece {
         self.uniq.resize(u + self.keys.len(), 0);
         self.stamp += 1;
         for &id in &self.ids[from..] {
-            let new = self.last[id as usize] != self.stamp;
-            self.last[id as usize] = self.stamp;
-            self.count[id as usize] += new as u32;
+            let [last, n] = self.seen[id as usize];
+            self.seen[id as usize] = [self.stamp, n + (last != self.stamp) as u32];
+            let new = last != self.stamp;
             self.uniq[u] = id;
             u += new as usize;
         }
@@ -481,9 +483,8 @@ impl Piece {
     /// postings and bitmaps. Returns the number of bytes used.
     fn build(&mut self, text: &[u8], table: &TermTable) -> usize {
         let nt = table.terms.len() + 1;
-        self.last.resize(nt, 0);
-        self.count.clear();
-        self.count.resize(nt, 0);
+        self.seen.resize(nt, [0, 0]);
+        self.seen.iter_mut().for_each(|x| x[1] = 0);
         for v in [
             &mut self.ids,
             &mut self.dstart,
@@ -529,7 +530,7 @@ impl Piece {
         self.present.clear();
         self.present.resize(nt / 64 + 1, 0);
         let mut total = 0;
-        for (t, &c) in self.count.iter().enumerate() {
+        for (t, &[_, c]) in self.seen.iter().enumerate() {
             self.info.push([total, c]);
             total += c;
             self.present[t / 64] |= ((c != 0) as u64) << (t % 64);
@@ -545,10 +546,10 @@ impl Piece {
         }
         self.maps.clear();
         self.map_at.resize(nt, 0);
-        for t in (0..nt).filter(|&t| self.count[t] as usize >= self.w) {
+        for t in (0..nt).filter(|&t| self.seen[t][1] as usize >= self.w) {
             let (at, n, base) = (
                 self.info[t][0] as usize,
-                self.count[t] as usize,
+                self.seen[t][1] as usize,
                 self.maps.len(),
             );
             self.map_at[t] = base as u32;
@@ -567,39 +568,17 @@ impl Piece {
 
 // --- Set operations on sorted doc lists ---------------------------------
 
-/// `a ∩ b` into `out`. When one list is far shorter, each of its ids is
-/// found in the longer one by binary search over the part not yet passed,
-/// which costs O(short · log long) instead of a full O(short + long) merge.
+/// `a ∩ b` into `out`: a merge that advances both cursors with arithmetic.
 fn intersect(a: &[u16], b: &[u16], out: &mut Vec<u16>) {
-    let (small, big) = if a.len() <= b.len() { (a, b) } else { (b, a) };
     out.clear();
-    if small.len() * 32 < big.len() {
-        let mut rest = big;
-        for &x in small {
-            match rest.binary_search(&x) {
-                Ok(i) => {
-                    out.push(x);
-                    rest = &rest[i + 1..];
-                }
-                Err(i) => rest = &rest[i..],
-            }
-            if rest.is_empty() {
-                break;
-            }
-        }
-        return;
-    }
     let (mut i, mut j) = (0, 0);
-    while i < small.len() && j < big.len() {
-        if small[i] == big[j] {
-            out.push(small[i]);
-            i += 1;
-            j += 1;
-        } else if small[i] < big[j] {
-            i += 1;
-        } else {
-            j += 1;
+    while i < a.len() && j < b.len() {
+        let (x, y) = (a[i], b[j]);
+        if x == y {
+            out.push(x);
         }
+        i += (x <= y) as usize;
+        j += (y <= x) as usize;
     }
 }
 
@@ -1053,7 +1032,6 @@ fn render(answers: &[Answer]) -> Vec<u8> {
 /// large enough that the per-piece cost of running every query is amortised.
 const PIECE_BYTES: usize = 1 << 20;
 
-/// Set `TRACK_B_TIMING=1` to print a per-phase breakdown to stderr.
 fn run(
     docs_path: &str,
     queries_path: &str,
@@ -1061,32 +1039,10 @@ fn run(
     threads: usize,
     piece: usize,
 ) -> std::io::Result<()> {
-    let verbose = std::env::var("TRACK_B_TIMING").is_ok();
-    macro_rules! phase {
-        ($label:expr, $body:expr) => {{
-            let t = std::time::Instant::now();
-            let v = $body;
-            if verbose {
-                eprintln!(
-                    "track-b: {} in {:.1}ms",
-                    $label,
-                    t.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-            v
-        }};
-    }
-
-    let queries_data = phase!("map queries", map_file(queries_path)?);
-    let (queries, table) = phase!("parse queries", parse_queries(queries_data));
-    let docs_data = phase!("map docs", map_file(docs_path)?);
-    let accs = phase!(
-        "index and answer",
-        answer_all(docs_data, &queries, &table, threads, piece)
-    );
-    let answers = phase!("merge", merge(&accs, queries.len(), threads));
-    let out = phase!("render", render(&answers));
-    phase!("write output", std::fs::write(output_path, out))?;
+    let (queries, table) = parse_queries(map_file(queries_path)?);
+    let docs = map_file(docs_path)?;
+    let accs = answer_all(docs, &queries, &table, threads, piece);
+    std::fs::write(output_path, render(&merge(&accs, queries.len(), threads)))?;
 
     // Freeing the tables at exit is pure cost; the OS reclaims them anyway
     // (track-b/PERF.md).
@@ -1116,7 +1072,8 @@ fn main() {
             eprintln!(
                 "track-b: done in {:.1} ms",
                 start.elapsed().as_secs_f64() * 1000.0
-            );
+            ); // Skip the runtime's orderly shutdown: the output is written.
+            std::process::exit(0);
         }
         Err(e) => {
             eprintln!("track-b: failed: {e}");

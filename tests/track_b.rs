@@ -33,7 +33,7 @@ fn term_table_matches_a_hash_map() {
     terms.sort();
     terms.dedup();
     let refs: Vec<&[u8]> = terms.iter().map(|t| t.as_slice()).collect();
-    let mut table = TermTable::new();
+    let mut table = TermTable::new(0);
     for (i, &t) in refs.iter().enumerate() {
         assert_eq!(table.intern(t), i as u32);
     }

@@ -29,8 +29,7 @@ for a piece before moving on, so the whole index never exists at once:
    documents of the piece also get a bitmap.
 3. **Queries.** Every query runs on the piece. A presence bitset first rules
    out queries that cannot match the piece. A BOOL query is evaluated
-   strictly left to right on sorted lists (binary search when one is 32x
-   shorter) and bitmaps (word operations, filters when mixed). A PHRASE
+   strictly left to right on sorted lists (a plain merge) and bitmaps (word operations, filters when mixed). A PHRASE
    intersects its terms' lists from the rarest, then scans each surviving
    document's id array for the run around the rarest term, which also handles
    repeated terms.

@@ -25,8 +25,9 @@ Everything that was tried, including the failures, is in
 | 5 | Each chunk counts, per term, the documents that contain it; once every chunk is counted the global offsets are known, and each chunk's worker writes its document ids straight into their final slots in one flat array (relaxed atomic stores through a small, documented `unsafe` view), instead of building per-chunk postings and joining them afterwards | pending | about equal (988 vs 1019 ms median over 15 interleaved rounds); the join step is gone | 349 -> 273 | pending |
 | 6 | Rebuild around **pieces**: the corpus is cut into 4 MB line-aligned pieces; a worker tokenizes a piece (AVX2 token mask, branch-free key, bucketed term table with prefetch), builds u16 piece-local postings, runs all 50,000 queries on it, and folds each answer into per-worker count / sum / first-ten accumulators merged at the end. No global token array and no global postings. | pending | 1,479 -> 968 ms (7 interleaved rounds, loaded laptop) | 274 -> 118 | pending |
 | 7 | 1 MB pieces; terms in at least `ndocs/64` documents of a piece also get a bitmap (word-wise AND/OR/NOT, six masked popcounts for a bitmap answer's sum); a presence bitset skips queries that cannot match the piece; a shared per-query marker stops logging ids that cannot be among the ten smallest | pending | 1,438 -> 901 ms vs the step-5 base (9 interleaved rounds); 845 -> 796 vs step 6 (7 rounds). Harness replica (5 runs): 0.664 s | 274 -> 70 | pending |
+| 8 | Source trim and small memory wins: per-term stamp and count packed into one array, query-file-sized term table (no regrowth), plain merge for intersect (the binary-search branch never mattered on piece-sized lists), the `TRACK_B_TIMING` phase printing removed, `process::exit(0)` after the output is written | pending | 793 -> 797 ms (11 interleaved rounds, no change within noise) | 70 -> 64 | pending |
 
-Source lines (the harness's count) went from 659 to 924: the AVX2 scanner, the
+Source lines (the harness's count) went from 659 to 924 at step 7 and 889 at step 8: the AVX2 scanner, the
 bucketed table, bitmaps and the merge cost 265 lines.
 
 ## What the time is now (steps 6-7)
@@ -130,6 +131,20 @@ from about 25 to about 15 ns per token.
   per query; phase-level differences (skip a query kind) were more reliable.
 * **Parallel merge of the logs**: 33 -> 17 ms, kept; the log itself dropped
   from 1.46 M to 0.67 M entries with the `full[q]` marker.
+
+## Tried and dropped (round 2)
+
+* **Anchor index** (queries grouped by their rarest required term, so a piece
+  only runs queries whose anchor it contains; anchors from a 1 MB sample, or
+  from the first piece a worker finishes via a `OnceLock`): correct (hash
+  matched) but not faster in interleaved A/B (852 vs 818, 726 vs 782, 812 vs
+  884 ms against HEAD) and +57 source lines; discarded.
+* **Shaving the serial parse** (about 25-45 ms in Docker): a presized table
+  helps little; a parallel parse would need a merge of per-part tables and was
+  not tried.
+* Positional output writes from the workers and buffer reuse: the output is
+  1.4 MB (render + write about 5 ms) and per-piece buffers are already reused;
+  not worth the lines.
 
 ## Most promising next step
 
