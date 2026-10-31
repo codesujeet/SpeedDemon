@@ -35,6 +35,21 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     Ok(Box::leak(std::fs::read(path)?.into_boxed_slice()))
 }
 
+/// Hands the allocator's free memory back to the system. Worker threads allocate
+/// from arenas of their own, and what one phase frees would otherwise stay
+/// resident next to what the next phase allocates, adding up in the peak.
+#[cfg(target_os = "linux")]
+fn release_memory() {
+    extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    // SAFETY: glibc's `malloc_trim` takes no pointers and may be called at any time.
+    unsafe { malloc_trim(0) };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn release_memory() {}
+
 /// Runs `f(0..parts)` on one thread each and returns the results in order.
 fn par<R: Send>(parts: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     std::thread::scope(|s| {
@@ -136,10 +151,15 @@ impl Csr {
         }
     }
 
+    /// The words of the edges of `u`.
+    fn row(&self, u: u32) -> &[u32] {
+        &self.adj[self.row_offset[u as usize] as usize..self.row_offset[u as usize + 1] as usize]
+    }
+
     /// `(neighbour, weight)` of every edge of `u`.
     fn edges(&self, u: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
         let mask = (1 << self.wb) - 1;
-        let mut words = self.adj[self.row_offset[u as usize] as usize..self.row_offset[u as usize + 1] as usize].iter();
+        let mut words = self.row(u).iter();
         std::iter::from_fn(move || {
             let e = *words.next()?;
             let w = e & mask;
@@ -251,26 +271,36 @@ fn transpose(g: &Csr, parts: usize) -> Csr {
     Csr { row_offset, adj, wb: g.wb }
 }
 
-/// New node order (`order[new] = old`) that puts neighbours close together.
-/// Node ids are a random relabelling of a road-like lattice, so with the input
-/// ids every relaxation lands on a random cache line. Workers grow compact
-/// regions of up to `REGION` nodes by breadth-first search from seeds, racing
-/// on a claimed flag per node; a region is a run of ids in BFS order. Every
+/// A worker's share of the new order: its nodes in order, each node's row
+/// length in words, and the rows themselves (still naming neighbours by old id).
+#[derive(Default)]
+struct Run {
+    nodes: Vec<u32>,
+    lens: Vec<u32>,
+    words: Vec<u32>,
+}
+
+/// Grows the new node order and copies the rows into it. Node ids are a
+/// random relabelling of a road-like lattice, so with the input ids every
+/// relaxation lands on a random cache line. Workers grow compact regions of
+/// up to `REGION` nodes by breadth-first search from seeds, racing on a
+/// claimed flag per node; a region is a run of ids in BFS order. Every
 /// `STRIDE`-th id is a seed in the first round, then every node still
-/// unclaimed is one, so each node ends up in some region. The result is
+/// unclaimed is one, so each node ends up in some region. A finished
+/// region's rows are copied out while they are still in cache. The result is
 /// not deterministic, which is fine: distances do not depend on labels.
-fn region_order(g: &Csr, workers: usize) -> Vec<u32> {
+fn grow_regions(g: &Csr, workers: usize) -> Vec<Run> {
     const REGION: usize = 1024;
     const STRIDE: usize = 256;
     let n = g.row_offset.len() - 1;
     let claimed: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
     let claim = |v: u32| claimed[v as usize].swap(1, Relaxed) == 0;
-    let mut regions: Vec<Vec<u32>> = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
     let mut seeds: Vec<u32> = (0..n as u32).step_by(STRIDE).collect();
     while !seeds.is_empty() {
         let next = AtomicUsize::new(0);
-        let found = par(workers, |_| {
-            let mut mine = Vec::new();
+        runs.extend(par(workers, |_| {
+            let mut run = Run::default();
             while let Some(&seed) = seeds.get(next.fetch_add(1, Relaxed)) {
                 if !claim(seed) {
                     continue;
@@ -285,38 +315,56 @@ fn region_order(g: &Csr, workers: usize) -> Vec<u32> {
                     }
                     head += 1;
                 }
-                mine.push(region);
+                for &u in &region {
+                    let row = g.row(u);
+                    run.lens.push(row.len() as u32);
+                    run.words.extend_from_slice(row);
+                }
+                run.nodes.extend(region);
             }
-            mine
-        });
-        regions.extend(found.into_iter().flatten());
+            run
+        }));
         seeds = (0..n as u32).filter(|&v| claimed[v as usize].load(Relaxed) == 0).collect();
     }
-    regions.concat()
+    runs
 }
 
-/// Renames the nodes of `g` so node `order[i]` becomes `i`, mapping every
-/// neighbour through `new_id`. One pass over the rows; each worker fills the
-/// disjoint slice of its own run of new rows.
-fn permute_csr(g: &Csr, order: &[u32], new_id: &[u32], workers: usize) -> Csr {
-    let n = order.len();
+/// Assembles the CSR in the new order from the runs, in parallel: run after
+/// run, node `i` of the order is named `i`, and every neighbour is mapped to
+/// its new name. Returns the CSR and `new_id[old]`.
+fn rename(wb: u32, n: usize, runs: &[Run]) -> (Csr, Vec<u32>) {
+    let starts: Vec<(usize, usize)> = runs
+        .iter()
+        .scan((0, 0), |at, r| Some(std::mem::replace(at, (at.0 + r.nodes.len(), at.1 + r.words.len()))))
+        .collect();
+    let mut new_id = vec![0u32; n];
+    let named = Disjoint(new_id.as_mut_ptr());
+    par(runs.len(), |r| {
+        for (i, &old) in runs[r].nodes.iter().enumerate() {
+            // SAFETY: the runs partition the nodes, so no two workers write the same entry.
+            unsafe { named.put(old as usize, (starts[r].0 + i) as u32) };
+        }
+    });
     let mut row_offset = vec![0u32; n + 1];
-    for (i, &old) in order.iter().enumerate() {
-        row_offset[i + 1] = row_offset[i] + g.row_offset[old as usize + 1] - g.row_offset[old as usize];
+    for (i, len) in runs.iter().flat_map(|r| &r.lens).enumerate() {
+        row_offset[i + 1] = row_offset[i] + len;
     }
-    let mut adj = vec![0u32; g.adj.len()];
+    let mut adj = vec![0u32; row_offset[n] as usize];
     let out = Disjoint(adj.as_mut_ptr());
-    par(workers, |w| {
-        let mut at = row_offset[n * w / workers] as usize;
-        for &old in &order[n * w / workers..n * (w + 1) / workers] {
-            for (v, weight) in g.edges(old) {
-                // SAFETY: new rows [lo, hi) of worker `w` occupy exactly the words it walks.
-                unsafe { g.put_edge(&out, at, new_id[v as usize], weight) };
-                at += g.words(weight) as usize;
+    let mask = (1u32 << wb) - 1;
+    par(runs.len(), |r| {
+        let mut words = runs[r].words.iter().enumerate();
+        while let Some((i, &e)) = words.next() {
+            // SAFETY: run `r` owns the words from its start to the next run's start.
+            unsafe { out.put(starts[r].1 + i, new_id[(e >> wb) as usize] << wb | (e & mask)) };
+            if e & mask == mask {
+                // The exact weight follows in the next word.
+                let (i, &weight) = words.next().expect("weight word");
+                unsafe { out.put(starts[r].1 + i, weight) }; // SAFETY: as above.
             }
         }
     });
-    Csr { row_offset, adj, wb: g.wb }
+    (Csr { row_offset, adj, wb }, new_id)
 }
 
 /// Reads the graph and returns `(node count, forward CSR, reverse CSR, new_id)`,
@@ -324,21 +372,17 @@ fn permute_csr(g: &Csr, order: &[u32], new_id: &[u32], workers: usize) -> Csr {
 fn load_graph(data: &[u8], threads: usize, mut phase: impl FnMut(&str)) -> (usize, Csr, Csr, Vec<u32>) {
     let (n, slices) = split_graph(data, threads);
     let original = build_csr(n, threads, slices.len(), data.len() / 16 / threads / threads + 16, |p| parse_edges(slices[p]));
+    release_memory();
     phase("forward CSR on the input ids");
-    let order = region_order(&original, threads);
-    let mut new_id = vec![0u32; n];
-    let named = Disjoint(new_id.as_mut_ptr());
-    par(threads, |w| {
-        let lo = n * w / threads;
-        for (i, &old) in order[lo..n * (w + 1) / threads].iter().enumerate() {
-            // SAFETY: `order` is a permutation, so no two workers write the same entry.
-            unsafe { named.put(old as usize, (lo + i) as u32) };
-        }
-    });
+    let runs = grow_regions(&original, threads);
+    let wb = original.wb;
+    drop(original);
+    release_memory();
     phase("locality order");
-    let fwd = permute_csr(&original, &order, &new_id, threads);
-    drop((original, order));
-    phase("permute");
+    let (fwd, new_id) = rename(wb, n, &runs);
+    drop(runs);
+    release_memory();
+    phase("rename");
     let rev = transpose(&fwd, threads);
     phase("reverse CSR");
     (n, fwd, rev, new_id)
