@@ -12,7 +12,7 @@ version of steps 1-8 (commit `db4cc76`) measured **0.475 s, 382 MiB, 736 lines,
 K 9.48, 48.85 points on the live board** (run `run-890f67017a83`) and about
 0.96 s, 384 MB on this laptop. The **Run ID** column stays *pending* for
 steps without their own board run, and **Points** is only filled from board
-numbers. Steps 9-13 have not been on the board yet. Everything that was tried,
+numbers. Steps 9-17 have not been on the board yet. Everything that was tried,
 including the failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 
 | Step | Change | Run ID | T (s), local | M (MB), local | Points |
@@ -31,6 +31,10 @@ including the failures, is in [`EXPERIMENTS.md`](../docs/EXPERIMENTS.md).
 | 11 | The serial BFS relabelling is replaced by a parallel region-growing order (workers race on a claimed byte per node and grow BFS regions of up to 1024 nodes); the reverse CSR is built from the renamed forward CSR instead of beside the BFS; the forward CSR is built with two parse passes and atomic row cursors | pending | harness replica on a loaded laptop 1.35 -> 0.89 together with steps 12-13 | 190 -> 181 | pending |
 | 12 | The per-side queue is a monotone radix heap instead of the 4-ary heap | pending | single-worker query phase 2100 -> about 1100 ms (native, same queries) | same | pending |
 | 13 | Edges are filed under their owner worker before the forward and reverse CSR builds, so counting and placing need no atomics | pending | native interleaved min of 8: forward CSR 153 -> 74 ms, total 589 -> 503 ms (reverse CSR 32 -> 45 ms) | same | pending |
+| 14 | Per-worker labels are pages of 16 ids from a pool (page table per worker) instead of an array over all nodes, which allows 12 query workers instead of 6; the reverse CSR is a transpose of the renamed forward CSR with atomic cursors instead of the bucket build | pending | docker interleaved 829 -> 595 ms (6 rounds, busy laptop) | 181 -> 123 | pending |
+| 15 | CSR edges take one 32-bit word (neighbour + weight; a weight that does not fit takes a second word) | pending | docker interleaved 693 -> 654 ms (9 rounds) | 125 -> 98 | pending |
+| 16 | Filed edges (the bucket build of the original-id CSR) are one `u64` each instead of 12 bytes | pending | neutral (native min of 7: 482 vs 465 ms) | 98 -> 86 | pending |
+| 17 | Rows are copied out while regions grow and renamed into the final array in parallel (no separate permutation pass); `malloc_trim` between build phases | pending | docker interleaved 668 -> 599 ms (9 rounds); native min of 8: order + permute 152 -> 116 ms | peak is now the query phase, about 92 | pending |
 
 Step 9 measured the board's way (5 runs, mean of the middle three, highest
 memory peak) on the same laptop: **0.867 s and 262 MB, against 0.964 s and
@@ -127,9 +131,36 @@ heap: single worker, 2000 queries, 7.6 M pops and 21 M relaxations, about
   60-75 ms for the placement pass because locked instructions serialise the
   cache misses; replaced by step 13.
 
+## Steps 14-17 in detail
+
+Same caveats as before: a shared, loaded laptop, so only interleaved A/B or
+min-of-N comparisons mean anything. The peak-memory story: before step 14 the
+peak was the query phase (two CSRs plus 6 x 14 MB label arrays) and, nearly
+as high, the reverse-CSR build (a second copy of every edge in buckets);
+step 14 removed both, step 15 halved the CSRs, step 16 shrank the buckets of
+the first build, and what is left (about 90 MB) is the query phase again: 54
+MB of CSRs plus the label pools of 12 workers, found by reading `VmHWM` at the
+end of each phase (it rose only during the queries).
+
+Harness replica (5 runs, mean of the middle three, highest peak) back to back
+on the loaded laptop: the state before step 14 gave **0.911 s, 181 MB** (batch
+flagged too noisy), the current state **0.651 s, 99 MB** (runs 0.67-0.71 s,
+peaks 91 MB except one batch run at 99 MB). The harness's source-line count
+went from 520 to 662, because the 4-byte edge encoding, the run/rename code and
+the paged labels are real code; that costs about 0.8 points of K against the
+time and memory gains.
+
+## Tried and dropped in steps 14-17
+
+* **Label page size** 8, 16, 32, 64 ids: no difference within noise
+  (native query phase 193-340 ms for all, minimum 191-211 ms).
+* **Hash labels** and **12 workers with array labels** are in the earlier
+  list; the paged pool is what made 12 workers affordable (queries about 20%
+  faster than with 6, the pool costs no measurable time at 6 workers).
+
 ## Caveats
 
-* Steps 9-13 have not run on the scoring box. Expect the board's T to differ.
+* Steps 9-17 have not run on the scoring box. Expect the board's T to differ.
 * The earlier "61x" figure from a synthetic random graph was wrong for the
   real road network and has been removed from this log.
 * Source size is the weak axis: the reference is 43 code lines.
