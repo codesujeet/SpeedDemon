@@ -67,6 +67,25 @@ fn delimiters(d: &[u8], at: usize) -> u64 {
     }
 }
 
+/// Whether the `len` (1 to 125) bytes at `a` and at `b` are equal, from four
+/// masked 32-byte compares, so that the cost does not depend on `len`.
+#[inline]
+fn same_name(d: &[u8], a: usize, b: usize, len: usize) -> bool {
+    use std::arch::x86_64::*;
+    assert!(a.max(b) + 128 <= d.len());
+    // SAFETY: the 128 bytes at `a` and at `b` are inside `d` (asserted); AVX2 is enabled for the build (target-cpu=x86-64-v3).
+    unsafe {
+        let mut diff = _mm256_setzero_si256();
+        let index = _mm256_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
+        for k in 0..4 {
+            let load = |at: usize| _mm256_loadu_si256(d.as_ptr().add(at + 32 * k) as *const __m256i);
+            let inside = _mm256_cmpgt_epi8(_mm256_set1_epi8((len as i32 - 32 * k as i32) as i8), index);
+            diff = _mm256_or_si256(diff, _mm256_and_si256(_mm256_xor_si256(load(a), load(b)), inside));
+        }
+        _mm256_testz_si256(diff, diff) != 0
+    }
+}
+
 /// (endpoint start, endpoint end, line feed) of the line at `ls`. The 27-byte
 /// timestamp is skipped; the next four delimiters (after the method, the
 /// endpoint, the status, and the line feed) are almost always in the first
@@ -168,7 +187,7 @@ impl Worker {
         let mut i = self.home(s, e);
         while self.table[i].len != 0 {
             let slot = self.table[i];
-            if slot.len as usize == e - s && d[slot.start..slot.start + slot.len as usize] == d[s..e] {
+            if slot.len as usize == e - s && same_name(d, slot.start, s, e - s) {
                 return slot.id;
             }
             i = (i + 1) & mask;
