@@ -70,6 +70,11 @@ cache (10 MB), plus stacks.
 * **Morsel size** (1 MiB, 2 MiB, 4 MiB with the step 9 parser): median 131,
   125 and 137 ms, peak 53, 45 and 44 MB. 2 MiB stays.
 
+* **Memory, steps 16-17** (12 CPUs, interleaved runs of 9, cgroup `memory.peak`; median / max): start of this work 33.0 / 33.3 MiB, now 23.3 / 24.1 MiB, CPU unchanged. The peak is now just after the scan: about 12.4 MiB of lines, 1.4 MiB of kernel memory, 2 MiB of tables and stores, then 12 threads allocating their hour buffers (about 0.4 MiB each) before their releases catch up. Pages shared by two hours' slices of one arena are not released (about 700 slices, 3 MiB).
+* **Dropped: writing each output block to disk and evicting it from the page cache** (`sync_file_range` + `posix_fadvise(DONTNEED)`): the output's 10 MiB of cache is gone at the end, but the peak is at the start of the output phase, so `memory.peak` only moved 24.6 -> 23.0 MiB; not kept.
+* **Dropped: 2 and 4 MiB chunks** (fewer, larger arena slices, so fewer unreleased shared pages): peak median 23.5 -> 22.9 MiB, CPU min 385 -> 408 ms; not kept.
+* **Phase 2 by sub-phase** (1 CPU, TSC cycles, best of 3): count 19 M, place 10 M, release 3 M, percentiles 54 M, format 27 M (about 45 ms of 235). The percentile sorts are half of it.
+
 ## Where the unit tests live
 
 The unit tests are in `tests/track_a.rs` at the repository root, included
