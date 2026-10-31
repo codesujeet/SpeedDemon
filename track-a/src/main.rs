@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::{mpsc, Barrier, OnceLock};
 
 /// A stored line is `endpoint << 21 | error << 20 | latency`; a latency that does not fit 20 bits is stored as
@@ -52,6 +52,7 @@ fn map_file(path: &str) -> std::io::Result<&'static [u8]> {
     if p as isize == -1 {
         return Err(std::io::Error::last_os_error());
     }
+    MAPPED.store(true, Relaxed);
     // SAFETY: `p` points to `len` readable bytes that stay mapped for the life of the process.
     Ok(unsafe { std::slice::from_raw_parts(p, len) })
 }
@@ -365,17 +366,9 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
     }
     // The hour's lines are in `lat` now: give the pages of the arenas that hold only this hour back to the system, so
     // the output written so far is paid for by the input freed (the lines are most of the process's memory).
-    #[cfg(unix)]
     for part in parts {
-        extern "C" {
-            fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
-        }
-        let (from, to) = (part.as_ptr() as usize, part.as_ptr() as usize + 4 * part.len());
-        let (from, to) = ((from + 4095) & !4095, to & !4095);
-        if to > from {
-            // SAFETY: whole pages inside this hour's slice of an arena; only this hour reads them, and 4 is MADV_DONTNEED.
-            unsafe { madvise(from as *mut u8, to - from, 4) };
-        }
+        // SAFETY: whole pages inside this hour's slice of an arena; only this hour reads them.
+        unsafe { drop_pages(part.as_ptr() as usize, part.as_ptr() as usize + 4 * part.len()) };
     }
     let mut out = Vec::with_capacity(lines * 3 + 4096);
     let mut buf = [0u8; 20];
@@ -400,6 +393,26 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
     out
 }
 
+/// Whether the input is a file mapping (set by `map_file`), whose pages `scan`'s caller may drop.
+static MAPPED: AtomicBool = AtomicBool::new(false);
+
+/// Gives the whole pages between the addresses `from` and `to` back to the system (`MADV_DONTNEED`). An arena loses its
+/// contents; the mapped input only its page table entries (a page is read again from the page cache if it is used),
+/// which the exit would otherwise take apart on one core (58,000 pages; each worker drops a twelfth of them once its scan is done).
+#[cfg(unix)]
+unsafe fn drop_pages(from: usize, to: usize) {
+    extern "C" {
+        fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    }
+    let (from, to) = ((from + 4095) & !4095, to & !4095);
+    if to > from {
+        madvise(from as *mut u8, to - from, 4);
+    }
+}
+
+#[cfg(not(unix))]
+unsafe fn drop_pages(_: usize, _: usize) {}
+
 /// Scans `d` with `threads` workers taking `chunk`-byte chunks, then formats every hour in parallel and writes
 /// the blocks to `sink` in hour order, each as soon as it and all earlier hours are done. `d` must be followed by
 /// `PAD` readable bytes.
@@ -423,6 +436,10 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
                         break;
                     }
                     worker.scan(snap(from), snap(from + chunk), names);
+                }
+                if MAPPED.load(Relaxed) {
+                    // SAFETY: inside the mapping, and a page dropped is mapped again if it is read.
+                    unsafe { drop_pages(d.as_ptr() as usize + t * n / threads, d.as_ptr() as usize + (t + 1) * n / threads) };
                 }
                 parts[t].set(worker.part).ok();
                 barrier.wait();
