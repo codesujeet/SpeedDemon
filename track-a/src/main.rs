@@ -396,6 +396,9 @@ fn format_hour(plan: &Plan, hour: usize, sc: &mut Scratch) -> Vec<u8> {
 /// Whether the input is a file mapping (set by `map_file`), whose pages `scan`'s caller may drop.
 static MAPPED: AtomicBool = AtomicBool::new(false);
 
+/// Whether `process` ends the process as soon as the last block is written (set by `main`; the tests need `process` to return).
+static EXIT_WHEN_DONE: AtomicBool = AtomicBool::new(false);
+
 /// Gives the whole pages between the addresses `from` and `to` back to the system (`MADV_DONTNEED`). An arena loses its
 /// contents; the mapped input only its page table entries (a page is read again from the page cache if it is used),
 /// which the exit would otherwise take apart on one core (58,000 pages; each worker drops a twelfth of them once its scan is done).
@@ -465,6 +468,10 @@ fn process(d: &'static [u8], threads: usize, chunk: usize, sink: &mut impl Write
             while let Some(block) = waiting.get_mut(written).and_then(Option::take) {
                 sink.write_all(&block)?;
                 written += 1;
+                if EXIT_WHEN_DONE.load(Relaxed) && written == plan.get().map_or(0, |p| p.hours.len()) {
+                    // The output is complete: leave without joining the workers (their stacks and buffers would be unmapped).
+                    std::process::exit(0);
+                }
             }
         }
         Ok(())
@@ -475,6 +482,7 @@ fn main() {
     let input_path = std::env::var("INPUT_PATH").unwrap_or_else(|_| "/data/requests.log".to_string());
     let output_path = std::env::var("OUTPUT_PATH").unwrap_or_else(|_| "/out/summary.txt".to_string());
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    EXIT_WHEN_DONE.store(true, Relaxed);
     if let Err(e) = run(&input_path, &output_path, threads) {
         eprintln!("track-a: failed reading {input_path} or writing {output_path}: {e}");
         std::process::exit(1);
