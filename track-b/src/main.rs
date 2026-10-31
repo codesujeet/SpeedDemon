@@ -160,9 +160,11 @@ fn load8(text: &[u8], at: usize) -> u64 {
 
 /// Key of the token `text[s..e]`: its first 8 bytes (zero-padded), its last
 /// 8 bytes (0 when it fits in the first) and its length, case-folded, which
-/// pins down any token of up to 16 bytes exactly. Length 0 for a token too
-/// long to match any term. Branch-free for the lengths that vary (token
-/// lengths are unpredictable, so every branch on them costs a mispredict).
+/// pins down any token of up to 16 bytes exactly. The length goes in the
+/// last word too, one bit per byte in the top bit that ASCII leaves free
+/// (so the table compares two words). Length 0 for a token too long to
+/// match any term. Branch-free for the lengths that vary (token lengths are
+/// unpredictable, so every branch on them costs a mispredict).
 #[inline(always)]
 fn key(text: &[u8], s: usize, e: usize) -> (u64, u64, u32) {
     const LOW: u64 = 0x2020_2020_2020_2020;
@@ -172,7 +174,9 @@ fn key(text: &[u8], s: usize, e: usize) -> (u64, u64, u32) {
     }
     let head = (load8(text, s) | LOW) & (!0u64 >> (64 - 8 * len.min(8)));
     let tail = (load8(text, e.saturating_sub(8)) | LOW) & 0u64.wrapping_sub((len > 8) as u64);
-    (head, tail, len as u32)
+    // SAFETY: the build targets x86-64-v3 (.cargo/config.toml), which has BMI2.
+    let size = unsafe { std::arch::x86_64::_pdep_u64(len as u64, 0x8080_8080_8080_8080) };
+    (head, tail | size, len as u32)
 }
 
 /// Term -> dense id, for the corpus scan, which looks up every one of the
@@ -180,31 +184,41 @@ fn key(text: &[u8], s: usize, e: usize) -> (u64, u64, u32) {
 /// lookup here: control bytes, then the bucket, then the key bytes behind
 /// the slice pointer - three dependent memory accesses. This is a bucketed
 /// hash table with the key inline: one 64-byte bucket holds three entries
-/// and is compared with no branches, so a lookup is one hash, one cache
-/// line and no mispredict in the common case. Only tokens longer than 16
-/// bytes compare against the stored term bytes, and a full bucket spills to
-/// the next one.
+/// and is compared with two vector compares, so a lookup is one hash, one
+/// cache line and no mispredict in the common case. Only tokens longer than
+/// 16 bytes compare against the stored term bytes, and a full bucket spills
+/// to the next one.
 struct TermTable<'a> {
     buckets: Vec<Bucket>,
     terms: Vec<&'a [u8]>,
 }
 
-/// Three entries: key halves, and `len << 26 | id` (0 = empty; every term
-/// has at least 1 byte).
-#[derive(Clone, Copy, Default)]
+/// Three entries: the two key words of each (the first word is 0 for an
+/// empty entry; every term has at least 1 byte) and their ids.
+#[derive(Clone, Copy)]
 #[repr(align(64))]
 struct Bucket {
-    head: [u64; 3],
-    tail: [u64; 3],
-    meta: [u32; 3],
+    key: [[u64; 2]; 3],
+    id: [u32; 4],
 }
 
-const ID_BITS: u32 = 26;
+impl Default for Bucket {
+    /// Empty; the spare slot (what a miss reads) is an id no term has.
+    fn default() -> Self {
+        Bucket {
+            key: [[0; 2]; 3],
+            id: [0, 0, 0, u32::MAX],
+        }
+    }
+}
 
 #[inline(always)]
-fn bucket_hash(k: (u64, u64, u32)) -> u64 {
-    let h = (k.0 ^ (k.2 as u64).rotate_left(48)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    (h ^ k.1.rotate_left(29)).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+fn bucket_hash(k: (u64, u64, u32)) -> usize {
+    // SAFETY: the build targets x86-64-v3 (.cargo/config.toml), which has SSE4.2.
+    unsafe {
+        use std::arch::x86_64::_mm_crc32_u64;
+        _mm_crc32_u64(_mm_crc32_u64(0, k.0), k.1) as usize
+    }
 }
 
 impl<'a> TermTable<'a> {
@@ -220,7 +234,7 @@ impl<'a> TermTable<'a> {
 
     #[inline(always)]
     fn home(&self, k: (u64, u64, u32)) -> usize {
-        (bucket_hash(k) >> (64 - self.buckets.len().trailing_zeros())) as usize
+        bucket_hash(k) & (self.buckets.len() - 1)
     }
 
     /// Stores `k -> id` in the first free entry from its home bucket on.
@@ -229,39 +243,30 @@ impl<'a> TermTable<'a> {
         let mut i = self.home(k);
         loop {
             let b = &mut self.buckets[i];
-            if let Some(j) = b.meta.iter().position(|&m| m == 0) {
-                (b.head[j], b.tail[j], b.meta[j]) = (k.0, k.1, k.2 << ID_BITS | id);
+            if let Some(j) = b.key.iter().position(|e| e[0] == 0) {
+                (b.key[j], b.id[j]) = ([k.0, k.1], id);
                 return;
             }
             i = (i + 1) & mask;
         }
     }
 
-    /// The id of the term `term` (1..=32 bytes, lowercase), adding it if
-    /// new. Any other length gets an id nothing in the corpus maps to.
-    #[cfg(test)]
-    fn intern(&mut self, term: &'a [u8]) -> u32 {
-        self.intern_at(term, 0, term.len())
-    }
-
-    /// [`Self::intern`] for the term `text[s..e]`.
+    /// The id of the term `text[s..e]` (1..=32 bytes, lowercase), adding it
+    /// if new. Any other length gets an id nothing in the corpus maps to.
     fn intern_at(&mut self, text: &'a [u8], s: usize, e: usize) -> u32 {
         let k = key(text, s, e);
         let id = self.terms.len() as u32;
         if k.2 != 0 {
             let found = self.get(k, self.home(k), text, s);
-            if found != self.none() {
+            if found < id {
                 return found;
             }
             if id as usize >= self.buckets.len() * 2 {
                 let bigger = vec![Bucket::default(); self.buckets.len() * 2];
                 let old = std::mem::replace(&mut self.buckets, bigger);
                 for b in &old {
-                    for j in (0..3).filter(|&j| b.meta[j] != 0) {
-                        self.place(
-                            (b.head[j], b.tail[j], b.meta[j] >> ID_BITS),
-                            b.meta[j] & ((1 << ID_BITS) - 1),
-                        );
+                    for j in (0..3).filter(|&j| b.key[j][0] != 0) {
+                        self.place((b.key[j][0], b.key[j][1], 0), b.id[j]);
                     }
                 }
             }
@@ -281,20 +286,37 @@ impl<'a> TermTable<'a> {
     /// id. `text` is only read (case-folded) when `len > 16`.
     #[inline(always)]
     fn get(&self, k: (u64, u64, u32), home: usize, text: &[u8], s: usize) -> u32 {
+        use std::arch::x86_64::*;
         let b = &self.buckets[home];
-        let (mut id, mut hit) = (0u32, 0u32);
-        for j in 0..3 {
-            let m =
-                ((b.head[j] == k.0) & (b.tail[j] == k.1) & (b.meta[j] >> ID_BITS == k.2)) as u32;
-            id |= (b.meta[j] & ((1 << ID_BITS) - 1)) & m.wrapping_neg();
-            hit |= m;
-        }
+        // SAFETY: the build targets x86-64-v3 (.cargo/config.toml), so AVX2 is
+        // available; `b.key` is 48 bytes, read as 32 + 16.
+        let eq = unsafe {
+            let kk = _mm_set_epi64x(k.1 as i64, k.0 as i64);
+            let e01 = _mm256_cmpeq_epi64(
+                _mm256_loadu_si256(b.key.as_ptr() as *const __m256i),
+                _mm256_broadcastsi128_si256(kk),
+            );
+            let e2 = _mm_cmpeq_epi64(_mm_loadu_si128(b.key[2].as_ptr() as *const __m128i), kk);
+            (_mm256_movemask_pd(_mm256_castsi256_pd(e01)) | _mm_movemask_pd(_mm_castsi128_pd(e2)) << 4)
+                as u32
+        };
+        // Entry `j` is a hit when both its words matched: bits 2j and 2j + 1.
+        let hit = eq & eq >> 1 & 0b01_0101;
         // Common case: a short token that hit, or missed a bucket with room.
         // The one branch is almost never taken, so it predicts well.
-        if (k.2 > 16) | (k.2 == 0) | ((hit == 0) & (b.meta[2] != 0)) {
+        if (k.2 > 16) | (k.2 == 0) | ((hit == 0) & (b.key[2][0] != 0)) {
             return self.get_slow(k, text, s);
         }
-        id | (self.none() & hit.wrapping_sub(1))
+        // No branch (whether a token is a query term is unpredictable): a
+        // miss indexes the fourth slot, which `seal` filled with the sink id.
+        b.id[((hit | 0b100_0000).trailing_zeros() >> 1) as usize]
+    }
+
+    /// Ends the interning: every bucket's spare slot becomes the sink id,
+    /// which [`Self::get`] reads on a miss.
+    fn seal(&mut self) {
+        let none = self.none();
+        self.buckets.iter_mut().for_each(|b| b.id[3] = none);
     }
 
     #[cold]
@@ -307,20 +329,17 @@ impl<'a> TermTable<'a> {
         loop {
             let b = &self.buckets[i];
             for j in 0..3 {
-                let id = b.meta[j] & ((1 << ID_BITS) - 1);
-                if b.meta[j] == 0 {
+                if b.key[j][0] == 0 {
                     return self.none();
                 }
-                if b.head[j] == k.0
-                    && b.tail[j] == k.1
-                    && b.meta[j] >> ID_BITS == k.2
+                if b.key[j] == [k.0, k.1]
                     && (k.2 <= 16
-                        || self.terms[id as usize]
+                        || self.terms[b.id[j] as usize]
                             .iter()
                             .zip(&text[s..])
                             .all(|(&a, &b)| a == b | 0x20))
                 {
-                    return id;
+                    return b.id[j];
                 }
             }
             i = (i + 1) & mask;
@@ -380,6 +399,7 @@ fn parse_queries(data: &[u8]) -> (Queries, TermTable<'_>) {
         true
     });
     qs.start.push(qs.entries.len() as u32);
+    table.seal();
     (qs, table)
 }
 
@@ -461,24 +481,28 @@ impl Piece {
 
     /// Looks up the current document's tokens and records its distinct terms.
     fn flush(&mut self, table: &TermTable, text: &[u8]) {
-        let from = self.ids.len();
-        self.ids.extend(
-            self.keys
-                .iter()
-                .map(|&(k, s, h)| table.get(k, h as usize, text, s as usize)),
-        );
-        let mut u = self.uniq.len();
-        self.uniq.resize(u + self.keys.len(), 0);
-        self.stamp += 1;
-        for &id in &self.ids[from..] {
-            let [last, n] = self.seen[id as usize];
-            self.seen[id as usize] = [self.stamp, n + (last != self.stamp) as u32];
-            let new = last != self.stamp;
-            self.uniq[u] = id;
+        let Piece {
+            ids,
+            uniq,
+            seen,
+            keys,
+            stamp,
+            ..
+        } = self;
+        *stamp += 1;
+        let mut u = uniq.len();
+        uniq.resize(u + keys.len(), 0);
+        ids.extend(keys.iter().map(|&(k, s, h)| {
+            let id = table.get(k, h as usize, text, s as usize);
+            let [last, n] = seen[id as usize];
+            let new = last != *stamp;
+            seen[id as usize] = [*stamp, n + new as u32];
+            uniq[u] = id;
             u += new as usize;
-        }
-        self.uniq.truncate(u);
-        self.keys.clear();
+            id
+        }));
+        uniq.truncate(u);
+        keys.clear();
     }
 
     /// Tokenizes the whole documents at the front of `text` (at most

@@ -3,6 +3,13 @@
 
 use super::*;
 
+impl<'a> TermTable<'a> {
+    /// The id of the whole of `term`, adding it if new.
+    fn intern(&mut self, term: &'a [u8]) -> u32 {
+        self.intern_at(term, 0, term.len())
+    }
+}
+
 fn tokens(text: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     scan_tokens(text, |s, e| {
@@ -42,6 +49,7 @@ fn term_table_matches_a_hash_map() {
         7,
         "interning a known term returns its id"
     );
+    table.seal();
     let map: std::collections::HashMap<&[u8], u32> = refs
         .iter()
         .enumerate()
