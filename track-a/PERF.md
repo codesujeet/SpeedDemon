@@ -28,6 +28,7 @@ that was tried, including the failures, is in
 | 8 | The morsel's lines are placed by a counting sort over a dense (hour slot x endpoint) table instead of a comparison sort | pending | 0.181 -> 0.160 (11 rounds) | 47 | pending |
 | 9 | Line parsing uses the spec's fixed layout: a 27-byte timestamp and a 3-digit status are sliced by offset, so three delimiter scans per line instead of five (the parser no longer tolerates blank or malformed lines, which the spec rules out) | pending | 0.155 -> 0.130 (13 rounds) | 46 | pending |
 | 10 | One 64-byte AVX2 window per line finds the method, endpoint, status and line-feed delimiters at once (byte-wise path kept for lines near the end of the data), replacing three byte-wise scans | pending | 0.155 -> 0.134 (15 interleaved rounds) | 45 | pending |
+| 11 | No per-morsel results and no merge across morsels. Each worker appends one packed `u64` per line (endpoint number, error flag, latency) to its own list for the line's hour, with a worker-lifetime endpoint table backed by one shared table of numbers; after the scan each hour is counted per endpoint, placed in one run per endpoint, and visited in endpoint-byte order (sorted once). Latency parsed with SWAR, hour found by comparing 13 timestamp bytes, per-hour lists start with room for 8192 lines, the process skips freeing them | pending | 1 CPU (`--cpuset-cpus=2`): 0.42-0.57 -> 0.28 s wall/CPU (3 interleaved runs); 12 threads: no clear change on this loaded laptop (A/B medians 188 -> 185 ms, harness replica 0.132 -> 0.152 s, within the +-20% noise of four agents sharing the machine) | 46 -> 45 | pending |
 
 Steps 6-9 together, measured the way the board measures (5 runs, mean of the
 middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
@@ -36,11 +37,11 @@ middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
 
 ## What the time is now
 
-Full data, 3.1 M lines, 239 MB (Linux container, 12 threads, local): the
-parallel scan (parse, counting sort) is the larger part, about 75 ms in the
-run where the whole program took 120-130 ms; merge, format and write is about
-30 ms. Peak memory is 45-47 MB: about 12 MB of latencies, 6 MB of group
-records, 3 MB of per-morsel endpoint tables, and the output file's page cache.
+Full data, 3.1 M lines, 239 MB (Linux container, local): on one core the whole
+program takes about 0.28 s (scan about 0.2 s, about 58 ns per line; count,
+select and format about 0.06 s). Peak memory is 44-47 MB: about 25 MB of
+packed lines (8 bytes each), the endpoint tables and the output file's page
+cache (10 MB), plus stacks.
 
 ## Tried and dropped
 
@@ -85,3 +86,6 @@ lines from 607 to 434.
   more than 2,048 distinct hours stops with an error message.
 * Source size is the weak axis: the reference is 56 code lines and this is
   about 600. Every optimisation above had to be worth its lines.
+
+* **Step 11 follow-ups that did nothing measurable.** `madvise(MADV_POPULATE_READ)` on every morsel before the scan (11 interleaved rounds: 115 vs 111 ms median, noise; removed to save source lines). Thread count and morsel size sweeps (5 interleaved rounds, 12 threads vs 8 vs 6; 256 KiB vs 1 MiB vs 4 MiB): medians 131/118/106 ms for 12/8/6 threads, but the machine was shared with other builds, so no setting was adopted; morsel size showed no trend. A bare 12-thread pass over the whole mapped input (touching every page, or summing every 8 bytes) takes 4 and 7-10 ms, so the input mapping is not the bottleneck: the scan is compute-bound at about 58 ns per line on one core.
+* **Local measurement caveat for step 11.** With other agents building and benchmarking on the same laptop, the 12-thread wall time cannot resolve a 1.5x change in work (CPU time with 12 threads was 0.9 s user + 0.3-0.7 s sys for the old design, 0.5 s + 0.25 s for the new one, but wall time did not follow). Pinning to one core (`--cpuset-cpus=2`) removes the scheduling noise and shows the real work: 0.42-0.57 s against 0.28 s.

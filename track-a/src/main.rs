@@ -209,7 +209,7 @@ impl Worker {
             if key != self.cur_key {
                 self.cur_key = key;
                 self.cur = self.hours.iter().position(|h| h.0 == key).unwrap_or_else(|| {
-                    self.hours.push((key, Vec::new()));
+                    self.hours.push((key, Vec::with_capacity(8192)));
                     self.hours.len() - 1
                 });
             }
@@ -402,6 +402,8 @@ fn run(input_path: &str, output_path: &str, threads: usize) -> std::io::Result<(
     lap("scan (parallel)");
     let mut file = std::fs::File::create(output_path)?;
     write_hours(&workers, &names, threads.max(1), &mut file)?;
+    // The process exits next; skip freeing the per-hour lists one by one.
+    std::mem::forget(workers);
     lap("count, select, format and write");
     Ok(())
 }

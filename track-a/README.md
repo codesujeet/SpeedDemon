@@ -5,39 +5,40 @@ The task, the input files and the exact output format are in the [spec](https://
 ## Approach
 
 The input is mapped read-only, so nothing is copied and the pages the host
-already cached cost no memory. Twelve workers pull 2 MiB morsels from an
+already cached cost no memory. Twelve workers pull 1 MiB morsels from an
 atomic cursor; each morsel start is snapped forward to the next line, so
-neighbours agree on the split without talking.
+neighbours agree on the split without talking. The last few hundred bytes are
+scanned from a zero-padded copy so the 64-byte vector loads stay inside the data.
 
-A worker turns a morsel into a small, cache-sized array of packed `u64`
-values. The spec fixes the line layout, so the 27-byte timestamp and the
-3-digit status are read by offset and only the method, endpoint and latency
-need a delimiter scan. Each line becomes one value holding its hour slot
-(which of the few hours the morsel touches), its endpoint number (looked up
-in a small per-morsel table), an error flag and its latency. A counting sort
-over (hour slot, endpoint) then places the latencies of each group in one
-run, and the morsel keeps just those runs and a short list of groups. There
-is no large hash map and no per-group vector.
+The spec fixes the line layout, so the 27-byte timestamp and the 3-digit
+status are read by offset and only the method, endpoint and latency need a
+delimiter scan (one 64-byte AVX2 window finds the four delimiters of almost
+every line). Each line becomes one packed `u64` (endpoint number, error flag,
+latency, parsed with SWAR) that is appended to the worker's own list for the
+line's hour, found by comparing the 13 timestamp bytes `YYYY-MM-DDTHH`. A
+worker keeps one endpoint table for the whole run (open addressing, names
+compared byte for byte, so collisions are always resolved); the first time it
+meets a name it asks one shared table for the name's number.
 
-The log is close to time order, so a given (hour, endpoint) appears in only
-a couple of morsels. The final phase takes one hour at a time: it collects
-that hour's groups from the morsels that touch it, orders them by endpoint
-bytes (after the hour, exactly the output order), merges equal endpoints into
-one reused latency buffer, picks the exact nearest-rank p50, p95 and p99 with
-`select_nth_unstable`, and formats the lines. Hours are written to the output
-in order as soon as they and all earlier hours are done, so the output is
-never held in memory in full.
+After the scan, workers take one hour at a time. Only that hour's lists (one
+per worker) are read: lines are counted per endpoint number, the latencies are
+placed in one run per endpoint, and the endpoints are visited in order of their
+bytes (sorted once, about 1,800 names), so nothing is sorted or merged per
+hour. p50, p95 and p99 come from `select_nth_unstable` on each run (largest
+rank first, the others inside what remains below it). Blocks are written to the
+file in hour order as soon as they and all earlier hours are done.
 
 Tests (spec worked example, empty input, rank edge cases, morsel boundaries,
-single vs multi thread) are in `tests/track_a.rs` at the repository root, compiled into the
-test build only (`cargo test` in this folder runs them).
+more endpoints than the first table holds, against a plain reference
+implementation) are in `tests/track_a.rs` at the repository root, compiled into
+the test build only (`cargo test` in this folder runs them).
 
 ## Assumptions
 
-The parser relies on what the spec guarantees: every line is well formed, the
-timestamp is 27 bytes, the status is three digits, and a run covers 72 hours
-and about 1,800 endpoints. The packed format holds up to 2,048 hours and about
-a million endpoints per morsel and stops with an error message beyond that.
+The parser relies on what the spec guarantees: every line is well formed and
+ends with a line feed, the timestamp is 27 bytes, the status is three digits,
+and the latency has at most 10 digits. Hours are kept by their timestamp text,
+so any number of hours and endpoints works.
 
 ## Dependencies
 
@@ -45,9 +46,7 @@ None.
 
 ## With another 24 hours
 
-The scan is still the larger phase. I would look at replacing the per-field
-delimiter scan with one pass that finds all the spaces of a line at once, and
-at the memory that is left: the latencies themselves (12 MB), the group
-records (6 MB) and the output file's page cache. Cheaper ideas, interning the
-endpoints under the old design and parsing in batches before touching a map,
-were measured and gave nothing (see `PERF.md`).
+Memory is now mostly the packed lines (25 MB) and the output file's page
+cache; 6-byte lines or 2-byte latencies with an escape would shrink the first.
+The scan itself would gain from finding all delimiters of a whole 64-byte
+block at once instead of line by line.
