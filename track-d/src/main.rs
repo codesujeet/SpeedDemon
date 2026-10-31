@@ -231,9 +231,13 @@ fn load_graph(data: &[u8], threads: usize, mut phase: impl FnMut(&str)) -> (usiz
     phase("forward CSR on the input ids");
     let order = region_order(&original, threads);
     let mut new_id = vec![0u32; n];
-    for (i, &old) in order.iter().enumerate() {
-        new_id[old as usize] = i as u32;
-    }
+    let named = Disjoint(new_id.as_mut_ptr());
+    par(threads, |w| {
+        for i in n * w / threads..n * (w + 1) / threads {
+            // SAFETY: `order` is a permutation, so no two workers write the same entry.
+            unsafe { named.put(order[i] as usize, i as u32) };
+        }
+    });
     phase("locality order");
     let fwd = permute_csr(&original, &order, &new_id, threads);
     drop((original, order));
@@ -483,6 +487,7 @@ fn run(graph_path: &str, queries_path: &str, output_path: &str, threads: usize) 
         .into_iter()
         .map(|(s, t)| (new_id[s as usize], new_id[t as usize]))
         .collect();
+    drop(new_id);
     phase("parse queries");
 
     // One worker per physical core: the two hardware threads of a core share its
