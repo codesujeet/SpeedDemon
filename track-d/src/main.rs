@@ -28,7 +28,7 @@ extern "C" {
 }
 
 const INF: u64 = u64::MAX;
-const BLOB: usize = 512; // nodes per locality blob
+const BLOB: usize = 1024; // nodes per locality blob
 const PART_BITS: u32 = 14; // nodes per part: 2^14, so offsets fit 16 bits
 const PAGE: usize = 256; // distances per page
 
