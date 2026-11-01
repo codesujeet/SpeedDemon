@@ -31,3 +31,18 @@ NickTrapp 18 ms / 13 MB / 303 lines vs ours 29 ms / 9 MB / 400: time is 5.2 pts 
 - Differential fuzz against an independent Python oracle written from spec 2.1 (300 random hostile files: mixed CRLF/LF terminators, mid-file BOMs, quoted LFs, escaped quotes, 0-6 trailing spaces, amounts from `0.00` to `99999.99`, negatives, regions inside, missing from and above the table; every third case with CRLF regions): base 300/300, final build 300/300, the first version of the line cut 200/300 (every CRLF-regions case crashed).
 - Thread count forced to 1, 2, 3, 5, 7 and 12: the real-data hash `d8088b1c...` every time.
 - Assumptions that remain, all from the spec: names and notes are printable ASCII (the top bit of a name key is a flag); the name table is keyed by a 64-bit hash (collision odds around 5e-5 per run per PERF.md; a byte-comparing table was rejected for its cost); a record starts after every CRLF (no CR inside quotes, spec 2.2); `MADV_POPULATE_READ` needs Linux 5.14 and is simply ignored by `madvise` on an older kernel.
+
+## Ablation of C's per-record components (callgrind, full data, base `cloud-c-lines`: 1,115 M instructions)
+Each copy deletes one component (output wrong, instruction count only); several deletions let the compiler also drop the work that fed them, so the numbers are upper bounds on what each piece could ever save.
+
+| Component deleted | Instructions | Saved |
+|---|---|---|
+| none (base) | 1,115.4 M | |
+| totals bookkeeping (7 field updates per record; also frees the money, id and length work that only fed it) | 749.1 M | 366 M (33%) |
+| distinct logic (name-table probe + bit mark + prefetch) | 948.5 M | 167 M (15%) |
+| money parse | 1,003.6 M | 112 M (10%) |
+| id decode | 1,053.8 M | 62 M (5.5%) |
+| region decode | 1,058.4 M | 57 M (5.1%) |
+| name hash | 1,073.2 M | 42 M (3.8%) |
+
+Conclusion: no single piece is above about 17% of the work once its feeders are separated out (pure totals updates are about 57 instructions per record, distinct about 50), and each is already near its floor. Reaching the leaders' C (about 30% less time) would need a different algorithm for all of them at once, not a better version of one. Packing `name_bytes` and `note_bytes` into one add would save about 3 instructions per record (1%).
