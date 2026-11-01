@@ -74,32 +74,27 @@ u32 match32(const char* p, char c) {
 }
 
 
-// The value of the last n (1 to 8) of the eight digit bytes in v (the first
-// byte is the lowest): reduced to digit values, the bytes before them masked
-// to leading zeros, then folded in pairs, quads and halves.
-u64 fold(u64 v, size_t n) {
+// Two numbers, each from the eight bytes that end where it does (the first
+// byte is the lowest), reduced to digit values with the bytes before it masked
+// to leading zeros, then folded in pairs, quads and halves: lane 0 the 1 to 8
+// digits [s0, e0), lane 1 an amount [s1, e1) in cents, whose dot (third from
+// the end, at most 99999.99) is given weight 0.
+std::pair<u32, u32> fold(const char* s0, const char* e0, const char* s1, const char* e1) {
     static constexpr auto KEEP = [] {
         std::array<u64, 9> a{};
         for (int k = 1; k <= 8; ++k) a[k] = 0x0F0F0F0F0F0F0F0F & ~u64(0) << 8 * (8 - k);
         return a;
     }();
-    __m128i x = _mm_and_si128(_mm_cvtsi64_si128(v), _mm_cvtsi64_si128(KEEP[n]));
-    x = _mm_maddubs_epi16(x, _mm_set1_epi16(0x010A));
+    __m128i x = _mm_and_si128(_mm_set_epi64x(load8(e1 - 8), load8(e0 - 8)), _mm_set_epi64x(KEEP[e1 - s1], KEEP[e0 - s0]));
+    x = _mm_maddubs_epi16(x, _mm_setr_epi16(0x010A, 0x010A, 0x010A, 0x010A, 0x010A, 0x010A, 1, 0x010A));
     x = _mm_madd_epi16(x, _mm_set1_epi32(0x00010064));
     x = _mm_packus_epi32(x, x);
-    return _mm_cvtsi128_si32(_mm_madd_epi16(x, _mm_set1_epi32(0x00012710)));
+    x = _mm_madd_epi16(x, _mm_setr_epi16(10000, 1, 1000, 1, 0, 0, 0, 0));
+    return {_mm_cvtsi128_si32(x), _mm_extract_epi32(x, 1)};
 }
 
 // The value of the 1 to 8 decimal digits in [s, e).
-u64 digits(const char* s, const char* e) { return fold(load8(e - 8), e - s); }
-
-// An amount's value in cents, from its digits [s, e) with the dot third from
-// the end: at most 7 digits (99999.99), so the eight bytes ending at e, with
-// the dot's byte dropped, are one number.
-u64 money(const char* s, const char* e) {
-    u64 w = load8(e - 8);
-    return fold(_pext_u64(w, 0xFFFF00FFFFFFFFFF) << 8, e - s - 1);
-}
+u64 digits(const char* s, const char* e) { return fold(s, e, e, e).first; }
 
 // The first c at or after p (one is known to follow). 64 bytes at a time:
 // a note is often longer than 32, and the loop's exit is then predictable.
@@ -174,7 +169,7 @@ public:
             if (len - i < 8) w &= (u64(1) << 8 * (len - i)) - 1;
             h = (h ^ w) * 0x94D049BB133111EBull;
         }
-        return (h ^ h >> 31) * 0xD6E8FEB86659FD93ull | 1;  // 0 marks a free slot
+        return h | 1;  // 0 marks a free slot
     }
 
     void prefetch(u64 k) const { _mm_prefetch((const char*)&slots_[k >> (64 - BITS)], _MM_HINT_T0); }
@@ -241,7 +236,7 @@ struct NamesSeen {
 constexpr u32 SPARE = 255;
 
 void parse_records(const char* p, const char* end, const char* file_end, const u8* country_of,
-                   size_t regions, NameTable& names, NamesSeen& seen, Totals* totals) {
+                   size_t regions, NameTable names, NamesSeen seen, Totals* totals) {
     constexpr u32 LAG = 16;
     struct Pending {
         u64 name;
@@ -287,15 +282,13 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         // LF, if any.
         u32 lf = match32(p, '\n');
         const char* f4 = p + __builtin_ctz(match32(p, ','));
-        u64 region = digits(p, f4);
-        const char* amount = f4 + 1;
         const char* eol = lf ? p + __builtin_ctz(lf) : file_end;
-        const char* amount_end = eol - (eol[-1] == '\r');
-        i64 negative = *amount == '-';
-        i64 cents = (i64(money(amount + negative, amount_end)) ^ -negative) + negative;
+        i64 negative = f4[1] == '-';
+        auto [region, money] = fold(p, f4, f4 + 1 + negative, eol - (eol[-1] == '\r'));
+        i64 cents = (i64(money) ^ -negative) + negative;
 
         // Region ids are below 10^7 (fit u32); the table's spare row is past the last.
-        u32 r = std::min(region, u64(regions));
+        u32 r = std::min(u64(region), u64(regions));
         _mm_prefetch((const char*)(country_of + r), _MM_HINT_T0);
         u64 key = NameTable::key(name.at, name.raw);
         advance({key, r, u32(id), name.length, note.length, cents});
