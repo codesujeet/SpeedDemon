@@ -151,7 +151,7 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
-unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
+unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u32) -> *const u8 {
     const LAG: usize = 4;
     let mut ring = [0u64; LAG];
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
@@ -323,7 +323,7 @@ fn line(out: &mut String, docs: &Docs) {
     out.push('\n');
 }
 
-fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32, &[u32])) -> u32 {
+fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u32, mut f: impl FnMut(u32, &[u32])) -> u32 {
     let (mut p, end) = (s.as_ptr(), s.as_ptr_range().end);
     let (mut doc, mut ids) = (first, Vec::with_capacity(1 << 12));
     while p < end {
@@ -393,10 +393,10 @@ fn main() {
             ids[from as usize..to as usize].iter().for_each(|&id| in_bool[id as usize] = true);
         }
         let samples = on_threads(|t| {
-            let (mut df, mut last) = (vec![0u32; nterms + 1], vec![0u16; nterms + 1]);
+            let (mut df, mut last) = (vec![0u32; nterms + 1], vec![0u32; nterms + 1]);
             let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 64];
             let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
-                let mark = (doc + 1) as u16;
+                let mark = doc + 1;
                 for &id in toks {
                     if std::mem::replace(&mut last[id as usize], mark) != mark {
                         df[id as usize] += 1;
@@ -445,7 +445,7 @@ fn main() {
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
-        let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
+        let mut stamp = vec![0u32; nkeep + 1]; // per term: dedup mark in the low half, document count in the high half
         let (mut mine, mut kept, mut anchors) = (vec![], vec![0; 1 << 12], vec![0; 1 << 12]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units { v: Vec::with_capacity(1 << 15), prev: 0 }).collect();
         let first = firsts[t];
@@ -457,7 +457,7 @@ fn main() {
                 }
             }
         };
-        let (share, pre) = (&text[cut[t]..cut[t + 1]], last.as_ptr());
+        let (share, pre) = (&text[cut[t]..cut[t + 1]], stamp.as_ptr());
         walk(share, first, &terms, pre, |doc, toks| {
             if doc as usize / 64 != block {
                 let w = std::mem::replace(&mut block, doc as usize / 64);
@@ -465,7 +465,7 @@ fn main() {
             }
             let (mark, bit) = ((doc - first + 1) as u16, 1u64 << (doc % 64));
             let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
-            let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
+            let (stamp, pending) = (&mut stamp[..=nkeep], &mut pending[..=nbits]);
             kept.resize(kept.len().max(toks.len()), 0);
             anchors.resize(anchors.len().max(toks.len()), 0);
             let (mut n, mut na) = (0, 0);
@@ -474,7 +474,9 @@ fn main() {
                 unsafe {
                     *anchors.get_unchecked_mut(na) = at;
                     na += (i.wrapping_sub(a0) < nkeep - a0) as usize;
-                    let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
+                    let v = *stamp.get_unchecked(i);
+                    *stamp.get_unchecked_mut(i) = v & 0xFFFF_0000 | mark as u32;
+                    let new = v as u16 != mark;
                     *pending.get_unchecked_mut(i.min(nbits)) |= (i < nbits) as u64 * bit;
                     *kept.get_unchecked_mut(n) = i as u32;
                     n += (new & (i.wrapping_sub(nbits) < lists - nbits)) as usize;
@@ -493,12 +495,12 @@ fn main() {
             }
             for &i in &kept[..n] {
                 buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
-                count[i as usize] += 1;
+                stamp[i as usize] += 1 << 16;
             }
         });
         flush(&mut pending, block);
         found.lock().unwrap().extend(mine);
-        (count, Mutex::new(buckets))
+        (stamp[..lists].iter().map(|&x| (x >> 16) as u16).collect::<Vec<u16>>(), Mutex::new(buckets))
     });
     drop(terms);
 
