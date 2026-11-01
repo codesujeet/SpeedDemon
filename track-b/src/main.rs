@@ -13,6 +13,8 @@ use std::sync::{Barrier, Mutex, OnceLock};
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
     fn _exit(status: i32) -> !;
@@ -83,7 +85,7 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
 // id + 1 (0 if free). One compare settles nearly every lookup, a term or not, with no
 // branch on which: telling those apart in a loop mispredicted about one token in three.
 struct Terms {
-    slot: Vec<__m256i>,
+    slot: &'static mut [__m256i],
     n: usize,
 }
 
@@ -110,7 +112,7 @@ impl Terms {
     }
 
     fn renumber(&mut self, new: &[u32]) {
-        for b in &mut self.slot {
+        for b in self.slot.iter_mut() {
             let w: &mut [u64; 4] = unsafe { std::mem::transmute(b) };
             for s in w.iter_mut().filter(|s| **s != 0) {
                 *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
@@ -355,9 +357,20 @@ impl Units {
 }
 
 fn main() {
-    unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
+    unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
-    let slot = vec![unsafe { _mm256_setzero_si256() }; (qtext.len() / 32).next_power_of_two()];
+    // Every token's lookup lands on a random line of the term table, so it is put on 2 MB pages (one TLB
+    // entry instead of 512), faulted in before huge pages are turned off for the rest, where a page written
+    // only in part would cost memory. It is handed back after the scan.
+    let n = (qtext.len() / 32).next_power_of_two();
+    let slot = unsafe {
+        let len = (n * 32).next_multiple_of(1 << 21);
+        let raw = mmap(std::ptr::null_mut(), len + (1 << 21), 3, 0x22, -1, 0);
+        let p = raw.add(raw.align_offset(1 << 21));
+        (madvise(p, len, 14), std::ptr::write_volatile(p, 0));
+        prctl(41, 1u64, 0u64, 0u64, 0u64);
+        std::slice::from_raw_parts_mut(p.cast::<__m256i>(), n)
+    };
     let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops, mut hs) = (vec![], vec![], vec![], vec![]);
     // Each word's length is one count of the letter-or-digit bits after it; a word ends at a space, the closing
@@ -513,10 +526,16 @@ fn main() {
             }
         });
         flush(&mut pending, block);
+        // The share is not read again: its pages are dropped now, on every thread, rather than all of the
+        // file's by one thread at exit.
+        let (from, to) = ((share.as_ptr() as usize + 4095) & !4095, (share.as_ptr() as usize + share.len()) & !4095);
+        if to > from {
+            unsafe { madvise(from as *mut u8, to - from, 4) };
+        }
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
-    drop(terms);
+    unsafe { munmap(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 32) };
 
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
