@@ -368,3 +368,7 @@ A1, A at head (723f9a8 source), wall-clock stamps inside the process plus a wrap
 C1 (records grouped across SIMD lanes): not built. Each record's field ends depend on the previous field (quoted text of any length, with "" pairs), so grouping ids, regions and amounts of several records needs their positions staged first. You measured that staged batches as plain arrays were slower, and the scalar fold already handles region and amount in one SIMD fold. I have no version with real odds.
 
 Honest read on 83: B is at 0.1377 s (best-42) after the page-level family; reaching 0.094 s still needs about 32% more, and nothing I can build in the time left has shown that. Realistic: B 0.130-0.138 with readings of B1 and docs-prefault, A and C about where they are. Overall about 80.8-81.0. Remaining from me: cloud-b-batch-on42 (B1) for a reading; anything else you name.
+
+## 17:59 UTC the four lookup experiments rebased onto best-42 (723f9a8)
+
+cloud-b-exp-t1-on42, cloud-b-exp-nopre-on42, cloud-b-exp-spread-on42, cloud-b-exp-8slot-on42: clean cherry-picks onto 723f9a8 (exit-release, best-42), not on docs-prefault. Each: native hashes for seeds 1/2/3/7 match, tiny and sample match. Ready for slots after B1's reading. Board timing not measured.
