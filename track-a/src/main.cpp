@@ -82,11 +82,16 @@ inline u32 decode(const char* end, u32 len) {
 inline void select(u32* a, u32 n, u32 k) {
     for (int round = 0; n > 1; ++round) {
         if (round == 40) return std::nth_element(a, a + k, a + n);
-        u32 m = n / 2;  // sort a[0], a[m], a[n - 1], then the median is the pivot
-        if (a[m] < a[0]) std::swap(a[m], a[0]);
-        if (a[n - 1] < a[m]) std::swap(a[n - 1], a[m]);
-        if (a[m] < a[0]) std::swap(a[m], a[0]);
-        std::swap(a[m], a[n - 1]);
+        if (n == 2) {
+            u32 x = a[0], y = a[1];
+            a[0] = std::min(x, y), a[1] = std::max(x, y);
+            return;
+        }
+        // The median of a[0], a[n / 2], a[n - 1] goes last as the pivot, the others either
+        // side of it, by minimum and maximum alone: comparing and swapping mispredicted.
+        u32 m = n / 2, lo = std::min(a[0], a[m]), hi = std::max(a[0], a[m]), z = a[n - 1];
+        u32 mid = std::min(hi, z);
+        a[m] = std::max(hi, z), a[n - 1] = std::max(lo, mid), a[0] = std::min(lo, mid);
         u64 pivot = a[n - 1], lt = 0;
         for (u32 i = 0; i + 1 < n; ++i) {
             u32 x = a[i];
@@ -94,7 +99,9 @@ inline void select(u32* a, u32 n, u32 k) {
         }
         std::swap(a[lt], a[n - 1]);
         if (k == lt) return;
-        k < lt ? n = lt : (a += lt + 1, k -= lt + 1, n -= lt + 1);
+        u32 skip = k < lt ? 0 : lt + 1;
+        n = k < lt ? lt : n - skip;
+        a += skip, k -= skip;
     }
 }
 
@@ -106,27 +113,40 @@ inline void select(u32* a, u32 n, u32 k) {
 // that loses the race for the slot compares against the winner's name.
 struct Names {
     static constexpr u32 SLOTS = 1 << 12, ARENA = SLOTS * 128;  // a seed has 1,842
-    std::atomic<u64> slot[SLOTS];  // length << 32 | arena offset, 0 if free
+    alignas(32) std::atomic<u64> slot[SLOTS];  // tag << 48 | length << 32 | arena offset, 0 if free
     std::atomic<u32> used{0};
     char arena[ARENA + 64];  // 64 spare bytes keep the last compare in bounds
 
-    std::string_view name(u64 v) const { return {arena + u32(v), size_t(v >> 32)}; }
+    std::string_view name(u64 v) const { return {arena + u32(v), size_t(v >> 32 & 0xFFFF)}; }
 
+    // Probes four slots at a time, the 16-bit tags compared at once, so a slot taken by
+    // another name costs no branch: comparing lengths one slot at a time mispredicted.
     u32 operator()(std::string_view s) {
         u64 a, b = 0;
         memcpy(&a, s.data(), 8);
         if (s.size() >= 8) memcpy(&b, s.data() + s.size() - 8, 8);
         else a &= (u64(1) << 8 * s.size()) - 1;
-        for (u32 i = _mm_crc32_u64(_mm_crc32_u64(s.size(), a), b);; ++i) {
-            u64 v = slot[i % SLOTS].load(std::memory_order_acquire);
-            if (v == 0) {
-                u32 at = used.fetch_add(s.size());
-                if (at + s.size() > ARENA) _exit(2);
-                memcpy(arena + at, s.data(), s.size());
-                if (slot[i % SLOTS].compare_exchange_strong(v, u64(s.size()) << 32 | at)) return i % SLOTS;
+        u32 h = _mm_crc32_u64(_mm_crc32_u64(s.size(), a), b);
+        u64 tag = h >> 12 & 0xFFFF | 1;
+        for (u32 i = h & (SLOTS - 4);; i = (i + 4) % SLOTS) {
+            __m256i v = _mm256_load_si256((const __m256i*)&slot[i]);
+            auto eq = [](__m256i x, u64 y) { return u32(_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(x, _mm256_set1_epi64x(y))))); };
+            for (u32 hit = eq(_mm256_srli_epi64(v, 48), tag); hit; hit &= hit - 1) {
+                u32 j = i + __builtin_ctz(hit);
+                if (same(name(slot[j].load(std::memory_order_acquire)), s)) return j;
             }
-            if (same(name(v), s)) return i % SLOTS;
+            if (u32 free = eq(v, 0)) return claim(i + __builtin_ctz(free), s, tag);
         }
+    }
+
+    // A new name goes in slot j, unless another thread took it first; then the search
+    // starts again, as that thread's name may be this one.
+    [[gnu::noinline]] u32 claim(u32 j, std::string_view s, u64 tag) {
+        u32 at = used.fetch_add(s.size());
+        if (at + s.size() > ARENA) _exit(2);
+        memcpy(arena + at, s.data(), s.size());
+        u64 v = 0;
+        return slot[j].compare_exchange_strong(v, tag << 48 | u64(s.size()) << 32 | at) ? j : (*this)(s);
     }
 
     // 64 bytes can always be read from either name (the rest of the line and
