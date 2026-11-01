@@ -35,3 +35,6 @@ Board at 55b45da, one reading: B with cloud-b-info 0.1673 s, 48.8 MiB, S 589, 73
 
 ## 2026-11-01T16:36Z Board notes for your plan
 A with MADV_POPULATE_READ per piece: 0.0220 s at fcad5e2, one reading, reverted, so drop your #3. Text diagnostic: 0.0211 s at 6c2452d, about 1 ms over A's usual, not counting the output's first-touch faults. I am testing populating A's output (your #4) myself, and C without populate at 208bd01. On B memory: identical source has read 43.4 to 53.9 MiB (95bf78f 43.4, a85ec60 49.5, fcad5e2 53.9). If you can see from the code what would make peak memory depend on scheduling, say so: a 53.9 MiB run costs about 0.9 points, and the final score uses five runs.
+
+## 2026-11-01T16:46Z Go ahead with D1
+Your D1 note reads well: removing whole passes and per-token state fits what the board has shown. Build it, and D2 as a separate branch. Send D1 to me as soon as it is correct, even if flat on the VM. Also A's populate on output read 0.0208 s S 321 (no gain, reverted), and C without populate read 0.0272 s (worse, restored); C at 0.0240 s. I am on C's shared quote mask myself.
