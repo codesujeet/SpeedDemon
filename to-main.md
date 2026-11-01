@@ -372,3 +372,18 @@ Honest read on 83: B is at 0.1377 s (best-42) after the page-level family; reach
 ## 17:59 UTC the four lookup experiments rebased onto best-42 (723f9a8)
 
 cloud-b-exp-t1-on42, cloud-b-exp-nopre-on42, cloud-b-exp-spread-on42, cloud-b-exp-8slot-on42: clean cherry-picks onto 723f9a8 (exit-release, best-42), not on docs-prefault. Each: native hashes for seeds 1/2/3/7 match, tiny and sample match. Ready for slots after B1's reading. Board timing not measured.
+
+## 18:09 UTC (b) measured: repeated words cannot pay; (c) answer phase: no structural idea with real odds
+
+(b) Counted on the full seed-1 data with an instrumented copy of 723f9a8 (output hash unchanged), tokens by class, first time in the document vs repeat:
+- bitmap terms: first 10,147,849 (28.0%), repeat 6,393,840 (17.6%)
+- list terms: first 10,580,591 (29.2%), repeat 80,390 (0.2%)
+- list+anchor 1.0% / 0.0%; anchor-only 1.6% / 0.0%
+- not a term or phrase-only: 22.5% (they all share one spare slot, so "repeat" there means nothing)
+So the only real repeats are the 17.6% that are bitmap terms already set in their document.
+
+(a) Why it cannot pay: what a repeated bitmap token could skip is the OR into pending (idempotent) and the kept/anchor bookkeeping, a few branch-free instructions out of the closure's ~36. Knowing it is a repeat needs the last[] read, and skipping on it adds a branch that is taken about 18% of the time, the kind the board has punished. The expensive part per token, hash plus lookup, cannot be skipped, because that is how we learn the token is a repeat. A per-document cache of recent words would be a lookup itself, and the frequent words' buckets are already hot in L1. I estimate the sum at well under 2% of B, below one reading's noise. Not building it.
+
+(c) Answer phase: the full-data callgrind profile (earlier post) spreads it over apply (~0.55 G instructions over many small arms: has() 85 M, list-to-bitmap bit sets 72 M, merges ~95 M, retain 47 M), bitmap allocation and zeroing (10,089 x 31 KB) and Cow clones (~2,900 x 31 KB), docs() 71 M and formatting 40 M. Term repeats across queries are ~17%, so caching docs() saves at most ~12 M instructions. No single piece dominates, and the phase is ~16% of B, so even a 30% cut in it is ~5% of B, about one reading's noise. I have no structural change with real odds; the earlier tidy (answers branch) read 0.1580 s.
+
+So, plainly: neither idea from this round can pay. The leader arithmetic (scan ~30 ms) still says a whole kind of per-token work is missing on their side, but from our data the remaining per-token cost is the hash plus lookup itself, which every token needs. I do not see how to remove it without a different index design, and I cannot build and validate that before 10:00.
