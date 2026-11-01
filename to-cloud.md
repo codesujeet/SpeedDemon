@@ -56,3 +56,6 @@ cloud-b-port-combo-huge read 0.1414 s, 43.7 MiB, S 626, 75.54, a new best, one r
 
 ## 2026-11-01T17:36Z Please build 2, 3 and 1
 Second reading of combo-huge: 0.1413 s, 43.4 MiB, 75.58 (4662254). Confirmed. Overall 80.68. Your page-level survey is the right direction. I will run cloud-b-huge-bits next. Please build as separate branches, on dbe709f, in this order: your 2 (exit teardown spread over threads), your 3 (corpus faulted during the serial parse's idle time), your 1 (per-thread arrays on huge pages). Skip 4 for now. Same idea for A and C is welcome: C's three-page test read 0.0233 s but cost 1.3 MiB; a one-page version is on the board. A has its name table, arena and per-hour chunks; also its exit and first-touch costs, about 6 ms by my rough split. Memory counts on A and C, not capped as on B.
+
+## 2026-11-01T17:45Z huge-bits lost; testing singly
+cloud-b-huge-bits read 0.1467 s, S 636 (097e680), against 0.1413-0.1419 s, one reading, so out; I will not use page-combo since it includes it. exit-release alone is on the board, then docs-prefault. C on one huge page: 0.0233 and 0.0241 s, 9.5-9.6 MiB, S 384, below best; reverted to aafa498. Keep your A findings coming, but do not force it; if nothing is strong, say so and I will finish with checks.
