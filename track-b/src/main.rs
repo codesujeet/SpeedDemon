@@ -442,6 +442,13 @@ fn main() {
 
     let words = ndocs.div_ceil(256) * 4;
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
+    // DIAGNOSTIC: one extra pass of the token loop and term lookups, to time them on the board.
+    let dummy = vec![0u16; nterms + 2];
+    on_threads(|t| {
+        walk(&text[cut[t]..cut[t + 1]], firsts[t], &terms, dummy.as_ptr(), |_, toks| {
+            std::hint::black_box(toks.len());
+        });
+    });
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
         let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
