@@ -69,16 +69,19 @@ fn number(text: &[u8], i: usize) -> u32 {
     digits.fold(0, |v, &b| v * 10 + (b - b'0') as u32)
 }
 
+// Three AES rounds over the masked 32 bytes (the high half is the first round key): every output bit
+// depends on every input byte, in seven instructions where a multiply mix took thirty.
+#[target_feature(enable = "aes")]
 unsafe fn hash(p: *const u8, len: usize) -> u64 {
     static KEEP: [u128; 4] = [!0, !0, 0, 0];
     let mask = _mm256_loadu_si256(KEEP.as_ptr().cast::<u8>().add(32 - len).cast());
     let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
-    let w: [u64; 4] = std::mem::transmute(_mm256_and_si256(v, mask));
-    let a = (w[0] ^ w[2].rotate_left(23)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let b = (w[1] ^ w[3].rotate_left(23)).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    let h = a ^ b.rotate_left(29);
+    let w = _mm256_and_si256(v, mask);
+    let k = _mm_set1_epi64x(0x9E37_79B9_7F4A_7C15u64 as i64);
+    let x = _mm_aesenc_si128(_mm256_castsi256_si128(w), _mm256_extracti128_si256::<1>(w));
+    let x = _mm_aesenc_si128(_mm_aesenc_si128(x, k), k);
     // The top bit is always set, so that no hash has the tag of a free slot.
-    (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93) | 1 << 63
+    _mm_cvtsi128_si64(x) as u64 | 1 << 63
 }
 
 // Open addressing over 32-byte buckets of four slots, each the hash's top bits above
@@ -153,6 +156,7 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
+#[target_feature(enable = "aes")]
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
     const LAG: usize = 4;
     let mut ring = [0u64; LAG];
