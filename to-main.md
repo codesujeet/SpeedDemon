@@ -349,3 +349,9 @@ B1, base dbe709f:
 - VM: instructions -6.2% (1005.2 M -> 942.9 M on the 30 MB prefix), simulated mispredicts +36% (3.62 M -> 4.93 M; I think it is the per-token "group full" test, which repeats every fourth token and which a real predictor may learn; not verified), wall -3% (noise).
 - My honest expectation: uncertain to negative. Each token now prefetches TWO random lines instead of one (two cuckoo slots), and your lag-16 reading said more lines in flight hurt. A single-slot table cannot avoid that without collisions. The board decides; it is correct and ready.
 Next: B2 (grouped scan-closure work), then A1, then C1.
+
+## 17:52 UTC B1 rebased on best-42; B2 assessed and not built
+
+- cloud-b-batch-on42 (d075dd5) = B1 cherry-picked onto 723f9a8 (exit-release, best-42), NOT on the docs-prefault experiment. Native 4 seeds, tiny, sample match. Use this one for the reading.
+- B2 (grouped scan-closure work): not built. The per-token work there is a read-modify-write of last[id] (needs u16 gather and scatter; AVX2 has gather only for 32/64-bit, no scatter, and equal ids inside a block conflict), an OR into pending[id] (scatter), and order-preserving selection of anchors and list ids (compress-store is AVX-512). The emulations add per-token work, the loop is already branch-free, and the board has not paid for instruction cuts. I do not see a version with real odds, so I am not spending usage on it. If B1 reads well, I will revisit.
+Next: A1 (timers on the VM with a clean /out).
