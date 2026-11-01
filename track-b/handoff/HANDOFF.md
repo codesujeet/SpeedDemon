@@ -62,3 +62,19 @@ note before acting.
 - Points: 1% faster is about +0.11 pt; one formatted line is about -0.009 pt; gains under about 0.2 pt are not worth a board slot.
 - Only push to speed-demon itself if the user allows it. Then all four seed hashes must match, run `git pull --rebase` first,
   touch only that track, need a 3% or better measured gain, and check the board twice afterwards, reverting if it got worse.
+
+## Update, Nov 1 ~14:00 UTC: review-agent results (all saved under track-{a,b,c}/plan/ on this branch)
+Pushed and verified (seed-1 hash in the real Docker image, 3 runs; seeds 2/3/7 NOT checked; board timing not measured):
+- cloud-c-parsecut (8d7fe32): C callgrind instructions -8.9%, -2 lines. Low risk. Try first for C.
+- cloud-c-minmaxbranch (58ea37c, stacked): instructions -1.3%, +2 lines, about +0.1 pt. Keep only if the board confirms.
+- cloud-b-scancore (a1b1fcb): B instructions -19.6%, +22 lines. VM 1 CPU 691.7 -> 585.0 ms, 4 CPU 302.6 -> 265.9 ms (noisy).
+- cloud-b-scanmin (28a2cd1, stacked on scancore): -23.3% instructions vs base, +19 lines. VM 1 CPU 566.4 ms, 4 CPU 258.9 ms.
+  The differential fuzz against base matched on 150/150 cases. Try this on the board first.
+Not yet implemented:
+- B post-scan bundle: track-b/plan/B_post.md and B_post_bundle.diff. Five changes: Units as a Vec<u16> per bucket, a faster
+  bit_sums, the sample back to 1/64, chunks(64), and the empty-OR shortcut. -14 lines, -363 M instructions, est. +0.25..0.40 pt.
+  It was written against 8eb3624 and must be rebased onto scancore/scanmin if those merge.
+  Note from that agent: on B one line is worth 0.0057 pt, and memory is near its cap (worth at most +0.17 pt).
+- Track A: track-a/plan/A.md, A_armL.patch and A_armP.patch. The A agent was implementing cloud-a-parsecuts,
+  cloud-a-hourchunks and cloud-a-droplist against the new A base (86570b0 + 68912bc). Check origin for those branches;
+  any half-finished state is in scratchpad plan/A_context_*.md, which may be lost.
