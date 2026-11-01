@@ -37,3 +37,11 @@ My benchmark harness reused `/out`, so each run's `open(O_TRUNC)` of the previou
 ## Other measurements this round
 - A's serial pieces on this VM are small: ranking callback 0.28 ms, sizing callback 0.02 ms, thread spawn 0.05 ms per thread. After the prefetch, 4-CPU wall (30.9 ms) is within about 3 ms of CPU/4 (27.6 ms), so A scales almost perfectly here; the remaining lever is instruction count.
 - Radix selection for the percentiles would help only the few huge groups (about 3 groups per hour hold about 25% of the records) and loses on the 75% in small groups. Not built.
+
+## Edge-case audit of the A changes (branches `cloud-a-includes`, `cloud-a-lines`)
+All checked with the real gcc 15 build; none of this needed the board.
+- Spec worked example (18 lines: hours out of order, duplicate lines, a 4,294,967,295 latency, an hour, a day and a month rollover): output equals the spec's expected `summary.txt` byte for byte, for the base and for the line-cut build.
+- Empty `requests.log`: empty output (0 bytes), as the spec says. One line at the last instant of the span. The 125-byte endpoint next to `/`.
+- Differential fuzz against an independent Python reference (150 random logs, 1-6,000 lines each): the first and last instants of the span, hour boundaries, endpoint-prefix families (`/v2/orders...`, `/v2/rank100` vs `/v2/rank20`), 1- and 125-byte endpoints, latencies 0 / 2^19-1 / above 2^19 / 4,294,967,295, statuses 100-599, duplicated lines: base 150/150, line-cut build 150/150.
+- Thread count forced to 1, 2, 3, 5, 7 and 12 (12 threads on 4 CPUs): the real-data hash `495ca096...` every time. The board runs on 12 hardware threads; `hardware_concurrency()` is clamped to 12 so a larger or smaller cpuset also works.
+- Hardware assumptions that remain: AVX2 + BMI2 + PCLMUL (the board's i5-13500 has them; there is no AVX-512 in the code), 4 KB pages for the `madvise` alignment, `prefetch` past the end of a mapping is harmless (it never faults), `MADV_DONTNEED` on clean private file pages cannot change data. A 10 MB output on a 1 GB tmpfs `/out` fits with a wide margin.
