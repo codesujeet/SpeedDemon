@@ -222,3 +222,12 @@ A branch that finished a quoted field with one compare when the closing quote sa
 ### Block-mask pass for the field ends (tried, not kept)
 
 The record loop was replaced by two steps per 4 KB window: first the commas and LFs outside quotes are listed for the whole window (quote mask per 64 bytes, a carry-less multiply for the running quote parity, eight positions written per block without a branch on how many there are), then each record is read from its five listed positions, with the `""` pairs counted by popcount of the quote bits instead of stepping through them. Output hash unchanged. Hardware counters on the 13th-gen laptop (full seed-1 data, 12 threads): instructions 971 M to 1296 M (+33%), branch-misses 2.07 M to 1.55 M (-25%), IPC 1.4 to 1.9, retiring 49% to 64% of slots, and cycles 685-690 M against 685-705 M for the committed loop, alternating runs: no measurable gain. The saved mispredicts and shorter dependency chains were paid back by the extra instructions of the listing pass, so it was not worth the board slot. A phase profile of the committed build put set-up and region phases at about 2 ms of the run and the record parse at about 20 ms.
+
+### Batched stages and chunked reads (tried, not kept)
+
+Both were measured on the 13th-gen laptop with the performance governor (full seed-1 data, 12 threads, cycles from `perf stat -r 15`), output hash unchanged; the committed loop read 741-746 M cycles and 17.0-17.6 ms there.
+
+* **Three-stage batches.** The ring of pending records was replaced by arrays of 16, 32 or 64 records: parse a batch, then (next round) read countries, add to the totals and look the names up, then (round after) mark them. Cycles 783 M, 782 M and 815 M for 16, 32 and 64 (+6% to +10%), instructions +3% to +4%: the array stores and loads cost more than the ring's bookkeeping saved.
+* **Chunked `pread` instead of the mapping.** Each worker read its piece in 128 KiB chunks into its own buffer, parsing the whole records and carrying the partial one over. Instructions fell 4% (no madvise calls, no page-fault handling) but cycles rose 9% (816 M) and the run took 19.4 ms against 17.0 ms: the copy through the kernel costs more than the page mapping it saves.
+
+A callgrind count of the committed loop on the sample (285 instructions a record) shows no hot line: the largest single line is the bitset word access at about 14 instructions a record, so there is no one place left to cut.
