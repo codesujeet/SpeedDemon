@@ -456,15 +456,14 @@ fn main() {
             (false, true) => 3,
             (false, false) => 4,
         };
-        let pack = |i: usize| (class(i) as u64) << 56 | (!df[i] as u64) << 24 | i as u64;
-        let mut packed: Vec<u64> = (0..nterms).map(pack).collect();
-        packed.sort_unstable();
-        let at_most = |c| packed.partition_point(|&k| (k >> 56) as usize <= c);
-        let [nbits, a0, lists, nkeep] = [0, 1, 2, 3].map(at_most);
-        let mut new = vec![0; nterms];
-        for (r, &k) in packed.iter().enumerate() {
-            new[k as usize & 0xFF_FFFF] = r as u32;
-        }
+        // The new order is the class, then the sampled document count, most frequent first (capped at 4095), then
+        // the old id: a counting sort on a 15-bit key.
+        let key = |i: usize| class(i) << 12 | 4095 - (df[i] as usize).min(4095);
+        let mut at = vec![0u32; 5 << 12 | 1];
+        (0..nterms).for_each(|i| at[key(i) + 1] += 1);
+        (0..5 << 12).for_each(|k| at[k + 1] += at[k]);
+        let [nbits, a0, lists, nkeep] = [1, 2, 3, 4].map(|c| at[c << 12] as usize);
+        let new: Vec<u32> = (0..nterms).map(|i| (at[key(i)] += 1, at[key(i)] - 1).1).collect();
         terms.renumber(&new);
         ids.iter_mut().for_each(|id| *id = new[*id as usize]);
         anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
