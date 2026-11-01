@@ -131,3 +131,36 @@ Tools are not in the repo (/tmp/tools/fuzz_b.py in my container). Ask and I will
 - Exact range, measured: crashes for every docs.txt of 1 to 11 bytes (3, 4, 5, 6, 8, 10, 11 bytes tried; also 2 docs in 10 bytes); passes for 0 bytes (the `*c < text.len()` test short-circuits) and for 12 bytes and more (cut[1] >= 1). All 7 fuzz failures of seed 9 were 3-byte files.
 - Out of spec in practice: every official scale is far above 12 bytes (tiny: 1,000 documents, 1,000,131 bytes; the holdout is full scale). Nothing else in the fuzz failed.
 - Zero-line fix if you want it: `while 0 < *c && *c < text.len() && text[*c - 1] != b'\n' {` (a cut of 0 stays 0, which is a line start). NOT verified beyond compiling: I have not run hashes or a reference comparison on it. Tell me if you want it as a branch with checks.
+
+## 2026-11-01 17:05 UTC B redesign: design note (before building)
+
+Small item done first: cloud-b-smallfix (a001e0b, base 208bd01): `while 0 < *c && ...` in the share cut, 0 added lines, seeds 1/2/3/7 hashes match (native). Not checked: real image, tiny/sample, reference comparison on the 1-11 byte inputs, fuzzer.
+
+### What the board numbers imply (my reading, not measured further)
+- The bucket change gained about 8%. Its comment says the removed branch mispredicted about 1 token in 3. At ~17 cycles per mispredict that is ~5.6 cycles per token, and B's scan is roughly 70-80 cycles per token per thread (about 100 ms, 3 M tokens per thread, 2.5 GHz). So the gain matches a simple "cycles per token" model.
+- In that model the rest of the per-token cost is the work itself: ~115 instructions per token at about 1.5 IPC per thread, ~3 per core with both hyperthreads busy. That also fits 12 threads being only 11% faster than 6 (the core is already full).
+- It does not fit scanmin (-23% instructions, no gain). So I do not trust instruction counts alone. What I trust: removing whole passes and whole per-token stores and loads, not shaving them.
+
+### D1 (build first): one fused pass per token, no per-document id list (your a + b + c)
+- Per token: classify, hash, prefetch, ring (as now) -> bucket lookup (as now) -> act on the id right there, by id range (ids are already grouped by class after the renumber):
+  - bitmap term: OR the doc bit into `pending` (L1);
+  - list term: dedupe and emit the (term, doc) unit, with a branch-free choice of a scratch target for non-list tokens;
+  - anchor (about 2% of tokens, a predictable branch): verify that anchor's phrases on the TEXT around the token, by hashing the neighbouring tokens and comparing with the phrase terms' hashes (the same 64-bit hash the term table trusts, collision odds about 2^-63 per compare);
+  - everything else (non-terms, phrase-only terms: about 22% plus the bitmap and list tokens' extra state) does nothing more.
+- Goes away: the id store per token (36.5 M), the per-document closure pass that re-reads every id, the kept and anchors arrays, the per-token `last[]` read-modify-write for non-list tokens, and the id-list phrase compare.
+- Why it might help on the board: your +100 ms (tokens + lookups + ring + ids) against +27 ms (classify + hash) says the cost is everything after the hash. D1 deletes a whole second pass over 36.5 M ids and most per-token state. It is not a shave of the same pass.
+- Risk: phrase verification on text (backward and forward tokenisation inside the document, stopping at the TAB and LF) must exactly match the id-list semantics. The fuzzer covers phrases, upper case, non-ASCII separators and window edges, and I will add cases.
+
+### D2 (separate branch, low risk): the serial prefix (your e)
+- The VM's query parse is about 10 ms on one thread: byte-by-byte `split` closures plus a hash insert per term. The class sort (9.3 M instructions), the anchored and found sorts and the seg loop add a few ms more, all on one thread while 11 wait.
+- Plan: tokenise queries.txt with the same 64-byte masks as the corpus (no byte loops), and move what can be moved into the existing on_threads phases. Expected a few ms; the VM can measure single-thread serial time reasonably.
+
+### D3 (separate branch): the answer phase and memory spikes (your f, and your 16:36 question)
+- Why peak memory depends on scheduling, from the code: at the answer phase `mallopt(-3, 64 << 20)` raises the mmap threshold, so every bitmap clone (31 KB), every docs() Vec and every OR result comes from per-thread malloc arenas. Freed blocks stay resident, and each thread's high water depends on which 64-query chunks it happened to claim. bits (~11.5 MB) and post (~22 MB) are still alive then. A run where one or two threads draw the heaviest OR chains keeps more arena memory resident: that is a plausible source of 43 to 54 MiB on identical code. I have not measured it.
+- Plan: one reusable scratch bitmap and list buffers per thread (no allocation per operation), which should give a steady peak and fewer page faults. Then specialised loops per operator.
+
+### Not now
+- Radix-partitioned lookups (each partition's slice of the table in L1): the biggest possible lookup win, but too big a rewrite for the time left.
+- Hyperthread producer/consumer split (your d): too risky to get right and correct by 10:00.
+
+Order: D1 now. I will post as soon as it is correct, then D2 and D3.
