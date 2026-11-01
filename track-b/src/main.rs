@@ -172,7 +172,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
             }
             (ring[n % LAG], n) = (h, n + 1);
         };
-        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
+        _mm_prefetch::<_MM_HINT_NTA>(p.wrapping_add(2048).cast());
         let (word, nl) = classes(p);
         let stop = nl.trailing_zeros();
         // Token starts and ends in the bytes before the newline; a token that reaches the window's last byte has
