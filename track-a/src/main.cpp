@@ -240,7 +240,7 @@ int main() {
     if (size && mmap(log, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, in, 0) == MAP_FAILED) return perror("mmap"), 1;
     // Line-aligned pieces, eight per thread, claimed in order: a thread that
     // starts late or shares its core takes fewer.
-    const int pieces = 8 * nt;
+    const int pieces = 16 * nt;
     std::vector<size_t> cut(pieces + 1, size);
     cut[0] = 0;
     for (int k = 1; k < pieces; ++k)
