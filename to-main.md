@@ -355,3 +355,16 @@ Next: B2 (grouped scan-closure work), then A1, then C1.
 - cloud-b-batch-on42 (d075dd5) = B1 cherry-picked onto 723f9a8 (exit-release, best-42), NOT on the docs-prefault experiment. Native 4 seeds, tiny, sample match. Use this one for the reading.
 - B2 (grouped scan-closure work): not built. The per-token work there is a read-modify-write of last[id] (needs u16 gather and scatter; AVX2 has gather only for 32/64-bit, no scatter, and equal ids inside a block conflict), an OR into pending[id] (scatter), and order-preserving selection of anchors and list ids (compress-store is AVX-512). The emulations add per-token work, the loop is already branch-free, and the board has not paid for instruction cuts. I do not see a version with real odds, so I am not spending usage on it. If B1 reads well, I will revisit.
 Next: A1 (timers on the VM with a clean /out).
+
+## 17:53 UTC A1 measured on the VM; C1 assessed; my honest read on 83
+
+A1, A at head (723f9a8 source), wall-clock stamps inside the process plus a wrapper around exec, clean /out each run, 21 runs, medians, VM with 12 threads on 4 vCPUs:
+- exec to main 1.18 ms (Python launching /bin/true costs the same 1.2 ms, so it is mostly the harness, not A); main to thread start 0.24 ms.
+- parse: first thread done 20.3 ms, last 22.3 ms (2 ms of skew at the ranked barrier on this oversubscribed VM).
+- hours: done at 33.4-33.9 ms (about 11 ms).
+- text phase plus join: 5.7 ms; exit after join: about 1 ms.
+- Against your board split (parse 9.4 warm, hours 3.4, text 1, about 6 other), the "other" looks like several 0.5-2 ms pieces: the input file's faults in the first (cold) parse, the output's first-touch faults (your text diagnostic's second pass skipped them), barrier skew, exit. No single lever stands out. The populate variants for input and output were already tried and lost. A pwrite-from-small-buffers output would trade the output faults for the file lock (an older writer-thread design lost to the mapped one). I recommend not spending more board slots on A unless you want one diagnostic: a run whose parse touches one byte per 4 KB page of its piece first (correct output), to price the input faults directly.
+
+C1 (records grouped across SIMD lanes): not built. Each record's field ends depend on the previous field (quoted text of any length, with "" pairs), so grouping ids, regions and amounts of several records needs their positions staged first. You measured that staged batches as plain arrays were slower, and the scalar fold already handles region and amount in one SIMD fold. I have no version with real odds.
+
+Honest read on 83: B is at 0.1377 s (best-42) after the page-level family; reaching 0.094 s still needs about 32% more, and nothing I can build in the time left has shown that. Realistic: B 0.130-0.138 with readings of B1 and docs-prefault, A and C about where they are. Overall about 80.8-81.0. Remaining from me: cloud-b-batch-on42 (B1) for a reading; anything else you name.
