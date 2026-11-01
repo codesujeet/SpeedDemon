@@ -103,11 +103,11 @@ impl Terms {
                 let v = *self.slot.get_unchecked(i);
                 let eq = _mm256_cmpeq_epi64(_mm256_and_si256(v, keep), tag);
                 let free = _mm256_cmpeq_epi64(v, _mm256_setzero_si256());
-                let hit = _mm256_movemask_pd(_mm256_castsi256_pd(eq)) as u32;
-                if hit | _mm256_movemask_pd(_mm256_castsi256_pd(free)) as u32 != 0 {
-                    let w: [u64; 4] = std::mem::transmute(v);
-                    let id = (w[hit.trailing_zeros() as usize & 3] & ID_MASK) as u32;
-                    return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), self.n as u32);
+                if _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_or_si256(eq, free))) != 0 {
+                    // The hit slot's id + 1 by OR-ing the lanes: 0 on a miss, which becomes the id u32::MAX.
+                    let x = _mm256_and_si256(v, eq);
+                    let y = _mm_or_si128(_mm256_castsi256_si128(x), _mm256_extracti128_si256::<1>(x));
+                    return _mm_cvtsi128_si64(_mm_or_si128(y, _mm_unpackhi_epi64(y, y))) as u32 & ID_MASK as u32;
                 }
                 i = (i + 1) & mask;
             }
@@ -167,7 +167,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         let mut look = |&h: &u64| {
             let id = t.find(h);
             _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
-            (*buf.add(out), out) = (id, out + 1);
+            (*buf.add(out), out) = (id.wrapping_sub(1), out + 1);
         };
         let mut push = |q: *const u8, len: u32| {
             let h = if len <= 32 { hash(q, len as usize) } else { 1 << 63 };
@@ -431,6 +431,7 @@ fn main() {
             let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
                 let mark = (doc + 1) as u16;
                 for &id in toks {
+                    let id = id.min(nterms as u32);
                     if std::mem::replace(&mut last[id as usize], mark) != mark {
                         df[id as usize] += 1;
                     }
