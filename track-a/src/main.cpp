@@ -26,6 +26,7 @@
 // records have been released.
 #include <bits/stdc++.h>
 #include <fcntl.h>
+#include <malloc.h>
 #include <immintrin.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -244,6 +245,9 @@ int main() {
     // With transparent huge pages, a chunk region written only in part could be
     // backed by whole 2 MB pages and count against peak memory.
     prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    // Hour-sized buffers (lines, scratch) get their own mappings, so freeing them returns the pages
+    // and the output file's cache does not pile on top of retained heap.
+    mallopt(M_MMAP_THRESHOLD, 1 << 15);
     const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
     int in = open("/data/requests.log", O_RDONLY);
     int out = open("/out/summary.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -321,6 +325,7 @@ int main() {
             std::vector<u32> cursor(start.begin(), start.end() - 1);
             for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32 e, u32, u32 l) { latency[cursor[e]++] = l; });
             madvise(chunks[h], carved[h] * sizeof(Chunk), MADV_DONTNEED);
+            lines[h].reserve(ne);
 
             u64 size = 0;
             for (u32 e = 0; e < ne; ++e) {
