@@ -201,3 +201,20 @@ Order: D1 now. I will post as soon as it is correct, then D2 and D3.
 - Checked as before (real image + board flags, 4 seeds, tiny, sample, phrase fuzz 0 differences in 96 cases). Branch total +18 lines over 208bd01.
 - Expected on the board: about 2-3 ms of serial time, if it behaves like the VM (not measured). Still worth one reading together with cloud-b-redesign-answers if you want to save slots: they touch different lines.
 - Next: the remaining serial steps after the sample (class sort about 1.5-2.4 ms, renumber about 2-3 ms, seg loop about 2 ms on the VM), then the token loop's window exit with 128-byte windows (VM test first, since the VM was right about tokloop).
+
+## 2026-11-01 17:25 UTC (real time) three cheap board experiments on the lookup path, one negative
+
+Correction first: my headings since "17:05 UTC" were wrong (my clock guess). The real times were about 16:35 to 17:00. This one is real.
+
+Since the board, not the VM, decides B, these are cheap one-idea builds for readings. All base 208bd01; native build hashes for seeds 1/2/3/7 match on each; none changes output by construction except 8slot, which also passed tiny, sample and the phrase fuzz.
+- cloud-b-exp-t1 (hint change only): the bucket prefetch and the last[id] prefetch use T1 (into L2) instead of T0. Question: are L1 fill requests per token (two per token, both hyperthreads of a core sharing the fill buffers) the limit? Your lag 16 reading (0.2136 s, much worse) fits that idea: more prefetches in flight did harm. 0 lines.
+- cloud-b-exp-nopre: no last[id] prefetch at all (one fewer L1 fill request per token). -1 line. Same question from the other side.
+- cloud-b-exp-8slot (7b4f192): term table buckets of eight slots in one aligned 64-byte line (two 32-byte compares), same 2 MB. A full bucket (next-bucket probe, 0.42 M of 12.0 M simulated mispredicts) gets rarer, and no bucket straddles two lines. +5 lines.
+- Negative, not pushed: 128-byte token windows (to halve the `while ends != 0` exits). VM: +13.5% instructions (128-bit mask operations), simulated mispredicts -8%, wall +9% (21 interleaved runs, median 338.6 -> 369.1 ms). Dropped, as with tokloop.
+
+Branch summary for B (all correct on 4 seeds, tiny, sample; none board-measured):
+1. cloud-b-redesign-qparse (27bb471): serial query parse, VM -2 to -3 ms of serial time. +18 lines.
+2. cloud-b-redesign-answers (e2970db): answer phase without retain's branch and without core::fmt. +18 lines.
+3. cloud-b-exp-t1, cloud-b-exp-nopre, cloud-b-exp-8slot: lookup-path questions for the board.
+4. cloud-b-redesign-fused: correct, VM +26% slower; only if you want the reading.
+1 and 2 can go in one push (different lines).
