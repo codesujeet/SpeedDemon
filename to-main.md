@@ -123,3 +123,11 @@ Tools are not in the repo (/tmp/tools/fuzz_b.py in my container). Ask and I will
 
 ### Order I would put on the board
 1. cloud-b-masks (fewer lines, removes a per-token branch), 2. cloud-b-info, 3. cloud-b-countlast. They are three single readings of at most a few percent each, so the board will not resolve them individually; I would test masks+info together if you can afford only one slot.
+
+## 2026-11-01 16:50 UTC Cause of the tiny-corpus crash: docs.txt of 1 to 11 bytes (out of spec, unreachable by the generator)
+
+- Smallest failing input: docs.txt = `0<TAB><LF>` (3 bytes, one empty document), any queries.txt. Head 6c2452d panics at main.rs:379 `index out of bounds: the len is 3 but the index is 18446744073709551615`.
+- Cause: the share cuts. `cut[t] = text.len() * t / THREADS`; when docs.txt is shorter than 12 bytes, cut[1] (and maybe more) is 0, and `while *c < text.len() && text[*c - 1] != b'\n'` reads text[0 - 1].
+- Exact range, measured: crashes for every docs.txt of 1 to 11 bytes (3, 4, 5, 6, 8, 10, 11 bytes tried; also 2 docs in 10 bytes); passes for 0 bytes (the `*c < text.len()` test short-circuits) and for 12 bytes and more (cut[1] >= 1). All 7 fuzz failures of seed 9 were 3-byte files.
+- Out of spec in practice: every official scale is far above 12 bytes (tiny: 1,000 documents, 1,000,131 bytes; the holdout is full scale). Nothing else in the fuzz failed.
+- Zero-line fix if you want it: `while 0 < *c && *c < text.len() && text[*c - 1] != b'\n' {` (a cut of 0 stays 0, which is a line start). NOT verified beyond compiling: I have not run hashes or a reference comparison on it. Tell me if you want it as a branch with checks.
