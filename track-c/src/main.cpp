@@ -108,11 +108,9 @@ u64 money(const char* s, const char* e) {
         if (u64 m = match32(p, c) | u64(match32(p + 32, c)) << 32) return p + __builtin_ctzll(m);
 }
 
-// The comma after a number of at most 7 digits starting at p: the lowest zero
-// byte of the 8 bytes at p XOR ','.
+// The comma after a number of at most 8 digits starting at p.
 const char* comma_after(const char* p) {
-    u64 x = load8(p) ^ 0x2C2C2C2C2C2C2C2C;
-    return p + __builtin_ctzll((x - 0x0101010101010101) & ~x & 0x8080808080808080) / 8;
+    return p + __builtin_ctz(_mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i*)p), _mm_set1_epi8(','))));
 }
 
 // The text field (name or note) at p, moving p past its comma: its raw bytes
