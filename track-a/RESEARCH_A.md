@@ -82,3 +82,11 @@ Tooling: perf time sampling + annotate on a tmpfs `/out` (see above), `hyperfine
 - Whole-name 64-bit fingerprint in the slots: +22% slower (see above). Key-line prefetch in B: no gain.
 
 **Left (not built):** the count and place loops of the hours phase are read-modify-writes to per-endpoint counters (`start[e+1]++`, `latency[cursor[e]++]`), so the hot endpoints that repeat back-to-back serialize through store-to-load forwarding; counters split by record parity would break the chain, an estimated 2% of A for +8 lines. `select` is still 14% of A's time.
+
+## Why VM timings favour the wrong changes: the sandbox has no SMT (measured)
+The board runs 12 threads on 6 P-cores, so two threads share each core's execution ports. This VM's four vCPUs do not: a loop that saturates the ports (eight independent operation chains) takes 0.82 s alone and 0.83-0.88 s with a second copy on any other vCPU (all six pairs), so each vCPU is its own physical core. A latency-bound loop would not show sharing either, so only the throughput-bound loop is conclusive.
+Consequences for reading this repo's local results:
+- A change that only breaks a dependency chain (the line list in `cloud-a-linelist`, C's two-cursor interleave) wins on this VM, where each thread has a core to itself, but on the board the sibling thread already fills the stalls (the main session measured exactly that for C's two-cursor build: no gain). Chain-breaking that adds instructions can lose there.
+- A change that removes instructions (the hour reuse in `cloud-a-parsediet`: callgrind -5.9%, VM time about -1%) helps more on the board than on this VM, because a core's instruction throughput is the shared resource: C's real-Linux counters show IPC 1.36 per thread, about 2.7 per core.
+- So rank candidate changes by callgrind instructions first and by VM time second, and test chain-breaking changes on the real SMT machine with 12 threads (and 6) before spending a board slot.
+- Specific recommendation: run `cloud-a-linelist` (+9.5% instructions, -5.6% VM wall) against the base and against `cloud-a-parsediet` (-5.9% instructions) on the real machine at 12 threads; if the linelist does not win there it should be dropped.
