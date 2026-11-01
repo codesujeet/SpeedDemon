@@ -73,58 +73,24 @@ inline u32 decode(const char* end, u32 len) {
     return u32(_mm_cvtsi128_si32(v)) * u64(100000000) + u32(_mm_extract_epi32(v, 1));
 }
 
-// Moves those of a[0, n) below the pivot to the front and returns how many, eight
-// values at a time and with no branch on them: each block's two sides are packed by
-// a shuffle made from its comparison mask, the low side stored in place (it never
-// overtakes the reading) and the high side in spare, which is copied back at the end.
-inline u32 split(u32* a, u32 n, u32 pivot, u32* spare) {
-    auto pack = [](__m256i v, u32 m) {
-        u64 order = _pext_u64(0x0706050403020100, _pdep_u64(m, 0x0101010101010101) * 255);
-        return _mm256_permutevar8x32_epi32(v, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128(order)));
-    };
-    const __m256i sign = _mm256_set1_epi32(1 << 31), p = _mm256_xor_si256(_mm256_set1_epi32(pivot), sign);
-    u32 lt = 0, ge = 0, i = 0;
-    for (; i + 8 <= n; i += 8) {
-        __m256i v = _mm256_loadu_si256((const __m256i*)(a + i));
-        u32 m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(p, _mm256_xor_si256(v, sign))));
-        _mm256_storeu_si256((__m256i*)(a + lt), pack(v, m));
-        _mm256_storeu_si256((__m256i*)(spare + ge), pack(v, ~m & 255));
-        u32 below = __builtin_popcount(m);
-        lt += below, ge += 8 - below;
-    }
-    for (; i < n; ++i) {
-        u32 x = a[i];
-        a[lt] = x, spare[ge] = x, lt += x < pivot, ge += x >= pivot;
-    }
-    memcpy(a + lt, spare, ge * sizeof(u32));
-    return lt;
-}
-
 // Puts the k-th smallest of a[0, n) at a[k], the smaller ones before it,
 // without a branch on the data: each step partitions around the median of
 // three by Lomuto's scheme with an unconditional swap, the boundary moving
 // by the comparison's result. (std::nth_element mispredicted at about every
 // other element.) Many equal values could make a round shrink the range by
 // only one, so after 40 rounds the library's selection finishes.
-inline void select(u32* a, u32 n, u32 k, u32* spare) {
+inline void select(u32* a, u32 n, u32 k) {
     for (int round = 0; n > 1; ++round) {
         if (round == 40) return std::nth_element(a, a + k, a + n);
-        // The largest of the range (the p99 of every group of 99 or fewer, and
-        // its p95 up to 19) is one scan, not a partition.
-        if (k + 1 == n) return std::swap(*std::max_element(a, a + n), a[n - 1]);
         u32 m = n / 2;  // sort a[0], a[m], a[n - 1], then the median is the pivot
         if (a[m] < a[0]) std::swap(a[m], a[0]);
         if (a[n - 1] < a[m]) std::swap(a[n - 1], a[m]);
         if (a[m] < a[0]) std::swap(a[m], a[0]);
         std::swap(a[m], a[n - 1]);
         u32 pivot = a[n - 1], lt = 0;
-        if (n >= 16) {
-            lt = split(a, n - 1, pivot, spare);
-        } else {
-            for (u32 i = 0; i + 1 < n; ++i) {
-                u32 x = a[i];
-                a[i] = a[lt], a[lt] = x, lt += x < pivot;
-            }
+        for (u32 i = 0; i + 1 < n; ++i) {
+            u32 x = a[i];
+            a[i] = a[lt], a[lt] = x, lt += x < pivot;
         }
         std::swap(a[lt], a[n - 1]);
         if (k == lt) return;
@@ -153,19 +119,14 @@ struct Names {
         else a &= (u64(1) << 8 * s.size()) - 1;
         for (u32 i = _mm_crc32_u64(_mm_crc32_u64(s.size(), a), b);; ++i) {
             u64 v = slot[i % SLOTS].load(std::memory_order_acquire);
-            if (v == 0 && (v = insert(slot[i % SLOTS], s)) == 0) return i % SLOTS;
+            if (v == 0) {
+                u32 at = used.fetch_add(s.size());
+                if (at + s.size() > ARENA) _exit(2);
+                memcpy(arena + at, s.data(), s.size());
+                if (slot[i % SLOTS].compare_exchange_strong(v, u64(s.size()) << 32 | at)) return i % SLOTS;
+            }
             if (same(name(v), s)) return i % SLOTS;
         }
-    }
-
-    // Copies a new name into the arena and claims slot t for it: 0 if that
-    // worked, else the name another thread put there first.
-    [[gnu::noinline, gnu::cold]] u64 insert(std::atomic<u64>& t, std::string_view s) {
-        u32 at = used.fetch_add(s.size());
-        if (at + s.size() > ARENA) _exit(2);
-        memcpy(arena + at, s.data(), s.size());
-        u64 v = 0;
-        return t.compare_exchange_strong(v, u64(s.size()) << 32 | at) ? 0 : v;
     }
 
     // 64 bytes can always be read from either name (the rest of the line and
@@ -201,41 +162,50 @@ struct Parser {
     std::vector<std::pair<u32, u32>> wide[HOURS];
 
     void run(const char* p, const char* end) {
-        while (p < end) {
-            // A line is at least 40 bytes, so its end is searched from byte 39, 64
-            // bytes at a time (a line is at most 177 bytes, so at most three steps).
-            const char* eol = p + 39;
-            u64 m;
-            while (!(m = eq32(eol, '\n') | u64(eq32(eol + 32, '\n')) << 32)) eol += 64;
-            eol += _tzcnt_u64(m);
-            // The file's pages are scattered in memory and the hardware
-            // prefetcher stops at each 4 KB page; this reaches into the next ones.
-            _mm_prefetch(p + 4096, _MM_HINT_T0);
-            // YYYY-MM-DDTHH: the month's last digit at 6 (bit 0) plus the day's at 9
-            // (two bits) count the days 0 to 3, the hour is at 11-12. One multiply
-            // gathers days * 24 + tens * 10 + units in the top byte.
-            u64 t;
-            memcpy(&t, p + 6, 8);
-            int h = int((t & 0x000F0F0003000001) * 0x18000018000A0100 >> 56) - 18;
-
-            // The method (3 to 7 bytes) ends within 16 bytes of the timestamp, and
-            // the 16 bytes before the line's end hold " SSS latency", at most 10 digits.
-            const char* name = p + 29 + __builtin_ctz(eq16(p + 28));
-            const char* sp = eol - 16 + (31 - __builtin_clz(eq16(eol - 16)));
-            u32 key = endpoints(std::string_view(name, sp - 4 - name)) | (sp[-3] == '5' ? ERR : 0);
-            u32 latency = decode(eol, eol - sp - 1);
-            p = eol + 1;
-
-            if (__builtin_expect(latency >= PACKED_MAX, 0)) {
-                wide[h].push_back({latency, key});
-                continue;
+        // The line ends of the next 4 KB are listed first, so a line's start does not
+        // wait for the parse of the one before. A line is at least 40 bytes, so a
+        // 64-byte block holds at most two ends; both are stored (the second only
+        // counts if there is one), with no branch on how many lines the block has.
+        const char* ends[4096 / 40 + 8];
+        for (const char* scan = p; p < end;) {
+            u32 n = 0;
+            for (const char* stop = std::min(scan + 4096, end); scan < stop; scan += 64) {
+                u64 m = eq32(scan, '\n') | u64(eq32(scan + 32, '\n')) << 32;
+                ends[n] = scan + _tzcnt_u64(m), ends[n + 1] = scan + _tzcnt_u64(_blsr_u64(m));
+                n += __builtin_popcountll(m);
             }
-            u32*& w = to[h];
-            if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
-                Chunk* c = chunks[h] + carved[h]++;
-                c->prev = last[h], last[h] = c, w = c->rec;
+            while (n && ends[n - 1] >= end) --n;  // the last block's may be the next piece's
+            for (u32 i = 0; i < n; ++i) {
+                const char* eol = ends[i];
+                // The file's pages are scattered in memory and the hardware
+                // prefetcher stops at each 4 KB page; this reaches into the next ones.
+                _mm_prefetch(p + 4096, _MM_HINT_T0);
+                // YYYY-MM-DDTHH: the month's last digit at 6 (bit 0) plus the day's at 9
+                // (two bits) count the days 0 to 3, the hour is at 11-12. One multiply
+                // gathers days * 24 + tens * 10 + units in the top byte.
+                u64 t;
+                memcpy(&t, p + 6, 8);
+                int h = int((t & 0x000F0F0003000001) * 0x18000018000A0100 >> 56) - 18;
+
+                // The method (3 to 7 bytes) ends within 16 bytes of the timestamp, and
+                // the 16 bytes before the line's end hold " SSS latency", at most 10 digits.
+                const char* name = p + 29 + __builtin_ctz(eq16(p + 28));
+                const char* sp = eol - 16 + (31 - __builtin_clz(eq16(eol - 16)));
+                u32 key = endpoints(std::string_view(name, sp - 4 - name)) | (sp[-3] == '5' ? ERR : 0);
+                u32 latency = decode(eol, eol - sp - 1);
+                p = eol + 1;
+
+                if (__builtin_expect(latency >= PACKED_MAX, 0)) {
+                    wide[h].push_back({latency, key});
+                    continue;
+                }
+                u32*& w = to[h];
+                if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
+                    Chunk* c = chunks[h] + carved[h]++;
+                    c->prev = last[h], last[h] = c, w = c->rec;
+                }
+                *w++ = latency << KEY_BITS | key;
             }
-            *w++ = latency << KEY_BITS | key;
         }
     }
 
@@ -274,7 +244,7 @@ int main() {
     std::vector<size_t> cut(pieces + 1, size);
     cut[0] = 0;
     for (int k = 1; k < pieces; ++k)
-        for (cut[k] = std::max(cut[k - 1], size * k / pieces); cut[k] && cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
+        for (cut[k] = std::max(cut[k - 1], size * k / pieces); cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
     std::atomic<int> claim_piece{0}, claim{0}, claim_text{0};
 
     // Between the phases, endpoints are ranked in unsigned byte order (a
@@ -319,8 +289,6 @@ int main() {
         {  // the scratch goes before the text phase, where the output counts
         const u32 ne = names.size();
         std::vector<u32> start(ne + 1), errors(ne), latency;
-        // As long as the largest group could be, and untouched beyond the largest one seen.
-        auto spare = std::make_unique_for_overwrite<u32[]>(size / 40 + 8);
         for (int h; (h = claim++) < HOURS;) {
             // Counting sort of the hour's latencies by endpoint rank: count into
             // start[e + 1], prefix, then place each latency at its group's cursor.
@@ -344,7 +312,7 @@ int main() {
                 u32* a = latency.data() + start[e];
                 u32 r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
                 for (u32 from = 0; u32 r : {r50, r95, r99})
-                    if (r >= from) select(a + from, n - from, r - from, spare.get()), from = r + 1;
+                    if (r >= from) select(a + from, n - from, r - from), from = r + 1;
                 const Line& l = lines[h].emplace_back(e, n, a[r50], a[r95], a[r99], errors[e]);
                 // Label, name, six numbers each after a space, newline.
                 size += 21 + names[e].size() + 7;
