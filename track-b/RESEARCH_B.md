@@ -92,3 +92,10 @@ Where a 45% cut would have to come from, with every measured lever for this desi
 - answers phase (25 ms on the board): flat, no arm above 21% of `apply`
 - memory: anonymous peak is Units about 22 + bitmaps 11.8 + `count`/`last` 3.3 + tables; the bitmap cutoff sweep gave nothing
 Sum of the measured levers: about 10-15% of T, about +1.5 to +2 pts, i.e. B to about 75. Reaching 80 needs a different architecture (the 27 MiB entry stores far less than 2 bytes per posting plus bitmaps), and nothing in the profiles shows a path to it from this one.
+
+## Session addendum (Nov 1): B scan ladder, bucket probe, phrase reject
+
+- 1-CPU scan ladder (ms of ~605): lookup ~38%, scan closure ~34% (phrase matching ~60 ms, bucket adds ~34 ms), token iteration ~15%, classify ~9%.
+- Phrase checks: 1,032,600 candidates, 987,267 (96%) fail on a single id compare, 19,427 match.
+- SIMD 8-slot bucket probe (tag[8]+id[8], movemask): hash correct after fixes, mispredicts -16% in callgrind branch-sim, but +11% instructions and ~10% slower wall. Abandoned.
+- Phrase first-id reject before the slice compare (+3 formatted lines): 1 CPU 746.3 -> 737.6 ms wall (-1.2%), 4 CPU 241.9 -> 242.0 ms (0%), hash f86973c2 unchanged. Below the 0.2-pt bar after the line cost; not pushed. Board timing not measured.
