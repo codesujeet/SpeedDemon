@@ -28,6 +28,18 @@ const ID_BITS: u32 = 18;
 const ID_MASK: u64 = (1 << ID_BITS) - 1;
 const BIG: usize = 768;
 
+// n zeroed T on 2 MB pages, faulted in now (one TLB entry per 2 MB for tables read or written at random);
+// huge pages stay off for everything else, where a page written only in part would cost memory.
+unsafe fn huge<T>(n: usize, now: bool) -> &'static mut [T] {
+    let len = (n * std::mem::size_of::<T>()).next_multiple_of(1 << 21);
+    let raw = mmap(std::ptr::null_mut(), len + (1 << 21), 3, 0x22, -1, 0);
+    let p = raw.add(raw.align_offset(1 << 21));
+    (prctl(41, 0u64, 0u64, 0u64, 0u64), madvise(p, len, 14));
+    (0..len).step_by(1 << 21).filter(|_| now).for_each(|i| std::ptr::write_volatile(p.add(i), 0));
+    prctl(41, 1u64, 0u64, 0u64, 0u64);
+    std::slice::from_raw_parts_mut(p.cast(), n)
+}
+
 fn map(path: &str) -> &'static [u8] {
     let file = std::fs::File::open(path).expect(path);
     let len = file.metadata().unwrap().len() as usize;
@@ -359,18 +371,8 @@ impl Units {
 fn main() {
     unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
-    // Every token's lookup lands on a random line of the term table, so it is put on 2 MB pages (one TLB
-    // entry instead of 512), faulted in before huge pages are turned off for the rest, where a page written
-    // only in part would cost memory. It is handed back after the scan.
-    let n = (qtext.len() / 32).next_power_of_two();
-    let slot = unsafe {
-        let len = (n * 32).next_multiple_of(1 << 21);
-        let raw = mmap(std::ptr::null_mut(), len + (1 << 21), 3, 0x22, -1, 0);
-        let p = raw.add(raw.align_offset(1 << 21));
-        (madvise(p, len, 14), std::ptr::write_volatile(p, 0));
-        prctl(41, 1u64, 0u64, 0u64, 0u64);
-        std::slice::from_raw_parts_mut(p.cast::<__m256i>(), n)
-    };
+    // Every token's lookup lands on a random line of the term table; it is handed back after the scan.
+    let slot = unsafe { huge((qtext.len() / 32).next_power_of_two(), true) };
     let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops, mut hs) = (vec![], vec![], vec![], vec![]);
     // Each word's length is one count of the letter-or-digit bits after it; a word ends at a space, the closing
@@ -472,9 +474,17 @@ fn main() {
 
     let words = ndocs.div_ceil(256) * 4;
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
+    // Each thread's dedup marks and counts are read and written at random per token: all twelve threads'
+    // arrays sit on 2 MB pages, faulted in by the threads as they go (huge pages are on during the scan only;
+    // nothing else allocated then is big enough to get one). They go back once the counts are summed.
+    let state: &mut [u16] = unsafe { huge(THREADS * 2 * (nkeep + 1), false) };
+    let state = (state.as_mut_ptr() as usize, state.len());
+    unsafe { prctl(41, 0u64, 0u64, 0u64, 0u64) };
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
-        let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
+        let at = (state.0 as *mut u16).wrapping_add(t * 2 * (nkeep + 1));
+        let count = unsafe { std::slice::from_raw_parts_mut(at, nkeep + 1) };
+        let last = unsafe { std::slice::from_raw_parts_mut(at.add(nkeep + 1), nkeep + 1) };
         let (mut mine, mut kept, mut anchors) = (vec![], vec![0; 1 << 12], vec![0; 1 << 12]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units { v: Vec::with_capacity(1 << 15), prev: 0 }).collect();
         let first = firsts[t];
@@ -535,7 +545,7 @@ fn main() {
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
-    unsafe { munmap(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 32) };
+    unsafe { (prctl(41, 1u64, 0u64, 0u64, 0u64), munmap(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 32)) };
 
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
@@ -544,6 +554,7 @@ fn main() {
         (start[i], end) = (end, end + s.iter().map(|&n| n as u32).sum::<u32>());
     }
     let buckets: Vec<_> = scans.into_iter().map(|s| s.1).collect();
+    unsafe { munmap(state.0 as *mut u8, (state.1 * 2).next_multiple_of(1 << 21)) };
     let post: Vec<AtomicU16> = unsafe { std::mem::transmute(vec![0u16; end as usize]) };
     // Every thread writes into every bucket's region of post, so a thread far ahead makes post's pages
     // resident while the others still hold their units: the peak then depended on scheduling (+9 MiB on a
