@@ -282,5 +282,9 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `09cbdd1` | Track A: list a batch's line ends first, then parse each line from its known start (from c | `run-b249542c6d59` | 0.1705 | 65.8 | 518 | 68.76 |
 | `c9da3b2` | PERF: C block-mask field-end pass (tried, not kept), with laptop counters | `run-12e0181dc9f9` | 0.1680 | 66.2 | 518 | 68.89 |
 | `eee525f` | Track B: user-drafted lookup that identifies a term by its 64-bit hash (46-bit tag), no ke | `run-1231a3a2bc8d` | 0.1729 | 65.8 | 518 | 68.61 |
+| `8eb3624` | PERF: log board runs (B 73.96 with the 64-bit-hash lookup) | `run-2be5ed573689` | 0.1727 | 66.0 | 518 | 68.60 |
+| `86570b0` | Track A: 8% fewer instructions in the line parse | `run-6373361e2a7e` | 0.1807 | 65.9 | 518 | 68.12 |
+| `9358419` | Track C: 12% fewer instructions per record | `run-ab6a888b238c` | 0.1771 | 65.4 | 518 | 68.37 |
+| `ff3de8e` | Track C: read the country after its prefetch again, keeping the other instruction cuts | `run-5cafa0474a51` | 0.1707 | 66.0 | 518 | 68.73 |
 
 <!-- board-runs:end -->
