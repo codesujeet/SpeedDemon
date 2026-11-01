@@ -162,8 +162,8 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     let (mut buf, mut cap) = (ids.as_mut_ptr(), ids.capacity());
     loop {
-        // out <= cap always, so the subtraction cannot wrap; a window writes at most 32 + LAG ids past out.
-        if cap - out < 32 + LAG {
+        // out <= cap, so the subtraction cannot wrap; a window writes at most 32 + LAG ids past out, and 8 stay spare (see the packing in main).
+        if cap - out < 40 + LAG {
             (ids.set_len(out), ids.reserve(1 << 12), buf = ids.as_mut_ptr(), cap = ids.capacity());
         }
         let mut look = |&h: &u64| {
@@ -362,6 +362,20 @@ impl Units {
     }
 }
 
+// LEFT[mask] lists the set bits of mask, lowest first: the permutation that packs those lanes to the front.
+static LEFT: [[u32; 8]; 256] = {
+    let (mut t, mut m) = ([[0; 8]; 256], 0);
+    while m < 256 {
+        let (mut k, mut j) = (0, 0);
+        while j < 8 {
+            (t[m][k], k) = if m >> j & 1 == 1 { (j as u32, k + 1) } else { (t[m][k], k) };
+            j += 1;
+        }
+        m += 1;
+    }
+    t
+};
+
 fn main() {
     unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
@@ -501,21 +515,41 @@ fn main() {
             let (mark, bit) = ((doc - first + 1) as u16, 1u64 << (doc % 64));
             let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
             let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
-            kept.resize(kept.len().max(toks.len()), 0);
-            anchors.resize(anchors.len().max(toks.len()), 0);
-            let (mut n, mut na, mut nk) = (0, 0, 0);
+            // Eight ids at a time are packed, branch-free, into the bitmap ids (below nbits) in `kept` and the positions
+            // of the candidates (from nbits up to nkeep, the rest being phrase-only terms, non-terms and u32::MAX) in
+            // `anchors`. A packed store writes eight lanes, so both get 8 spare slots; the load of the last group reads
+            // up to 7 ids past the end, inside the id buffer (tokens keeps 8 spare) and masked out by `valid`.
+            let len = toks.len();
+            kept.resize(kept.len().max(len + 8), 0);
+            anchors.resize(anchors.len().max(len + 8), 0);
+            let (mut nb, mut n, mut na, mut nk) = (0, 0, 0, 0);
             unsafe {
-                for (at, &id) in toks.iter().enumerate() {
-                    let i = id as usize;
-                    *pending.get_unchecked_mut(i.min(nbits)) |= bit; // slot nbits is a sink, flush skips it
-                    *anchors.get_unchecked_mut(n) = at;
-                    n += (i.wrapping_sub(nbits) < nkeep - nbits) as usize;
+                let v = (_mm256_set1_epi32(nbits as i32), _mm256_set1_epi32(nkeep as i32));
+                let mut pos = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+                for base in (0..len).step_by(8) {
+                    let x = _mm256_loadu_si256(toks.as_ptr().add(base).cast());
+                    let y = _mm256_min_epu32(x, v.1);
+                    let valid = !(!0u32 << (len - base).min(8));
+                    let m = |c: __m256i| _mm256_movemask_ps(_mm256_castsi256_ps(c)) as u32;
+                    let (bm, km) = (m(_mm256_cmpgt_epi32(v.0, y)) & valid, m(_mm256_cmpeq_epi32(y, v.1)));
+                    let cm = !(bm | km) & valid;
+                    let pack = |m: u32, v: __m256i| {
+                        _mm256_permutevar8x32_epi32(v, _mm256_loadu_si256(LEFT[m as usize].as_ptr().cast()))
+                    };
+                    _mm256_storeu_si256(kept.as_mut_ptr().add(nb).cast(), pack(bm, x));
+                    _mm256_storeu_si256(anchors.as_mut_ptr().add(n).cast(), pack(cm, pos));
+                    (nb, n) = (nb + bm.count_ones() as usize, n + cm.count_ones() as usize);
+                    pos = _mm256_add_epi32(pos, _mm256_set1_epi32(8));
                 }
-                // Only the terms past the bitmaps and short of the phrase-only ones need the rest: `anchors` is
-                // filtered in place into the phrase anchors, and `kept` gets a term's first token in the document.
+                // The packed ids are below nbits, and pending has nbits + 1 slots.
+                for &id in &kept[..nb] {
+                    *pending.get_unchecked_mut(id as usize) |= bit;
+                }
+                // `anchors` is filtered in place into the phrase anchors, and `kept` gets a term's first token in the
+                // document. A candidate's id is in [nbits, nkeep) and last has nkeep + 1 slots.
                 for j in 0..n {
                     let at = *anchors.get_unchecked(j);
-                    let i = *toks.get_unchecked(at) as usize;
+                    let i = *toks.get_unchecked(at as usize) as usize;
                     let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
                     *anchors.get_unchecked_mut(na) = at;
                     na += (i >= a0) as usize;
@@ -523,7 +557,7 @@ fn main() {
                     nk += (new & (i < lists)) as usize;
                 }
             }
-            for &at in &anchors[..na] {
+            for at in anchors[..na].iter().map(|&at| at as usize) {
                 let k = (toks[at] as usize).min(nkeep) - a0;
                 for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
                     let span = spans[q as usize];
