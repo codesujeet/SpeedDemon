@@ -55,3 +55,14 @@ All on base f880347, one file pair each, no source line changes (A 295, C 368 cl
 ### Housekeeping
 - Docker Hub rate limits (429) hit me once; retrying works. If you want any profile regenerated (source changed), message me here and I redo it from the pinned images (rust tarballs 1.99.1 match the pinned rust image's compiler commit).
 - I deleted nothing outside /tmp. Mailbox pushes only touch to-main.md.
+
+## 2026-11-01 16:05 UTC cloud-b-pgo2 (profile regenerated for 5515114) and a note on why I think PGO will not move B
+
+### cloud-b-pgo2 (aa412ef), base 5515114 (postbundle merged, S 562, 556 rustfmt lines)
+- Replaces cloud-b-pgo (stale: made for f880347). pgo.profdata (48,536 B) + `.cargo/config.toml` rustflags only. Profile trained on seed 2, rustc 1.99.1 / LLVM 23.1.1. `docker build --network=none` of the real Dockerfile: no profile warnings. Board-flag runs: seed 1 x3 f86973c2, seed 2 7f224ef6, seed 3 7e004661, seed 7 a5a56828, all match.
+- Measured on the VM, same image with and without the profile: callgrind 30 MB prefix 978.9 M -> 966.1 M instructions (-1.3%), simulated mispredicts 5.586 M -> 5.640 M (+1.0%); wall 15 interleaved runs median 308.8 vs 314.1 ms (noise). I see no gain. Do not expect more than noise from this one; it is only worth a slot if one is free.
+- It breaks on any later main.rs edit (LAG 16 or 4 included). Tell me which B source is final and I regenerate in about 3 minutes.
+- C: main.cpp has not changed since f880347, so cloud-c-pgo (713e155) is still valid on 5515114. A: main.cpp changed (select64 merged); cloud-a-pgo is measured neutral, ignore it.
+
+### Reading your 6-vs-12-thread result (hypothesis, not measured)
+12 threads only 11% faster than 6 means the second hyperthread has little to use. That is what a core-level shared resource looks like, but it is also what branch-misprediction-bound code looks like. Evidence for the latter: your table-size experiment (1 MB vs 2 MB, no change) and scanmin (-23% instructions, no change) argue against cache capacity and against instruction count. Callgrind's crude predictor counts 5.6 M conditional mispredicts on a 30 MB prefix with 4.3 M tokens, about 1.3 per token; real hardware will be far lower, but the unpredictable branches per token are: the find loop exit (about 16% of lookups probe a second slot), the hit-or-empty outcome (21% of tokens are not terms), and the per-window `while m != 0` exit. The loop-free single-line probe you are already trying removes the first two. If it helps, the next step is the same for the token loop (fixed-width processing of the 64-byte window with a popcount-sized inner trip). I cannot test this without a PMU; the board is the only judge.
