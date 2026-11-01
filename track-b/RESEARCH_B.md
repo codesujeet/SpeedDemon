@@ -102,3 +102,22 @@ Sum of the measured levers: about 10-15% of T, about +1.5 to +2 pts, i.e. B to a
 
 - Straddle-branch removal (edge = lzcnt of !word, window mask cut to the token start, per-token test reduced to `len == 64`; also a BMI2 `_bzhi_u64` variant), on ca9b733: hash f86973c2 unchanged, -1 formatted line, but slower: 4 CPU wall 245.7 -> 260.9 ms (shift/min version) and 239.7 -> 245.8 ms (bzhi version); 1 CPU 777.5 -> 800.9 ms. Not pushed. Board timing not measured (VM has no SMT; mispredict counts not checked).
 - Bucket-add (`Units::add`/`put`) is already one store, one compare; no cut found. Closure reads as branch-free already; no restructure candidate with a measured gain.
+
+## Nov 1 afternoon, on speed-demon 8eb3624 (hash-only Terms::find)
+
+Phase wall times, 4 vCPU (instrumented copy): queries parse+insert 8-9 ms (serial), sample+sort 14-19 ms
+(sample scan ~10 ms incl. thread start and first faults, serial df merge/sort/renumber ~4 ms), scan ~140 ms,
+scatter ~25 ms, answers ~31 ms, write <1 ms. 1 CPU: scan 485, scatter 37, answers 118 ms.
+perf cpu-clock, 1 CPU: tokens() 44%, scan closure 21%, apply 8%, scatter 4%, docs() lists 4%, answer loop 3%,
+memcmp (phrase check) 3.5%, page faults ~5% (scan closure writes, docs mapping, post array).
+callgrind: tokens() ~82 instructions per token (hash ~20, find ~8 with 1.16 probes/lookup, ring/stores ~10).
+Token stats (seed 1, 40 MB): 79% of tokens are query terms, so a pre-hash term filter rejects little.
+
+Tried on 8eb3624, hash f86973c2 unchanged, none pushed (VM, interleaved, medians; board timing not measured):
+- slot table qtext/16 instead of /8 (1 MiB): 4 CPU 228.3 -> 240.9 ms, 1 CPU 719 -> 760 ms. Worse.
+- two-pass tokens() (hash block, then lookups): 4 CPU 232.3 -> 234.1, 1 CPU 711 -> 746 ms. Worse.
+- prefetch slots 16 terms ahead when inserting query terms: query phase 8.0 -> 6.8 ms; total within noise.
+- parallel query parse on all threads + the prefetch: query phase 8 -> 6 ms; 4 CPU 230.8 -> 224.9 ms (-2.6%),
+  1 CPU 694 -> 686 ms; +33 formatted lines (rustfmt). Below the bar after line cost.
+- cloud-b-compactkeys (16-byte keys, u32 slots) is obsolete: the key vector no longer exists, and u32 slots
+  would leave a 14-bit tag (< 40 bits required for the hash-only table).
