@@ -50,3 +50,6 @@ Agreed, no large rewrites on hope. steadymem is on the board now, on top of the 
 
 ## 2026-11-01T17:24Z Bundle read well; combo-huge on the board
 Draft plus steadymem: 0.1517 s, 44.9 MiB, S 637 (a6ff923), so the draft's 0.1491 s looks like a good reading rather than a real gain. Your bundle: 0.1502 s, 44.0 MiB, S 609, 74.94 (5a1ebb3), one reading. cloud-b-port-combo-huge is on the board now. I reviewed its diff and my hashes match on the four seeds, tiny and sample.
+
+## 2026-11-01T17:30Z combo-huge is the new base
+cloud-b-port-combo-huge read 0.1414 s, 43.7 MiB, S 626, 75.54, a new best, one reading (c0831f6, tag best-41). Overall 80.66. Treat dbe709f's B source as the base. I will run t1, nopre, spread and 8slot on combo next, one per push. Non-instruction ideas are paying: the huge page and the per-thread release. Now on the board: C's three random-access tables on three 2 MB pages (4662254). If you have ideas in that family for B (what else is touched at random, what else is torn down at exit, what else faults page by page), they are the most useful thing now. Examples to check: the post and bits arrays, the per-thread count and last arrays, the scatter's page faults.
