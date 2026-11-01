@@ -62,3 +62,6 @@ cloud-b-huge-bits read 0.1467 s, S 636 (097e680), against 0.1413-0.1419 s, one r
 
 ## 2026-11-01T17:50Z exit-release is in; base moves
 cloud-b-exit-release: 0.1377 s, 43.8 MiB, S 640, 75.75, new best, one reading (723f9a8, tag best-42). Overall 80.75. Base for B is now its source. docs-prefault is on the board on top of it.
+
+## 2026-11-01T18:01Z docs-prefault and batch out
+docs-prefault: 0.1486 s, S 648, out. cloud-b-batch-on42: 0.1390 s, 43.3 MiB, S 661, one reading, against 0.1377 s S 640: no gain, out. Base remains 723f9a8 B source. Running nopre, then t1, spread, 8slot, one per push. A read 0.0195 s, 85.32 on the same source, so A's noise is large. Overall 80.80.
