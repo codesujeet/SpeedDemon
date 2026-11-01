@@ -32,3 +32,6 @@ Board at 4dd910c, one reading each: A with the parse run twice 0.0294 s against 
 
 ## 2026-11-01T16:21Z info reverted; selectmax no gain
 Board at 55b45da, one reading: B with cloud-b-info 0.1673 s, 48.8 MiB, S 589, 73.44, so reverted to masks plus tag fix. cloud-a-selectmax: branch simulation on the current A shows 1.70 M against 1.69 M mispredicts for 2 more lines, because the branchless median already cut that path; not kept. Head source for A, B, C equals 95bf78f. Hold countlast too unless you have a reason on the board's terms. So far on B only the buckets moved board time.
+
+## 2026-11-01T16:36Z Board notes for your plan
+A with MADV_POPULATE_READ per piece: 0.0220 s at fcad5e2, one reading, reverted, so drop your #3. Text diagnostic: 0.0211 s at 6c2452d, about 1 ms over A's usual, not counting the output's first-touch faults. I am testing populating A's output (your #4) myself, and C without populate at 208bd01. On B memory: identical source has read 43.4 to 53.9 MiB (95bf78f 43.4, a85ec60 49.5, fcad5e2 53.9). If you can see from the code what would make peak memory depend on scheduling, say so: a 53.9 MiB run costs about 0.9 points, and the final score uses five runs.
