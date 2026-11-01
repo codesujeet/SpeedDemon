@@ -336,6 +336,28 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `4dd910c` | Tracks A, C: DIAGNOSTIC (each parse run twice, from cloud-a-diag-parse and cloud-c-diag-pa | `run-4b3a2c2b51b8` | 0.1521 | 43.7 | 585 | 74.97 |
 | `15d4eb3` | Track A: DIAGNOSTIC (hours phase run twice); Track B: token positions staged first, from c | `run-de21404d3d76` | 0.1629 | 44.1 | 607 | 74.06 |
 | `55b45da` | Track B: tokloop out (0.1629 s, S 607), cloud-b-info in (experiment); Track A: hours diagn | `run-17fe52804bec` | 0.1673 | 48.8 | 589 | 73.44 |
+| `a85ec60` | Track B: cloud-b-info out (0.1673 s, S 589, 48.8 MiB); log board runs | `run-029621322cf8` | 0.1639 | 49.5 | 585 | 73.62 |
+| `6c2452d` | Track A: DIAGNOSTIC (text output formatted twice, from cloud-a-diag-text) to time it on th | `run-c787a55bd373` | 0.1518 | 46.7 | 585 | 74.70 |
+| `fcad5e2` | Track A: diagnostic out; each piece's file pages mapped up front (experiment) | `run-bed34a274d56` | 0.1556 | 53.9 | 585 | 73.81 |
+| `208bd01` | Track A: no populate (0.0220 s); Track C: no populate either (experiment) | `run-606221bb7d82` | 0.1526 | 43.7 | 585 | 74.94 |
+| `77d58dc` | Track C: populate restored (0.0272 s without it); Track A: each hour's output pages mapped | `run-024fc818ea22` | 0.1534 | 43.8 | 585 | 74.87 |
+| `0d62eef` | Track A: no populate of the output (0.0208 s, S 321: no gain) | `run-50a49135d795` | 0.1612 | 43.8 | 585 | 74.33 |
+| `3d695ff` | Track B: one fused pass per token, no per-document id list, from cloud-b-redesign-fused (e | `run-a6f481f57871` | 0.2029 | 44.8 | 619 | 71.55 |
+| `9a254bf` | Track B: answer phase without retain's branch or core::fmt, from cloud-b-redesign-answers  | `run-3119a5487ca4` | 0.1580 | 44.2 | 603 | 74.42 |
+| `8ca391a` | Track B: user-drafted source with a bzhi hash and a warm ring (experiment, one reading); a | `run-c508dbf77b0d` | 0.1491 | 48.9 | 632 | 74.45 |
+| `a6ff923` | Track B: the draft's scatter waits per bucket, from cloud-b-redesign-steadymem (experiment | `run-9bdd93520956` | 0.1517 | 44.9 | 637 | 74.61 |
+| `5a1ebb3` | Track B: back to our source with cloud-b-redesign-bundle, steady memory and a faster query | `run-4ffafefc4c27` | 0.1502 | 44.0 | 609 | 74.94 |
+| `c0831f6` | Track B: the bundle plus each thread releasing its share and a huge page for the term tabl | `run-0466012e3f25` | 0.1414 | 43.7 | 626 | 75.54 |
+| `4662254` | Track C: the three random-access tables on three 2 MB pages (experiment) | `run-9ef2c053ed8e` | 0.1413 | 43.4 | 626 | 75.58 |
+| `2a3aab0` | Track C: one 2 MB page for the region and name tables only (experiment) | `run-69ab1d4467ff` | 0.1419 | 44.1 | 626 | 75.47 |
+| `097e680` | Track B: bitmap rows on 2 MB pages, from cloud-b-huge-bits (experiment) | `run-5bf23a90e048` | 0.1467 | 44.2 | 636 | 75.04 |
+| `723f9a8` | Track B: each thread releases its part of post and bits before exit, from cloud-b-exit-rel | `run-7eae9828db9d` | 0.1377 | 43.8 | 640 | 75.75 |
+| `01c427b` | Track B: helper threads map the corpus while the queries are parsed, from cloud-b-docs-pre | `run-34fae97ae88e` | 0.1486 | 43.5 | 648 | 74.92 |
+| `8f987f5` | Track B: group lookups with gathers on a cuckoo table, from cloud-b-batch-on42 (experiment | `run-f9313eaa2354` | 0.1390 | 43.3 | 661 | 75.59 |
+| `3ec3f7f` | Track B: no prefetch of last[id], from cloud-b-exp-nopre-on42 (experiment); group lookup o | `run-4c90d721b66a` | 0.1422 | 43.2 | 639 | 75.47 |
+| `dfa797b` | Track B: lookups prefetch into L2 not L1, from cloud-b-exp-t1-on42 (experiment); nopre out | `run-0b74a40c0803` | 0.1409 | 43.7 | 640 | 75.51 |
+| `03a7f25` | Track B: spare words spread by token position, from cloud-b-exp-spread-on42 (experiment);  | `run-33fe94c31dd4` | 0.1445 | 43.6 | 646 | 75.22 |
+| `fbfc622` | Track B: term buckets of eight slots in one cache line, from cloud-b-exp-8slot-on42 (exper | `run-c7eaa5f6dbc9` | 0.1450 | 43.8 | 645 | 75.17 |
 
 <!-- board-runs:end -->
 
