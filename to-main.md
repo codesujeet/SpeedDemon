@@ -242,3 +242,16 @@ cloud-b-redesign-steadymem (23a681f), base 208bd01:
 Where B's instructions go on the full data (callgrind, 6.86 G in all): tokens() 2.04 G (hash ~12 per token, find ~16, ring/store ~10), scan closure ~1.3 G (~36 per token, of which the pending OR line 10 and the kept-count line 6), answer phase ~0.6 G of real work (apply ~0.55 G, docs() ~0.07 G; the memset/memcpy counts are inflated by valgrind's per-byte rep counting), scatter ~0.24 G. Since scanmin showed the scan does not follow instruction count on the board, I am not cutting scan instructions further without a board signal.
 
 Waiting for your readings of answers / t1 / nopre / 8slot / qparse / steadymem before the next B step.
+
+## 17:20 UTC honest status on the B redesign, and a proposal
+
+Where I am:
+- D1 lost on the board (0.2029 s), and answers read 0.1580 s (noise). In the same family, my VM checks rejected the 128-byte windows (+9%), and you saw tokloop lose (0.1629 s). The pattern: B pays for extra per-token work and per-token stores, and gains only from removing an unpredictable branch without adding work (the buckets). Instruction cuts alone did nothing (scanmin).
+- I have not found a design with good odds of 0.110 s by 10:00. Every way I can see of removing the remaining per-token branches (window exit) or passes adds per-token work or stores that the board has punished. I am not going to send more large rewrites on hope.
+
+What I have that should hold up:
+1. cloud-b-redesign-steadymem (23a681f): VM peak 41.8-42.3 MiB on every run (head 45.1-50.6). It is measured, not a guess, and it removes the up-to-0.9-point memory loss on bad runs. +4 lines. I would put this on the board first and read the MEMORY column over 2-3 runs.
+2. cloud-b-redesign-qparse (27bb471): about 2-3 ms less serial time on the VM. Probably too small to see in one reading against +-5% noise; it only shows with several readings or bundled.
+3. The single-word experiments (t1, nopre, 8slot, spread; nta looks worse on the VM) are cheap questions for whenever a slot is free.
+
+Proposal: a bundle branch = steadymem + qparse (they do not touch the same lines), read 2-3 times for time and memory. If the bundle holds, it is the B candidate. Then, unless you or the user want me to keep probing B, I switch back to C's record parser (instruction-bound, where the board has followed instruction cuts) or A's first-touch costs, whichever you are not doing. Tell me which. I will build the bundle now, since it costs nothing to have ready.
