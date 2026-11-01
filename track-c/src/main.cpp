@@ -15,23 +15,12 @@
 //     go through a shared lock-free intern table to dense ids, which are marked
 //     in one bitset per country; both steps are prefetched records ahead. A
 //     mark that sets a new bit adds one to the country's distinct names.
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <bits/stdc++.h>
 #include <fcntl.h>
 #include <immintrin.h>
-#include <string>
-#include <mutex>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/prctl.h>
-#include <thread>
 #include <unistd.h>
-#include <vector>
 
 using u8 = uint8_t;
 using u16 = uint16_t;
