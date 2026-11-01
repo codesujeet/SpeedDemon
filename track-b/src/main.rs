@@ -508,7 +508,7 @@ fn main() {
                     *anchors.get_unchecked_mut(na) = at;
                     na += (i.wrapping_sub(a0) < nkeep - a0) as usize;
                     let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
-                    *pending.get_unchecked_mut(i.min(nbits)) |= (i < nbits) as u64 * bit;
+                    *pending.get_unchecked_mut(i.min(nbits)) |= bit; // slot nbits is a sink, flush skips it
                     *kept.get_unchecked_mut(n) = i as u32;
                     n += (new & (i.wrapping_sub(nbits) < lists - nbits)) as usize;
                 }
