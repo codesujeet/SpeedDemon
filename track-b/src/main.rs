@@ -26,6 +26,8 @@ extern "C" {
 
 const THREADS: usize = 12;
 const NONE: u32 = u32::MAX;
+const ID_BITS: u32 = 18; // a term slot holds a 14-bit hash tag above id + 1
+const ID: u32 = (1 << ID_BITS) - 1;
 const BUCKETS: usize = 32; // scan output streams per thread; term i goes to bucket i % BUCKETS
 const GAP: u32 = 15; // a unit's 4-bit doc gap; GAP means the whole gap follows in the next unit
 const DOC_BITS: u32 = 15; // a thread's share holds under 2^15 documents
@@ -81,50 +83,70 @@ fn number(text: &[u8], i: usize) -> u32 {
     digits.fold(0, |v, &b| v * 10 + (b - b'0') as u32)
 }
 
-/// The key of the token of len (at most 32) bytes at p: its bytes lowercased
-/// (OR-ing 0x20 lowercases letters and keeps digits) and zero padded.
-unsafe fn key(p: *const u8, len: usize) -> __m256i {
-    static KEEP: [u8; 64] = {
-        let (mut k, mut i) = ([0; 64], 0);
-        while i < 32 {
+/// The key of the token of len bytes at p: up to 16 bytes lowercased (OR-ing 0x20
+/// lowercases letters and keeps digits) and zero padded.
+unsafe fn key(p: *const u8, len: usize) -> __m128i {
+    if len > 16 {
+        return fingerprint(std::slice::from_raw_parts(p, len));
+    }
+    static KEEP: [u8; 32] = {
+        let (mut k, mut i) = ([0; 32], 0);
+        while i < 16 {
             (k[i], i) = (0xFF, i + 1);
         }
         k
     };
-    let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
-    _mm256_and_si256(v, _mm256_loadu_si256(KEEP.as_ptr().add(32 - len).cast()))
+    let v = _mm_or_si128(_mm_loadu_si128(p.cast()), _mm_set1_epi8(0x20));
+    _mm_and_si128(v, _mm_loadu_si128(KEEP.as_ptr().add(16 - len).cast()))
 }
 
-/// From the key's first 16 bytes only: longer tokens are rare, and the key
-/// comparison tells apart any that collide.
-fn hash(k: __m256i) -> usize {
-    let w: [u64; 4] = unsafe { std::mem::transmute(k) };
+/// The key of a token over 16 bytes: two FNV-style 64-bit hashes of its lowercased
+/// bytes, each byte above 0x7F so that no short token's key can equal it.
+#[cold]
+#[inline(never)]
+fn fingerprint(token: &[u8]) -> __m128i {
+    let fnv = |m: u64| {
+        token
+            .iter()
+            .fold(m, |h, &b| (h ^ (b | 0x20) as u64).wrapping_mul(m)) as i64
+    };
+    unsafe {
+        _mm_or_si128(
+            _mm_set_epi64x(fnv(0x100000001B3), fnv(0xC2B2AE3D27D4EB4F)),
+            _mm_set1_epi8(-128),
+        )
+    }
+}
+
+/// A key's hash: the key comparison tells apart any keys that collide.
+fn hash(k: __m128i) -> usize {
+    let w: [u64; 2] = unsafe { std::mem::transmute(k) };
     let c = unsafe { _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]) };
     c.wrapping_mul(0x9E3779B97F4A7C15) as usize
 }
 
-fn same(a: __m256i, b: __m256i) -> bool {
-    unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
+fn same(a: __m128i, b: __m128i) -> bool {
+    unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(a, b)) == 0xFFFF }
 }
 
-/// Query terms to dense ids: open addressing, each slot the top 32 hash bits
+/// Query terms to dense ids: open addressing, each slot a 14-bit hash tag
 /// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
 /// is no term gets the id one past the last term, so callers need no branch.
 struct Terms {
-    slot: Vec<u64>,
-    keys: Vec<__m256i>,
+    slot: Vec<u32>,
+    keys: Vec<__m128i>,
 }
 
 impl Terms {
-    fn find(&self, k: __m256i, h: usize) -> u32 {
+    fn find(&self, k: __m128i, h: usize) -> u32 {
         let mask = self.slot.len() - 1;
-        let key = |s: u64| unsafe { *self.keys.get_unchecked(s as u32 as usize - 1) };
+        let key = |s: u32| unsafe { *self.keys.get_unchecked((s & ID) as usize - 1) };
         let mut i = h & mask;
         loop {
             // i is masked, and a slot holds 0 or the id + 1 of a stored key.
             let s = unsafe { *self.slot.get_unchecked(i) };
-            if s == 0 || s >> 32 == h as u64 >> 32 && same(key(s), k) {
-                return (s as u32).wrapping_sub(1).min(self.keys.len() as u32);
+            if s == 0 || s >> ID_BITS == (h >> 50) as u32 && same(key(s), k) {
+                return (s & ID).wrapping_sub(1).min(self.keys.len() as u32);
             }
             i = (i + 1) & mask;
         }
@@ -138,7 +160,7 @@ impl Terms {
         }
         self.keys = keys;
         for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = *s >> 32 << 32 | (new[*s as u32 as usize - 1] + 1) as u64;
+            *s = *s & !ID | (new[(*s & ID) as usize - 1] + 1);
         }
     }
 
@@ -148,13 +170,13 @@ impl Terms {
         let mut i = h & mask;
         while self.slot[i] != 0 {
             let s = self.slot[i];
-            if s >> 32 == h as u64 >> 32 && same(self.keys[s as u32 as usize - 1], k) {
-                return s as u32 - 1;
+            if s >> ID_BITS == (h >> 50) as u32 && same(self.keys[(s & ID) as usize - 1], k) {
+                return (s & ID) - 1;
             }
             i = (i + 1) & mask;
         }
         self.keys.push(k);
-        self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
+        self.slot[i] = ((h >> 50) as u32) << ID_BITS | self.keys.len() as u32;
         self.keys.len() as u32 - 1
     }
 }
@@ -182,13 +204,13 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 /// later, so the misses overlap.
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
     const LAG: usize = 8;
-    let mut ring = [(_mm256_setzero_si256(), 0); LAG];
+    let mut ring = [(_mm_setzero_si128(), 0); LAG];
     let (mut n, mut out) = (0usize, ids.len());
     loop {
         // A window adds at most 32 ids, and the document's end LAG more.
         (ids.set_len(out), ids.reserve(32 + LAG));
         let buf = ids.as_mut_ptr();
-        let mut look = |r: &(__m256i, usize)| {
+        let mut look = |r: &(__m128i, usize)| {
             let id = t.find(r.0, r.1);
             _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast()); // its state, for the caller
             (*buf.add(out), out) = (id, out + 1);
@@ -211,10 +233,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
                 len = next;
             }
             m &= m.wrapping_add(m & m.wrapping_neg()); // clears this token's run of bits
-            let k = match len {
-                ..=32 => key(p.add(s as usize), len as usize),
-                _ => _mm256_setzero_si256(), // no term, but it still parts its neighbours
-            };
+            let k = key(p.add(s as usize), len as usize);
             let h = hash(k);
             _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h & (t.slot.len() - 1)).cast());
             if n >= LAG {
@@ -262,7 +281,9 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
             }
             Bits(a)
         }
-        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) => (b.retain(|&d| has(&a, d)), List(b)).1,
+        (Bits(a), b'A', List(mut b)) | (List(mut b), b'A', Bits(a)) => {
+            (b.retain(|&d| has(&a, d)), List(b)).1
+        }
         (List(mut a), _, Bits(b)) if op == b'N' => (a.retain(|&d| !has(&b, d)), List(a)).1,
         (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
             let x = a.to_mut();
@@ -271,9 +292,13 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
             }
             Bits(a)
         }
-        (List(a), _, List(b)) if (op == b'O' && a.len() + b.len() > 2048) || (op != b'O' && a.len() + b.len() > BIG && a.len() * 16 >= b.len()) => {
+        (List(a), _, List(b))
+            if (op == b'O' && a.len() + b.len() > 2048)
+                || (op != b'O' && a.len() + b.len() > BIG && a.len() * 16 >= b.len()) =>
+        {
             let mut bits = vec![0u64; words];
-            b.iter().for_each(|&d| bits[d as usize / 64] |= 1 << (d % 64));
+            b.iter()
+                .for_each(|&d| bits[d as usize / 64] |= 1 << (d % 64));
             apply(List(a), op, Bits(Cow::Owned(bits)), words)
         }
         (List(a), b'O', List(b)) => {
@@ -371,7 +396,13 @@ fn line(out: &mut String, docs: &Docs) {
 /// Calls f(doc, ids) with the token ids of each line in text, the first
 /// being document first, with pre[id] prefetched for each; returns the
 /// number of documents.
-fn walk(text: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32, &[u32])) -> u32 {
+fn walk(
+    text: &[u8],
+    first: u32,
+    t: &Terms,
+    pre: *const u16,
+    mut f: impl FnMut(u32, &[u32]),
+) -> u32 {
     let (mut p, end) = (text.as_ptr(), text.as_ptr_range().end);
     let (mut doc, mut ids) = (first, Vec::with_capacity(1 << 12));
     while p < end {
@@ -435,10 +466,9 @@ impl Units {
     }
 }
 
-
 fn main() {
     unsafe { mallopt(-3, 1 << 16) }; // M_MMAP_THRESHOLD: freed buffers go back to the kernel
-    // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
+                                     // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
     let qtext = map("/data/queries.txt");
     let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
@@ -536,7 +566,7 @@ fn main() {
     let first_of = |i: usize| anchored.partition_point(|a| (a.0 as usize) < i);
     let astart: Vec<usize> = (a0..=nkeep).map(first_of).collect();
     let words = ndocs.div_ceil(256) * 4; // whole 4-word vectors, for bit_sums
-    // Zero pages from the kernel, written only where a bit is set.
+                                         // Zero pages from the kernel, written only where a bit is set.
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
 
     // The scan: phrase matches, bitmap bits, and list postings by bucket.
@@ -544,7 +574,8 @@ fn main() {
     let scans: Vec<(Vec<u16>, Mutex<Vec<Units>>)> = on_threads(|t| {
         // Per term (and one id for every token that needs nothing): documents
         // in this share, and the last one's offset + 1.
-        let (mut count, mut last, mut mine) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1], vec![]);
+        let (mut count, mut last, mut mine) =
+            (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1], vec![]);
         // Per document: the list terms new to it, and where the phrase anchors are.
         let (mut kept, mut anchors) = (vec![], vec![]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units::default()).collect();
@@ -573,7 +604,8 @@ fn main() {
             let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
             let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
             // Grow-only: both are written before they are read, so a shorter document needs no refill.
-            (kept.len() < toks.len()).then(|| (kept.resize(toks.len(), 0), anchors.resize(toks.len(), 0)));
+            (kept.len() < toks.len())
+                .then(|| (kept.resize(toks.len(), 0), anchors.resize(toks.len(), 0)));
             let (mut n, mut na) = (0, 0);
             for (at, &id) in toks.iter().enumerate() {
                 let i = (id as usize).min(nkeep);
@@ -611,16 +643,19 @@ fn main() {
         // This share is not read again: its pages go back now, by this thread,
         // instead of all of the file's at exit by one (MADV_DONTNEED on a clean
         // private mapping only drops pages; a later read would fault them in).
-        let (from, to) = ((text.as_ptr() as usize + cut[t] + 4095) & !4095, (text.as_ptr() as usize + cut[t + 1]) & !4095);
+        let (from, to) = (
+            (text.as_ptr() as usize + cut[t] + 4095) & !4095,
+            (text.as_ptr() as usize + cut[t + 1]) & !4095,
+        );
         unsafe { madvise(from as *mut u8, to.max(from) - from, 4) };
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
     drop(terms); // nothing after the scan reads the term tables
-    // Each term's postings lie in one stretch, thread by thread: the segment
-    // from thread t holds seg[i * THREADS + t] offsets from firsts[t]. The
-    // stretches go bucket by bucket, so a bucket's scatter writes one region,
-    // and frequency ranks dealt round-robin keep the regions small.
+                 // Each term's postings lie in one stretch, thread by thread: the segment
+                 // from thread t holds seg[i * THREADS + t] offsets from firsts[t]. The
+                 // stretches go bucket by bucket, so a bucket's scatter writes one region,
+                 // and frequency ranks dealt round-robin keep the regions small.
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
         let s = &mut seg[i * THREADS..][..THREADS];
