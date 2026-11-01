@@ -273,7 +273,14 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         }
     };
 
-    while (p < end) {
+    // A record's start waits on the end of the one before it, so one cursor is
+    // a chain of dependent loads. The piece is cut in two at a CRLF and both
+    // halves are read in turn: the two chains overlap in the core.
+    const char* half = p + (end - p) / 2;
+    const char* mid = static_cast<const char*>(memmem(half, end - half, "\r\n", 2));
+    const char* const split_at = mid ? mid + 2 : end;
+    const char* q = split_at;
+    auto step = [&](const char*& p) __attribute__((always_inline)) {
         // The file's pages are scattered in memory, and the hardware prefetcher
         // stops at each 4 KB page; this reaches into the next one in time.
         _mm_prefetch(p + 2048, _MM_HINT_T0);
@@ -302,7 +309,10 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         pending[n++ % LAG] = {key, r, u32(id), name.length, note.length, cents};
         names.prefetch(key);
         p = eol + 1;
-    }
+    };
+    while (p < split_at && q < end) step(p), step(q);
+    while (p < split_at) step(p);
+    while (q < end) step(q);
     for (last = n; n < last + 2 * LAG; ++n) advance();
 }
 
