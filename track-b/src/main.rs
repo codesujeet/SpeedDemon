@@ -544,10 +544,17 @@ fn main() {
     }
     let buckets: Vec<_> = scans.into_iter().map(|s| s.1).collect();
     let post: Vec<AtomicU16> = unsafe { std::mem::transmute(vec![0u16; end as usize]) };
+    // Every thread writes into every bucket's region of post, so a thread far ahead makes post's pages
+    // resident while the others still hold their units: the peak then depended on scheduling. No thread
+    // starts bucket b before all have finished bucket b - 2.
+    let done: Vec<AtomicUsize> = (0..BUCKETS).map(|_| AtomicUsize::new(0)).collect();
     on_threads(|t| {
         let buckets = std::mem::take(&mut *buckets[t].lock().unwrap());
         let mut cursor = vec![0u32; lists.div_ceil(BUCKETS)];
         for (b, units) in buckets.into_iter().enumerate() {
+            while b >= 2 && done[b - 2].load(Relaxed) < THREADS {
+                std::thread::yield_now();
+            }
             for (c, i) in cursor.iter_mut().zip((b..lists).step_by(BUCKETS)) {
                 let before: u32 = seg[i * THREADS..][..t].iter().map(|&n| n as u32).sum();
                 *c = start[i] + before;
@@ -566,6 +573,7 @@ fn main() {
                 let c = &mut cursor[std::mem::replace(&mut term, NONE) as usize];
                 (post[*c as usize].store(doc as u16, Relaxed), *c += 1);
             }
+            done[b].fetch_add(1, Relaxed);
         }
     });
     let post: Vec<u16> = unsafe { std::mem::transmute(post) };
