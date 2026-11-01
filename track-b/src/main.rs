@@ -18,7 +18,7 @@ extern "C" {
     fn _exit(status: i32) -> !;
 }
 
-const THREADS: usize = 6;
+const THREADS: usize = 12;
 const NONE: u32 = u32::MAX;
 const BUCKETS: usize = 32;
 const GAP: u32 = 15;
@@ -130,7 +130,7 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 }
 
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
-    const LAG: usize = 8;
+    const LAG: usize = 16;
     let mut ring = [0u64; LAG];
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     loop {
