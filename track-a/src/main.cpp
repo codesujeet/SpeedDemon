@@ -168,33 +168,47 @@ struct Parser {
     }
 
     void run(const char* p, const char* end) {
-        while (p < end) {
-            // The file's pages are scattered in memory and the hardware
-            // prefetcher stops at each 4 KB page; this reaches into the next ones.
-            _mm_prefetch(p + 4096, _MM_HINT_T0);
-            // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
-            int day = (p[8] - '0') * 10 + (p[9] - '0'), hour = (p[11] - '0') * 10 + (p[12] - '0');
-            int h = (p[6] == '0' ? day - 30 : day + 1) * 24 + hour - 18;
-
-            // Spaces and newlines in the 64 bytes after the timestamp. Only an
-            // endpoint near its 125-byte maximum pushes past the window.
-            const char* m = p + 28;
-            u64 sp = eq32(m, ' ') | u64(eq32(m + 32, ' ')) << 32;
-            u64 nl = eq32(m, '\n') | u64(eq32(m + 32, '\n')) << 32;
-            const char* name = m + __builtin_ctzll(sp) + 1;
-            const char* name_end = nl ? m + __builtin_ctzll(sp & (sp - 1)) : next_byte(name, ' ');
-            const char* eol = nl ? m + __builtin_ctzll(nl) : next_byte(name_end + 5, '\n');
-            u32 key = endpoints(std::string_view(name, name_end - name)) | (name_end[1] == '5' ? ERR : 0);
-            u32 latency = decode(eol, eol - name_end - 5);  // after " SSS "
-            p = eol + 1;
-
-            if (__builtin_expect(latency >= PACKED_MAX, 0)) {
-                wide[h].push_back({latency, key});
-                continue;
+        // The line ends of the next 4 KB are listed first, so a line's start does not
+        // wait for the parse of the one before. A line is at least 40 bytes, so a
+        // 64-byte block holds at most two ends; both are stored (the second only
+        // counts if there is one), with no branch on how many lines the block has.
+        const char* ends[4096 / 40 + 8];
+        for (const char* scan = p; p < end;) {
+            u32 n = 0;
+            for (const char* stop = std::min(scan + 4096, end); scan < stop; scan += 64) {
+                u64 m = eq32(scan, '\n') | u64(eq32(scan + 32, '\n')) << 32;
+                if (end - scan < 64) m &= (u64(1) << (end - scan)) - 1;
+                ends[n] = scan + _tzcnt_u64(m), n += m != 0, m &= m - 1;
+                ends[n] = scan + _tzcnt_u64(m), n += m != 0;
             }
-            Chunk*& c = last[h];
-            if (!c || c->n == Chunk::CAP) next->prev = c, next->n = 0, next->hour = h, c = next++;
-            c->rec[c->n++] = latency << KEY_BITS | key;
+            for (u32 i = 0; i < n; ++i) {
+                const char* eol = ends[i];
+                // The file's pages are scattered in memory and the hardware
+                // prefetcher stops at each 4 KB page; this reaches into the next ones.
+                _mm_prefetch(p + 4096, _MM_HINT_T0);
+                // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
+                int day = (p[8] - '0') * 10 + (p[9] - '0'), hour = (p[11] - '0') * 10 + (p[12] - '0');
+                int h = (p[6] == '0' ? day - 30 : day + 1) * 24 + hour - 18;
+
+                // Spaces in the 64 bytes after the timestamp. Only an endpoint of about
+                // 60 bytes or more pushes the name's end past the window.
+                const char* m = p + 28;
+                u64 sp = eq32(m, ' ') | u64(eq32(m + 32, ' ')) << 32;
+                const char* name = m + __builtin_ctzll(sp) + 1;
+                u64 rest = sp & (sp - 1);  // the spaces after the method's
+                const char* name_end = rest ? m + __builtin_ctzll(rest) : next_byte(name, ' ');
+                u32 key = endpoints(std::string_view(name, name_end - name)) | (name_end[1] == '5' ? ERR : 0);
+                u32 latency = decode(eol, eol - name_end - 5);  // after " SSS "
+                p = eol + 1;
+
+                if (__builtin_expect(latency >= PACKED_MAX, 0)) {
+                    wide[h].push_back({latency, key});
+                    continue;
+                }
+                Chunk*& c = last[h];
+                if (!c || c->n == Chunk::CAP) next->prev = c, next->n = 0, next->hour = h, c = next++;
+                c->rec[c->n++] = latency << KEY_BITS | key;
+            }
         }
     }
 
