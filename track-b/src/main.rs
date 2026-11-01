@@ -79,11 +79,15 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
     (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93) | 1 << 63
 }
 
-// Open addressing over 32-byte buckets of four slots, each the hash's top bits above
+// Open addressing over 64-byte buckets of eight slots, each the hash's top bits above
 // id + 1 (0 if free). One compare settles nearly every lookup, a term or not, with no
 // branch on which: telling those apart in a loop mispredicted about one token in three.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+struct Bucket([u64; 8]);
+
 struct Terms {
-    slot: Vec<__m256i>,
+    slot: Vec<Bucket>,
     n: usize,
 }
 
@@ -94,14 +98,15 @@ impl Terms {
         unsafe {
             let tag = _mm256_set1_epi64x((h & !ID_MASK) as i64);
             let keep = _mm256_set1_epi64x(!ID_MASK as i64);
+            let bits = |x: __m256i| _mm256_movemask_pd(_mm256_castsi256_pd(x)) as u32;
             loop {
-                let v = *self.slot.get_unchecked(i);
-                let eq = _mm256_cmpeq_epi64(_mm256_and_si256(v, keep), tag);
-                let free = _mm256_cmpeq_epi64(v, _mm256_setzero_si256());
-                let hit = _mm256_movemask_pd(_mm256_castsi256_pd(eq)) as u32;
-                if hit | _mm256_movemask_pd(_mm256_castsi256_pd(free)) as u32 != 0 {
-                    let w: [u64; 4] = std::mem::transmute(v);
-                    let id = (w[hit.trailing_zeros() as usize & 3] & ID_MASK) as u32;
+                let w = &self.slot.get_unchecked(i).0;
+                let (v0, v1) = (_mm256_load_si256(w.as_ptr().cast()), _mm256_load_si256(w.as_ptr().add(4).cast()));
+                let eq = |v: __m256i| bits(_mm256_cmpeq_epi64(_mm256_and_si256(v, keep), tag));
+                let free = |v: __m256i| bits(_mm256_cmpeq_epi64(v, _mm256_setzero_si256()));
+                let hit = eq(v0) | eq(v1) << 4;
+                if hit | free(v0) | free(v1) << 4 != 0 {
+                    let id = (w[hit.trailing_zeros() as usize & 7] & ID_MASK) as u32;
                     return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), self.n as u32);
                 }
                 i = (i + 1) & mask;
@@ -111,8 +116,7 @@ impl Terms {
 
     fn renumber(&mut self, new: &[u32]) {
         for b in &mut self.slot {
-            let w: &mut [u64; 4] = unsafe { std::mem::transmute(b) };
-            for s in w.iter_mut().filter(|s| **s != 0) {
+            for s in b.0.iter_mut().filter(|s| **s != 0) {
                 *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
             }
         }
@@ -122,8 +126,7 @@ impl Terms {
         let h = unsafe { hash(term.as_ptr(), term.len()) };
         let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
         loop {
-            let w: &mut [u64; 4] = unsafe { std::mem::transmute(&mut self.slot[i]) };
-            for s in w.iter_mut() {
+            for s in self.slot[i].0.iter_mut() {
                 if *s == 0 {
                     self.n += 1;
                     *s = (h & !ID_MASK) | self.n as u64;
@@ -358,7 +361,7 @@ impl Units {
 fn main() {
     unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
     let qtext = map("/data/queries.txt");
-    let slot = vec![unsafe { _mm256_setzero_si256() }; (qtext.len() / 32).next_power_of_two()];
+    let slot = vec![Bucket([0; 8]); (qtext.len() / 64).next_power_of_two()];
     let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
