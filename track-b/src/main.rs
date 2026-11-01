@@ -182,17 +182,19 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
         let (word, nl) = classes(p);
         let stop = nl.trailing_zeros();
-        // Token starts and ends in the bytes before the newline; a token that reaches the window's last byte has
-        // no end here, so its start is left over and the next window begins there.
+        // Token starts in the bytes before the newline; a token's length is the run of ones in w from its start
+        // (it ends before bit 63, so w >> s has a zero). A token that reaches the window's last byte is the one
+        // with the highest start and is left over: the next window begins there (left is 0 when there is none).
         let w = word & nl.wrapping_sub(1) & !nl;
-        let (mut starts, mut ends) = (w & !(w << 1), w & !(w >> 1 | 1 << 63));
-        while ends != 0 {
+        let mut starts = w & !(w << 1);
+        let left = (w >> 63 << 63) >> (starts.leading_zeros() & 63);
+        starts &= !left;
+        while starts != 0 {
             let s = starts.trailing_zeros();
-            let len = ends.trailing_zeros() + 1 - s;
-            (starts, ends) = (starts & starts.wrapping_sub(1), ends & ends.wrapping_sub(1));
-            push(p.add(s as usize), len);
+            starts &= starts.wrapping_sub(1);
+            push(p.add(s as usize), (!(w >> s)).trailing_zeros());
         }
-        let mut next = starts.trailing_zeros().min(64) as usize;
+        let mut next = left.trailing_zeros() as usize;
         if next == 0 {
             next = (0..).find(|&i| !(*p.add(i)).is_ascii_alphanumeric()).unwrap();
             push(p, next as u32);
