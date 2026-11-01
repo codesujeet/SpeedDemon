@@ -138,5 +138,29 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `33b8455` | Track B: postings fill uses the term offset as its own cursor (agent-b d49c673) | `run-aba44205a125` | 0.0289 | 26.8 | 508 | 78.02 |
 | `b208288` | Track A: workers write their own hour block at its final offset; no writer thread (agent-a | `run-f6f7bcc42a1c` | 0.0254 | 27.4 | 516 | 79.29 |
 | `cd4c35e` | Revert "Track A: workers write their own hour block at its final offset; no writer thread  | `run-5156e7ee3367` | 0.0272 | 23.7 | 508 | 79.22 |
+| `e804869` | PERF.md: add a Board runs table with real run IDs from the public feed to every track | `run-35c07889b928` | 0.0278 | 24.7 | 508 | 78.81 |
+| `36f4296` | Tracks A and C: profile-guided optimization from a committed profile (no source or Dockerf | `run-bac39780b486` | 0.0274 | 21.8 | 508 | 79.52 |
+| `158f18f` | Track B: 32-byte token mask (agent-b 0054521); Track A PERF.md header with current board n | `run-7cf129aecf02` | 0.0292 | 27.0 | 508 | 77.90 |
+| `49548fa` | Track B: merge and render in parallel from per-range logs (agent-b a34f4cf) | `run-f1548a29e949` | 0.0302 | 30.1 | 508 | 77.04 |
+| `3286475` | Track C: 111-bit name fingerprint (second independent hash compared on every tag match), d | `run-fdef798466b5` | 0.0314 | 27.7 | 508 | 76.97 |
+| `280509c` | Track B: vector-compare term lookup, CRC32C hash, fused dedupe (agent-b) | `run-861ceb90812d` | 0.0316 | 22.9 | 508 | 77.73 |
+| `892d831` | Track C: regenerate the PGO profile for the 111-bit fingerprint source | `run-44baf3d9c9ef` | 0.0287 | 26.9 | 508 | 78.08 |
+| `2ca5698` | Track C: back to the 36f4296 source and profile (the wider fingerprint cost 3-5 ms on the  | `run-021bc02d8c03` | 0.0260 | 26.2 | 508 | 79.29 |
+| `b1497a5` | Track B: 2 MB pieces (agent-b c51c3b0) | `run-474389647c4a` | 0.0282 | 27.9 | 508 | 78.11 |
+| `f00df83` | Revert Track B 2 MB pieces: T -17 ms but M +12 MiB, 65.82 vs 65.94 on the board | `run-b9b556122cc2` | 0.0285 | 24.8 | 508 | 78.52 |
+| `b18c263` | PERF: board run IDs through f00df83 (16 scored runs per track) | `run-6702f437271f` | 0.0270 | 29.2 | 508 | 78.42 |
+| `44a450f` | Track A: mallopt M_MMAP_THRESHOLD 32 KiB, memory.peak 23.0 -> 20.4 MiB locally (agent-a4 c | `run-d32c96fcb132` | 0.0293 | 22.3 | 510 | 78.66 |
+| `b7bb4d3` | Track A: PGO profile regenerated for the mallopt source (agent-a4 90f380c) | `run-b3e9f1f07f68` | 0.0308 | 25.9 | 510 | 77.49 |
+| `4c454fe` | Track A: three-phase port with exact output sizes, every thread formats into the mapped ou | `run-6530313fd395` | 0.0299 | 18.5 | 621 | 78.62 |
+| `5476630` | Re-run board on the Track A port (noise check) | `run-fed7c25d2dd7` | 0.0312 | 18.6 | 621 | 78.14 |
+| `6c9bc1e` | Tracks B and D: user-drafted Rust solutions, reviewed (alt-bd c90b4a8): B 603 lines, D 509 | `run-fc26d4ecbd5c` | 0.0296 | 24.6 | 510 | 78.13 |
+| `f47d313` | Track C: user-drafted C++ design ported to Rust, CRLF chunk cut, 440 lines (agent-c3 7827d | `run-86a31ad638b8` | 0.0297 | 20.4 | 510 | 78.90 |
+| `c4832fa` | Re-run board on the Track C port (noise check) | `run-8d7db8d67590` | 0.0305 | 26.0 | 510 | 77.58 |
+| `4f9e4bd` | Track D: PAGE 512 -> 256 (experiment) | `run-9a5f54804ca5` | 0.0286 | 22.4 | 510 | 78.89 |
+| `7a3ceb9` | Track D: BLOB 512 -> 1024 (experiment) | `run-da00b4b0506a` | 0.0274 | 20.9 | 510 | 79.69 |
+| `0b9abd0` | Track D: BLOB back to 512, CHUNK 1024 -> 4096 (experiment) | `run-8cb139320e99` | 0.0302 | 20.6 | 510 | 78.68 |
+| `1a4d82e` | Track D: PAGE 256 -> 128 (experiment) | `run-f1bf9309754d` | 0.0276 | 27.7 | 510 | 78.37 |
+| `a2fa18e` | Track B: persistent thread pool instead of 12 fresh threads per phase (experiment) | `run-60a438196df7` | 0.0284 | 26.5 | 510 | 78.28 |
+| `b573d30` | Track C: C++ (gcc 15, user-drafted design: pclmul quote mask, dense-id name table); Rust v | `run-2b86ebff8137` | 0.0279 | 22.3 | 510 | 79.20 |
 
 <!-- board-runs:end -->

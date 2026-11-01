@@ -249,5 +249,19 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `2ca5698` | Track C: back to the 36f4296 source and profile (the wider fingerprint cost 3-5 ms on the  | `run-adb26f28d060` | 0.2739 | 59.1 | 882 | 65.94 |
 | `b1497a5` | Track B: 2 MB pieces (agent-b c51c3b0) | `run-37cd73b3c901` | 0.2569 | 71.3 | 882 | 65.82 |
 | `f00df83` | Revert Track B 2 MB pieces: T -17 ms but M +12 MiB, 65.82 vs 65.94 on the board | `run-bb89766a881e` | 0.2648 | 59.7 | 882 | 66.26 |
+| `b18c263` | PERF: board run IDs through f00df83 (16 scored runs per track) | `run-67a58afa3baf` | 0.2717 | 59.3 | 882 | 66.01 |
+| `44a450f` | Track A: mallopt M_MMAP_THRESHOLD 32 KiB, memory.peak 23.0 -> 20.4 MiB locally (agent-a4 c | `run-72ec53983faa` | 0.2722 | 58.5 | 882 | 66.05 |
+| `b7bb4d3` | Track A: PGO profile regenerated for the mallopt source (agent-a4 90f380c) | `run-e60e1b087bfa` | 0.2945 | 59.2 | 882 | 65.14 |
+| `4c454fe` | Track A: three-phase port with exact output sizes, every thread formats into the mapped ou | `run-014c6b1aaf05` | 0.2686 | 58.2 | 882 | 66.21 |
+| `5476630` | Re-run board on the Track A port (noise check) | `run-8ba90ced8ffc` | 0.2731 | 59.1 | 882 | 65.97 |
+| `6c9bc1e` | Tracks B and D: user-drafted Rust solutions, reviewed (alt-bd c90b4a8): B 603 lines, D 509 | `run-523ddc469568` | 0.2363 | 49.5 | 611 | 69.51 |
+| `f47d313` | Track C: user-drafted C++ design ported to Rust, CRLF chunk cut, 440 lines (agent-c3 7827d | `run-6268f725a495` | 0.2331 | 49.0 | 611 | 69.70 |
+| `c4832fa` | Re-run board on the Track C port (noise check) | `run-d18be8f9268b` | 0.2402 | 52.2 | 611 | 69.10 |
+| `4f9e4bd` | Track D: PAGE 512 -> 256 (experiment) | `run-bd0646debd8b` | 0.2348 | 49.1 | 611 | 69.61 |
+| `7a3ceb9` | Track D: BLOB 512 -> 1024 (experiment) | `run-d6e5090d20ce` | 0.2395 | 53.3 | 611 | 69.04 |
+| `0b9abd0` | Track D: BLOB back to 512, CHUNK 1024 -> 4096 (experiment) | `run-08de56e336b8` | 0.2390 | 49.1 | 611 | 69.42 |
+| `1a4d82e` | Track D: PAGE 256 -> 128 (experiment) | `run-b25f263a3bf3` | 0.2693 | 50.7 | 611 | 67.98 |
+| `a2fa18e` | Track B: persistent thread pool instead of 12 fresh threads per phase (experiment) | `run-ecdc074c9d6f` | 0.2347 | 50.9 | 632 | 69.35 |
+| `b573d30` | Track C: C++ (gcc 15, user-drafted design: pclmul quote mask, dense-id name table); Rust v | `run-da6a37a31458` | 0.2502 | 57.1 | 611 | 68.26 |
 
 <!-- board-runs:end -->
