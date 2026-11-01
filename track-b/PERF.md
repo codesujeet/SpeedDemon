@@ -297,6 +297,9 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `0df6a6f` | Track C: decode numbers with pmaddubsw/pmaddwd instead of the scalar multiply chain | `run-289f654f3411` | 0.1736 | 46.8 | 617 | 73.06 |
 | `a39d4f6` | Track B: two exact line cuts (610 -> 600 formatted lines) | `run-6711d5829e03` | 0.1724 | 47.3 | 607 | 73.15 |
 | `2a7885f` | Track C: find the id's comma with one 16-byte compare instead of the SWAR zero-byte trick | `run-bfcd67fa23ef` | 0.1666 | 47.6 | 607 | 73.49 |
+| `37fae72` | Log board run for C's 16-byte comma find (79.90) | `run-1e6abe410603` | 0.1668 | 47.1 | 607 | 73.53 |
+| `ba0e248` | README: next-steps paragraph matches the current board times and the C diagnostics | `run-f5407b7d4512` | 0.1941 | 46.7 | 607 | 71.92 |
+| `e1bd0df` | Track C: quoted fields that close within 31 bytes on a lone quote skip the 64-byte loop | `run-282dd8057f38` | 0.1676 | 47.5 | 607 | 73.44 |
 
 <!-- board-runs:end -->
 
