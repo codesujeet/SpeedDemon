@@ -175,7 +175,6 @@ static Chunk* chunks[HOURS];  // each hour's stretch
 static std::atomic<u32> carved[HOURS];
 
 struct Parser {
-    Chunk* scratch = nullptr;  // DIAGNOSTIC: when set, records go to this one chunk, over and over
     Chunk* last[HOURS] = {};
     // Each hour's next free record. Chunks are aligned to their size, so a cursor
     // with no low bits is either null or just past a full chunk.
@@ -223,7 +222,7 @@ struct Parser {
                 }
                 u32*& w = to[h];
                 if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
-                    Chunk* c = scratch ? scratch : chunks[h] + carved[h]++;
+                    Chunk* c = chunks[h] + carved[h]++;
                     c->prev = last[h], last[h] = c, w = c->rec;
                 }
                 *w++ = latency << KEY_BITS | key;
@@ -299,10 +298,7 @@ int main() {
 
     std::vector<std::thread> pool;
     for (int t = 0; t < nt; ++t) pool.emplace_back([&, t] {
-        Parser dummy;  // DIAGNOSTIC: the parse is run twice, the first result is thrown away
-        dummy.scratch = (Chunk*)aligned_alloc(sizeof(Chunk), sizeof(Chunk));
         for (int k; (k = claim_piece++) < pieces;) {
-            dummy.run(log + cut[k], log + cut[k + 1]);
             parsers[t].run(log + cut[k], log + cut[k + 1]);
             // The piece is not read again: its pages are unmapped now, by this
             // thread, instead of all of the log's at exit by one.
@@ -314,7 +310,10 @@ int main() {
         {  // the scratch goes before the text phase, where the output counts
         const u32 ne = names.size();
         std::vector<u32> start(ne + 1), errors(ne), latency;
-        for (int h; (h = claim++) < HOURS;) {
+        for (int h; (h = claim++) < HOURS;)
+        for (int rep = 0; rep < 2; ++rep) {  // DIAGNOSTIC: the hour is computed twice, the first result is thrown away
+            std::vector<Line> sink;
+            std::vector<Line>& out_lines = rep ? lines[h] : sink;
             // Counting sort of the hour's latencies by endpoint rank: count into
             // start[e + 1], prefix, then place each latency at its group's cursor.
             std::fill(start.begin(), start.end(), 0);
@@ -324,7 +323,7 @@ int main() {
             latency.resize(start[ne]);
             std::vector<u32> cursor(start.begin(), start.end() - 1);
             for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32 e, u32, u32 l) { latency[cursor[e]++] = l; });
-            madvise(chunks[h], carved[h] * sizeof(Chunk), MADV_DONTNEED);
+            if (rep) madvise(chunks[h], carved[h] * sizeof(Chunk), MADV_DONTNEED);
 
             u64 size = 0;
             for (u32 e = 0; e < ne; ++e) {
@@ -338,12 +337,12 @@ int main() {
                 u32 r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
                 for (u32 from = 0; u32 r : {r50, r95, r99})
                     if (r >= from) select(a + from, n - from, r - from), from = r + 1;
-                const Line& l = lines[h].emplace_back(e, n, a[r50], a[r95], a[r99], errors[e]);
+                const Line& l = out_lines.emplace_back(e, n, a[r50], a[r95], a[r99], errors[e]);
                 // Label, name, six numbers each after a space, newline.
                 size += 21 + names[e].size() + 7;
                 for (u32 x : {l.n, l.p50, l.p95, l.p99, l.errors, ppm(l)}) size += width(x);
             }
-            at[h] = size;
+            if (rep) at[h] = size;
         }
         }
         sized.arrive_and_wait();

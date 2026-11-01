@@ -152,51 +152,69 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
-unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
+unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16, st: &mut Vec<u64>) -> *const u8 {
     const LAG: usize = 4;
-    let mut ring = [0u64; LAG];
-    let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
-    loop {
-        (ids.set_len(out), ids.reserve(32 + LAG));
-        let buf = ids.as_mut_ptr();
-        let mut look = |&h: &u64| {
-            let id = t.find(h);
-            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
-            (*buf.add(out), out) = (id, out + 1);
-        };
-        let mut push = |q: *const u8, len: u32| {
-            let h = if len <= 32 { hash(q, len as usize) } else { 1 << 63 };
-            _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
-            if n >= LAG {
-                look(&ring[n % LAG]);
-            }
-            (ring[n % LAG], n) = (h, n + 1);
-        };
-        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
+    // Pass 1: each token of the document becomes one word, its address with its length (at most 33) above bit 56. Each
+    // window writes 16 words with no branch on how many tokens it has (the count advances by the popcount), and a token
+    // that reaches the window's last byte is left for the next window, which then starts at its first byte.
+    let mut count = 0usize;
+    let end = loop {
+        (st.set_len(count), st.reserve(64));
         let (word, nl) = classes(p);
         let stop = nl.trailing_zeros();
-        // Token starts and ends in the bytes before the newline; a token that reaches the window's last byte has
-        // no end here, so its start is left over and the next window begins there.
-        let w = word & nl.wrapping_sub(1) & !nl;
-        let (mut starts, mut ends) = (w & !(w << 1), w & !(w >> 1 | 1 << 63));
-        while ends != 0 {
-            let s = starts.trailing_zeros();
-            let len = ends.trailing_zeros() + 1 - s;
-            (starts, ends) = (starts & starts.wrapping_sub(1), ends & ends.wrapping_sub(1));
-            push(p.add(s as usize), len);
+        let mut m = word & ((1u128 << stop) - 1) as u64;
+        let k = (!m).leading_zeros();
+        if k == 64 {
+            let mut len = 64;
+            while (*p.add(len)).is_ascii_alphanumeric() {
+                len += 1;
+            }
+            *st.as_mut_ptr().add(count) = p as u64 | 33 << 56;
+            (count, p) = (count + 1, p.add(len));
+            continue;
         }
-        let mut next = starts.trailing_zeros().min(64) as usize;
-        if next == 0 {
-            next = (0..).find(|&i| !(*p.add(i)).is_ascii_alphanumeric()).unwrap();
-            push(p, next as u32);
+        m &= u64::MAX >> k;
+        let (mut s, mut e) = (m & !(m << 1), m & !(m >> 1));
+        let c = s.count_ones() as usize;
+        let out = st.as_mut_ptr().add(count);
+        for j in 0..10 {
+            let (a, b) = (s.trailing_zeros(), e.trailing_zeros());
+            *out.add(j) = p.wrapping_add(a as usize) as u64 | ((b.wrapping_sub(a) + 1).min(33) as u64) << 56;
+            (s, e) = (s & s.wrapping_sub(1), e & e.wrapping_sub(1));
         }
+        for j in 10..c {
+            let (a, b) = (s.trailing_zeros(), e.trailing_zeros());
+            *out.add(j) = p.wrapping_add(a as usize) as u64 | ((b.wrapping_sub(a) + 1).min(33) as u64) << 56;
+            (s, e) = (s & s.wrapping_sub(1), e & e.wrapping_sub(1));
+        }
+        count += c;
         if nl != 0 {
-            (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
-            ids.set_len(out);
-            return p.add(stop as usize + 1);
+            break p.add(stop as usize + 1);
         }
-        p = p.add(next);
+        p = p.add(64 - k as usize);
+    };
+    // Pass 2: hash each token, prefetch its slot, and look up the token LAG places back.
+    let (mut ring, mask, out) = ([0u64; LAG], t.slot.len() - 1, ids.len());
+    ids.reserve(count + LAG);
+    let buf = ids.as_mut_ptr().add(out);
+    let look = |h: u64, i: usize| {
+        let id = t.find(h);
+        _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
+        *buf.add(i) = id;
+    };
+    for i in 0..count {
+        let w = *st.as_ptr().add(i);
+        let (q, len) = ((w & (1 << 56) - 1) as *const u8, (w >> 56) as usize);
+        let h = if len <= 32 { hash(q, len) } else { 1 << 63 };
+        _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
+        if i >= LAG {
+            look(ring[i % LAG], i - LAG);
+        }
+        ring[i % LAG] = h;
     }
+    (count.saturating_sub(LAG)..count).for_each(|i| look(ring[i % LAG], i));
+    ids.set_len(out + count);
+    end
 }
 
 enum Docs<'a> {
@@ -326,14 +344,14 @@ fn line(out: &mut String, docs: &Docs) {
 
 fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32, &[u32])) -> u32 {
     let (mut p, end) = (s.as_ptr(), s.as_ptr_range().end);
-    let (mut doc, mut ids) = (first, Vec::with_capacity(1 << 12));
+    let (mut doc, mut ids, mut st) = (first, Vec::with_capacity(1 << 12), Vec::with_capacity(1 << 12));
     while p < end {
         unsafe {
             while *p != b'\t' {
                 p = p.add(1);
             }
             ids.clear();
-            p = tokens(p, t, &mut ids, pre);
+            p = tokens(p, t, &mut ids, pre, &mut st);
         }
         (f(doc, &ids), doc += 1);
     }

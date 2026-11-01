@@ -379,7 +379,6 @@ int main() {
     const int pieces = 8 * nthreads;
     std::vector<size_t> cut = split(records, start, size, pieces, "\r\n");
     std::vector<std::array<Totals, 256>> totals(nthreads);
-    std::vector<std::array<Totals, 256>> dummy_totals(nthreads);  // DIAGNOSTIC: totals of the second parse, thrown away
     NameTable names;
     NamesSeen seen;
 
@@ -410,9 +409,6 @@ int main() {
                 madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
                 parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
                               seen, totals[t].data());
-                // DIAGNOSTIC: the piece is parsed a second time (names and marks are already set, so nothing real changes).
-                parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
-                              seen, dummy_totals[t].data());
                 // The piece is not read again: its pages are unmapped now, by
                 // this thread, instead of all of the file's at exit by one.
                 uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
