@@ -361,15 +361,25 @@ fn main() {
     let slot = vec![unsafe { _mm256_setzero_si256() }; (qtext.len() / 32).next_power_of_two()];
     let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
-    for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
-        let (phrase, from) = (q[0] == b'P', ids.len() as u32);
-        let start = if phrase { 8 } else { 5 };
-        for (k, word) in q[start..q.len() - phrase as usize].split(|&b| b == b' ').enumerate() {
-            match !phrase && k % 2 == 1 {
+    // Each word's length is one count of the letter-or-digit bits after it; a word ends at a space, the closing
+    // quote or the LF. Terms are lower case and operators upper case, so the first byte tells them apart.
+    let mut i = 0;
+    while i < qtext.len() {
+        let (phrase, from) = (qtext[i] == b'P', ids.len() as u32);
+        i += if phrase { 8 } else { 5 };
+        loop {
+            let len = unsafe { (!classes(qtext.as_ptr().add(i)).0).trailing_zeros() } as usize;
+            let word = &qtext[i..i + len];
+            match word[0].is_ascii_uppercase() {
                 true => *ops.last_mut().unwrap() = word[0],
                 false => (ids.push(terms.insert(word)), ops.push(0)).1,
             }
+            i += len + 1;
+            if qtext[i - 1] != b' ' {
+                break;
+            }
         }
+        i += phrase as usize;
         spans.push((phrase, from, ids.len() as u32));
     }
     let nterms = terms.n;
