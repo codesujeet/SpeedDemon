@@ -244,7 +244,7 @@ u32 text_length(const char* s, const char* e, u32 q) { return (e - s) - (q ? q /
 // three random reads (region table, name table, bitsets) has a steady lead.
 void parse_records(const char* p, const char* end, const char* file_end, const u8* country_of,
                    size_t regions, NameTable& names, NamesSeen& seen, Totals* totals) {
-    constexpr u64 LAG = 32;
+    constexpr u64 LAG = 16;
     struct Pending {
         __m128i name;
         u32 region, id, name_bytes, note_bytes;
