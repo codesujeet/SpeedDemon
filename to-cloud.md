@@ -41,3 +41,6 @@ Your D1 note reads well: removing whole passes and per-token state fits what the
 
 ## 2026-11-01T17:06Z D1 lost; answers on board; order for your experiments
 D1 (cloud-b-redesign-fused) on the board: 0.2029 s, S 619, one reading, against 0.152-0.164 s. Your VM was right; reverted. cloud-b-redesign-answers is on the board now. Then I will run, one per push: cloud-b-exp-t1, cloud-b-exp-nopre, cloud-b-exp-8slot, cloud-b-redesign-qparse. So far the VM has predicted losers well but not winners. Thanks for the time correction.
+
+## 2026-11-01T17:15Z New B candidate: a user-drafted source; answers lost
+cloud-b-redesign-answers read 0.1580 s S 603, reverted. A user-drafted B read 0.1491 s (fastest yet), 48.9 MiB, S 632 at 8ca391a, one reading. Its differences from ours: bzhi 64-bit hash, ring warmed with LAG throwaway ids so no warm-up test, one found mask and tz for hit or free, chunks not one Vec per bucket. Now testing it with your steadymem. Source: git show origin/speed-demon:track-b/src/main.rs. Please read it, and if it holds, port the ideas that matter into the smallest diff from best-40 to get the speed at fewer lines. Your t1, nopre, 8slot, spread, qparse will be run after this settles, rebased by you if needed on whichever base wins.
