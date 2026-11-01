@@ -262,3 +262,18 @@ Proposal: a bundle branch = steadymem + qparse (they do not touch the same lines
 - Checked: real Dockerfile, `docker build --network=none`, board flags: seeds 1 (x3) / 2 / 3 / 7 match; tiny dcdad7cedfc0 (reference), sample eeeec1e9319d (spec); phrase-heavy fuzz 0 differences in 40 cases. Lines 579 -> 603 (rustfmt count, +24).
 - VM (cgroup v1 peak, /data warmed outside, 8 runs): 42.0-42.3 MiB every run (head 46.0-51.0 MiB in the same session). VM wall, 21 interleaved runs: head 302.3, bundle 295.9 ms median (no slowdown; a 2 % difference is noise here).
 - What to read on the board: the M column first (expect about 42-44 MiB on every run, not 43-54), then T against 0.152-0.164 s. Board not measured.
+
+## 17:21 UTC the user-drafted B (8ca391a): what differs, and two single-idea ports for readings
+
+What 8ca391a changes against best-40 (B source of 208bd01), from reading the diff:
+1. bzhi scalar hash (two 8-byte loads for tokens up to 16 bytes, a branch for longer); 2. a flat u64 slot array probed in aligned groups of four with one hit-or-free mask; 3. the term table on one 2 MB huge page, faulted in before PR_SET_THP_DISABLE, unmapped after the scan; 4. LAG 8 with the ring pre-filled so there is no `n >= LAG` test; 5. the old straddle-test token loop (not the masks); 6. Units back to raw-pointer chunks; 7. `pending |= bit` without the multiply; 8. each thread MADV_DONTNEEDs its share of docs.txt after the scan; 9. query inserts prefetched 16 ahead (same as my qparse insert); 10. bit_sums and a few post-bundle cuts reverted (where its extra lines come from).
+
+My bets on what matters, and why:
+- (8) the per-thread drop of the scanned share. Without it, the process exit tears down the 254 MB file mapping on one thread, inside T. History: a94d376 had this and read 0.1674 s against 0.1737 / 0.1728 s; it was lost later in a rewrite. On the VM, in one round of 31 interleaved runs: head 315.8, (8) alone 304.6, full draft 300.9 ms (medians). That is most of the draft's VM gain from (8) alone, but the VM has not predicted winners well.
+- (3) the huge-page table: one TLB entry for every lookup instead of 512 pages. Your d67679d test turned on THP for everything (memory 54.5 MiB), which is a different experiment. On the VM it is not resolvable (one noisy round: head 333.1, (3) 328.1).
+- (1), (2), (4), (6), (7): instruction-level, which has not moved B on the board (scanmin). Lower priority.
+
+Single-idea branches on 208bd01, for readings (both: native hashes for seeds 1/2/3/7 match, tiny and sample match):
+- cloud-b-port-dontneed (b77b4fa): idea 8 alone. +8 lines (587; the commit says +7, it is +8).
+- cloud-b-port-hugetable (1c4b6dc): idea 3 alone. +10 lines (589). AnonHugePages 2048 kB confirmed in smaps during a run.
+If (8) carries most of 0.1491 s, the smallest diff is bundle (steadymem + qparse, which already has the insert prefetch) + dontneed: about +32 lines over best-40 against the draft's +53. I will build that combination as soon as you post the bundle reading, so it lands on the right base.
