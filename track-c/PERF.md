@@ -179,6 +179,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `37fae72` | Log board run for C's 16-byte comma find (79.90) | `run-2956e5e6828f` | 0.0273 | 10.0 | 373 | 79.49 |
 | `ba0e248` | README: next-steps paragraph matches the current board times and the C diagnostics | `run-2183b50e7c84` | 0.0273 | 9.3 | 373 | 79.84 |
 | `e1bd0df` | Track C: quoted fields that close within 31 bytes on a lone quote skip the 64-byte loop | `run-468287e49bef` | 0.0293 | 9.3 | 376 | 79.02 |
+| `b34456e` | Log board run for C's quoted-field fast path (first reading 79.02) | `run-579c42f13df3` | 0.0271 | 9.2 | 376 | 79.89 |
+| `351b645` | Track C: parse the two halves of each piece in turn, so two dependent chains overlap | `run-e0a398446908` | 0.0282 | 8.8 | 387 | 79.59 |
 
 <!-- board-runs:end -->
 
@@ -207,3 +209,7 @@ The laptop cannot show this, so the board was used as a profiler. Each build bel
 | `79d68e7` | the real program | about 29.9 ms |
 
 Reading the table: set-up and teardown are about 5.5 ms; streaming 202 MB through the cores costs about 6 more (memory bandwidth, about 35 GB/s); the name table with its bitset marks costs about 4 (the atomic OR itself about 2); the remaining 14 ms or so is the field parse itself. So C is bound by instructions per record (about 343 by a callgrind count from a separate research session, at an IPC of about 2.5 on six physical cores), not by memory or by the page mapping. The leader's whole run is 18 ms, so a smaller instruction count per record is the only lever of this size left.
+
+### Two cursors per piece (tried, reverted)
+
+`llvm-mca` (alderlake model) on the record loop gave 99 simulated cycles per record against a 55.5-cycle throughput bound, with the critical path a pointer chain through each record's field ends (load, compare, move-mask, count-trailing-zeros, add, repeated per field). The piece was cut in two at a CRLF and both halves were parsed in turn so two chains could overlap in one thread. Callgrind: +1.2% instructions, hash unchanged, edge suite as before. On the board (`351b645`): 0.0282 s, 8.8 MiB, S 387, 79.59, against 0.0271-0.0293 s for the code without it, and 11 more formatted lines. No gain beyond noise (the two hyperthreads on each core already overlap two chains), so it was reverted. The chain length itself, not the instruction count, is what a block-mask pass for the field boundaries would shorten.
