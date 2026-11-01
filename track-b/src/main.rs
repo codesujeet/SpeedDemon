@@ -457,17 +457,37 @@ fn main() {
     // Queries, flat: query q's terms are ids[span.1..span.2], and for BOOL
     // ops[i] joins ids[i] and ids[i + 1].
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
-    for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
-        let (phrase, from) = (q[0] == b'P', ids.len() as u32);
-        let body = &q[if phrase { 8 } else { 5 }..q.len() - phrase as usize];
-        for (k, word) in body.split(|&b| b == b' ').enumerate() {
-            match !phrase && k % 2 == 1 {
-                true => *ops.last_mut().unwrap() = word[0],
-                false => (ids.push(terms.insert(word)), ops.push(0)).1,
+    // Token by token off the same 64-byte class masks the documents use: k counts the
+    // tokens of the line so far (0 is BOOL or PHRASE, then a BOOL line alternates term and
+    // operator, a PHRASE line is all terms).
+    let (mut at, mut k, mut phrase, mut from) = (0, 0, false, 0u32);
+    while at < qtext.len() {
+        let (word, nl) = unsafe { classes(qtext.as_ptr().add(at)) };
+        let stop = if nl != 0 { nl.trailing_zeros() } else { 64 };
+        let (mut m, mut next) = (word & ((1u128 << stop) - 1) as u64, 64);
+        while m != 0 {
+            let (s, len) = (m.trailing_zeros(), (!(m >> m.trailing_zeros())).trailing_zeros());
+            if s + len == 64 && nl == 0 && s != 0 {
+                next = s; // the token may go on: start the next window at it
+                break;
             }
+            let w = &qtext[at + s as usize..][..len as usize];
+            match (k, phrase) {
+                (0, _) => (phrase, from) = (w[0] == b'P', ids.len() as u32),
+                (_, false) if k % 2 == 0 => *ops.last_mut().unwrap() = w[0],
+                _ => (ids.push(terms.insert(w)), ops.push(0)).1,
+            }
+            k += 1;
+            m &= m.wrapping_add(m & m.wrapping_neg());
         }
-        spans.push((phrase, from, ids.len() as u32));
+        if nl != 0 {
+            (k != 0).then(|| spans.push((phrase, from, ids.len() as u32))); // not for an empty line
+            (k, at) = (0, at + stop as usize + 1);
+        } else {
+            at += next as usize;
+        }
     }
+    (k != 0).then(|| spans.push((phrase, from, ids.len() as u32))); // a last query without its LF
     let nterms = terms.keys.len();
     assert!(nterms <= BUCKETS << 12, "too many terms"); // a unit's index has 12 bits
     let mut in_bool = vec![false; nterms];
