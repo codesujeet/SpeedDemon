@@ -171,16 +171,18 @@ struct Names {
 };
 static Names endpoints;  // zero pages until written
 
-// One hour's records from one thread, in a chain of 16 KB chunks carved in
-// order from a region the thread maps up front (one mmap, so no lock is
-// shared). The output file's pages count toward peak memory as it is written,
-// so chunks are handed back while it grows: see Parser::release.
+// One hour's records from one thread, in a chain of 16 KB chunks. Every hour
+// has its own stretch of one mapping, from which all threads carve its chunks
+// in order, so an hour's chunks are contiguous and go back in one madvise as
+// soon as its records are copied out, in whatever order the hours finish. The
+// output file's pages count toward peak memory, and by then all are released.
 struct Chunk {
-    static constexpr u32 CAP = (16384 - 12) / 4;
+    static constexpr u32 CAP = (16384 - 8) / 4;
     Chunk* prev;
-    u32 hour;
     u32 rec[CAP];
 };
+static Chunk* chunks[HOURS];  // each hour's stretch
+static std::atomic<u32> carved[HOURS];
 
 struct Parser {
     Chunk* last[HOURS] = {};
@@ -189,16 +191,6 @@ struct Parser {
     u32* to[HOURS] = {};
     // (latency, key) of the long ones.
     std::vector<std::pair<u32, u32>> wide[HOURS];
-    // next: where the next chunk is carved; kept: first one not yet released.
-    Chunk *next = nullptr, *kept = nullptr;
-
-    // Room for a log of `size` bytes: a line is at least 40 bytes, and each
-    // hour may leave one chunk part full. Pages are charged only once written.
-    void map(size_t size) {
-        size_t bytes = (size / 40 / Chunk::CAP + 2 + HOURS) * sizeof(Chunk);
-        auto at = (uintptr_t)mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        next = kept = (Chunk*)((at + sizeof(Chunk) - 1) & -sizeof(Chunk));
-    }
 
     void run(const char* p, const char* end) {
         // The line ends of the next 4 KB are listed first, so a line's start does not
@@ -239,23 +231,12 @@ struct Parser {
                     continue;
                 }
                 u32*& w = to[h];
-                if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) next->prev = last[h], next->hour = h, last[h] = next, w = next++->rec;
+                if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
+                    Chunk* c = chunks[h] + carved[h]++;
+                    c->prev = last[h], last[h] = c, w = c->rec;
+                }
                 *w++ = latency << KEY_BITS | key;
             }
-        }
-    }
-
-    // The log is in arrival order, so chunks are carved roughly hour by hour
-    // and hours finish in the same order: the run of chunks at the front whose
-    // hours are all finished grows steadily. Hand it back once it reaches 64
-    // KB, in one madvise, instead of one call (and TLB shootdown) per chunk;
-    // larger batches left about 1 MB more resident at the peak.
-    void release(const std::atomic<bool>* finished) {
-        Chunk* c = kept;
-        while (c < next && finished[c->hour]) ++c;
-        if (c - kept >= 4 || (c == next && c > kept)) {
-            madvise(kept, (c - kept) * sizeof(Chunk), MADV_DONTNEED);
-            kept = c;
         }
     }
 
@@ -284,6 +265,12 @@ int main() {
     if (size && mmap(log, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, in, 0) == MAP_FAILED) return perror("mmap"), 1;
     // Line-aligned pieces, eight per thread, claimed in order: a thread that
     // starts late or shares its core takes fewer.
+    // Each hour's stretch has room for every line (a line is at least 40 bytes)
+    // plus one part-full chunk per thread; pages are charged only once written.
+    const size_t room = size / 40 / Chunk::CAP + 1 + nt;
+    auto region = (uintptr_t)mmap(nullptr, (HOURS * room + 1) * sizeof(Chunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (region == uintptr_t(MAP_FAILED)) return perror("mmap"), 1;
+    for (int h = 0; h < HOURS; ++h) chunks[h] = (Chunk*)((region + sizeof(Chunk) - 1) & -sizeof(Chunk)) + h * room;
     const int pieces = 8 * nt;
     std::vector<size_t> cut(pieces + 1, size);
     cut[0] = 0;
@@ -304,10 +291,6 @@ int main() {
         for (auto [name, id] : by_name) rank[id] = names.size(), names.push_back(name);
     });
 
-    // An hour is finished once its records are copied out; one thread at a
-    // time then releases whatever chunks that frees.
-    std::vector<std::atomic<bool>> finished(HOURS);
-    std::atomic_flag releasing;
     struct Line {
         u32 e, n, p50, p95, p99, errors;
     };
@@ -316,9 +299,6 @@ int main() {
     std::vector<u64> at(HOURS + 1);  // an hour's text size, then its offset
     char* text = nullptr;
     std::barrier sized(nt, [&]() noexcept {
-        // Every hour is finished: whatever chunks the last releases left go
-        // back now, before the output's pages start to count.
-        for (auto& ps : parsers) ps.release(finished.data());
         u64 total = 0;
         for (int h = 0; h < HOURS; ++h) total += std::exchange(at[h], total);
         at[HOURS] = total;
@@ -328,7 +308,6 @@ int main() {
 
     std::vector<std::thread> pool;
     for (int t = 0; t < nt; ++t) pool.emplace_back([&, t] {
-        parsers[t].map(size);
         for (int k; (k = claim_piece++) < pieces;) {
             parsers[t].run(log + cut[k], log + cut[k + 1]);
             // The piece is not read again: its pages are unmapped now, by this
@@ -353,11 +332,7 @@ int main() {
             latency.resize(start[ne]);
             std::vector<u32> cursor(start.begin(), start.end() - 1);
             for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32 e, u32, u32 l) { latency[cursor[e]++] = l; });
-            finished[h] = true;
-            if (!releasing.test_and_set()) {
-                for (auto& ps : parsers) ps.release(finished.data());
-                releasing.clear();
-            }
+            madvise(chunks[h], carved[h] * sizeof(Chunk), MADV_DONTNEED);
 
             u64 size = 0;
             for (u32 e = 0; e < ne; ++e) {
