@@ -41,3 +41,6 @@ The 2 KB prefetch (`cloud-b-prefetch`, -8% wall and -9.5% CPU on the 4-vCPU VM) 
 - Cheaper query parse (9.5 ms single thread, 263 k words) and renumber (6 ms): at most about 10 ms of 167 ms, so at most about +0.65 pts on B (+0.2 overall), and about 20 lines.
 - C: decoding `id` from its last two digits (ids rise by 1-11, spec 2.2) saves about 2% of C's instructions; not worth the lines.
 - No remaining small idea is worth more than about +0.3 overall. Reaching the leaders (B 77-81, C 83.8) needs a different per-record / per-token structure, not tuning of this one.
+
+## Query parse, measured (not branched)
+The 9.4 ms single-thread parse is 4.8 ms of byte-at-a-time slice splitting (`split` closures over 1.8 MB, 263 k words) plus 4.0 ms of table inserts. Prefetching the insert slots 8 words ahead saved only 0.7 ms (9.4 -> 8.8 ms, hash unchanged), so the inserts are not miss-bound. Splitting with the SIMD class masks could save about 4 ms of 167 ms on B: +0.28 pts on B, about +0.07 overall, for about 15 lines. Not worth a branch.
