@@ -127,14 +127,11 @@ struct Text {
         p = find(s, ',') + 1;
         return {s, u32(p - 1 - s), u32(p - 1 - s)};
     }
-    // The common field closes within 31 bytes, on a quote that no quote follows.
-    const char* q = s + 1;
-    u32 m0 = match32(q, '"'), i0 = __builtin_ctz(m0 | 1u << 31);
-    if (i0 < 31 && !(m0 >> (i0 + 1) & 1)) return p = q + i0 + 2, Text{q, i0, i0};
     // The quotes after the opening one, 64 bytes at a time, are stepped
     // through on their bit mask: a quote followed by another is a "" pair,
     // the first one that is not closes the field.
     u32 pairs = 0;
+    const char* q = s + 1;
     for (u64 m = match32(q, '"') | u64(match32(q + 32, '"')) << 32;;) {
         u32 i = m ? __builtin_ctzll(m) : 64;
         if (i >= 63) {  // none, or the byte after it is out of view: move on
