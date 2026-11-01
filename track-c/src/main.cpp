@@ -78,10 +78,16 @@ u32 match32(const char* p, char c) {
 // byte is the lowest): reduced to digit values, the bytes before them masked
 // to leading zeros, then folded in pairs, quads and halves.
 u64 fold(u64 v, size_t n) {
-    v &= 0x0F0F0F0F0F0F0F0F & ~u64(0) << 8 * (8 - n);
-    v = (v * 10 + (v >> 8)) & 0x00FF00FF00FF00FF;
-    v = (v * 100 + (v >> 16)) & 0x0000FFFF0000FFFF;
-    return (v * 10000 + (v >> 32)) & 0xFFFFFFFF;
+    static constexpr auto KEEP = [] {
+        std::array<u64, 9> a{};
+        for (int k = 1; k <= 8; ++k) a[k] = 0x0F0F0F0F0F0F0F0F & ~u64(0) << 8 * (8 - k);
+        return a;
+    }();
+    __m128i x = _mm_and_si128(_mm_cvtsi64_si128(v), _mm_cvtsi64_si128(KEEP[n]));
+    x = _mm_maddubs_epi16(x, _mm_set1_epi16(0x010A));
+    x = _mm_madd_epi16(x, _mm_set1_epi32(0x00010064));
+    x = _mm_packus_epi32(x, x);
+    return _mm_cvtsi128_si32(_mm_madd_epi16(x, _mm_set1_epi32(0x00012710)));
 }
 
 // The value of the 1 to 8 decimal digits in [s, e).
