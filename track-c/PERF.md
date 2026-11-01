@@ -172,6 +172,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `8218980` | PERF: A -O2 note names its run ID | `run-970adf735a4b` | 0.0297 | 8.4 | 400 | 79.11 |
 | `7f5e52c` | Track C: one #include <bits/stdc++.h> instead of twelve standard-library includes | `run-56b68312c5aa` | 0.0297 | 8.3 | 389 | 79.25 |
 | `79d68e7` | Track C: region_line also accepts a CRLF region file (fixes a crash in the previous commit | `run-6ab6489737df` | 0.0299 | 8.3 | 368 | 79.37 |
+| `5338276` | Log board runs for the line cuts (A S 306, C S 368) | `run-c2895ce03cd0` | 0.0297 | 8.7 | 368 | 79.21 |
 
 <!-- board-runs:end -->
 
@@ -186,3 +187,17 @@ The team drafted a new C++ file (64-bit hash name key with 8-byte slots probed f
 ## Releasing consumed input pages in the parse threads (`576267e`)
 
 Same change as Track A, from the team's newer C draft: after parsing a piece, the thread drops its input pages at once. Board: `run-cdf91eefd7e7` (`576267e`) 0.0299 s, 9.6 MiB, S 400, 78.68, against 0.0333 s before; the re-run `run-b9a1d8e18814` (`a94d376`, unchanged C code) gave 0.0297 s, 78.86. Output matched the Rust build on seeds 1, 2, 3 and 7.
+
+### Where C's board time goes (four diagnostic builds, wrong output, reverted)
+
+The laptop cannot show this, so the board was used as a profiler. Each build below was pushed with the output deliberately wrong (the board marked it a hash mismatch), read once, and reverted in `6ee5296`. Their run IDs were not captured because the log keeps scored runs only, so they are identified by commit and by the time the board showed. Single runs: about ±1.5 ms.
+
+| Commit | What it ran | Board T |
+|---|---|---|
+| `2a7cc01` | everything except the record parse (map, populate, release, threads, regions) | 5.5 ms |
+| `7496859` | the above plus reading one byte of every 64-byte cache line of the input | 11.3 ms |
+| `67464a6` | full parse, but no name-table lookup (mark is a plain load) | 25.6 ms |
+| `4ba1710` | full parse, name lookup kept, the mark is a plain load instead of the atomic OR | 27.8 ms |
+| `79d68e7` | the real program | about 29.9 ms |
+
+Reading the table: set-up and teardown are about 5.5 ms; streaming 202 MB through the cores costs about 6 more (memory bandwidth, about 35 GB/s); the name table with its bitset marks costs about 4 (the atomic OR itself about 2); the remaining 14 ms or so is the field parse itself. So C is bound by instructions per record (about 343 by a callgrind count from a separate research session, at an IPC of about 2.5 on six physical cores), not by memory or by the page mapping. The leader's whole run is 18 ms, so a smaller instruction count per record is the only lever of this size left.
