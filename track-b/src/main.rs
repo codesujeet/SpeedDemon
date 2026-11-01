@@ -501,16 +501,24 @@ fn main() {
             let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
             kept.resize(kept.len().max(toks.len()), 0);
             anchors.resize(anchors.len().max(toks.len()), 0);
-            let (mut n, mut na) = (0, 0);
-            for (at, &id) in toks.iter().enumerate() {
-                let i = (id as usize).min(nkeep);
-                unsafe {
-                    *anchors.get_unchecked_mut(na) = at;
-                    na += (i.wrapping_sub(a0) < nkeep - a0) as usize;
-                    let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
+            let (mut n, mut na, mut nk) = (0, 0, 0);
+            unsafe {
+                for (at, &id) in toks.iter().enumerate() {
+                    let i = (id as usize).min(nkeep);
                     *pending.get_unchecked_mut(i.min(nbits)) |= bit; // slot nbits is a sink, flush skips it
-                    *kept.get_unchecked_mut(n) = i as u32;
-                    n += (new & (i.wrapping_sub(nbits) < lists - nbits)) as usize;
+                    *anchors.get_unchecked_mut(n) = at;
+                    n += (i.wrapping_sub(nbits) < nkeep - nbits) as usize;
+                }
+                // Only the terms past the bitmaps and short of the phrase-only ones need the rest: `anchors` is
+                // filtered in place into the phrase anchors, and `kept` gets a term's first token in the document.
+                for j in 0..n {
+                    let at = *anchors.get_unchecked(j);
+                    let i = *toks.get_unchecked(at) as usize;
+                    let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
+                    *anchors.get_unchecked_mut(na) = at;
+                    na += (i >= a0) as usize;
+                    *kept.get_unchecked_mut(nk) = i as u32;
+                    nk += (new & (i < lists)) as usize;
                 }
             }
             for &at in &anchors[..na] {
@@ -524,7 +532,7 @@ fn main() {
                     }
                 }
             }
-            for &i in &kept[..n] {
+            for &i in &kept[..nk] {
                 buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
                 count[i as usize] += 1;
             }
