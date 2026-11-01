@@ -286,5 +286,9 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `86570b0` | Track A: 8% fewer instructions in the line parse | `run-6373361e2a7e` | 0.1807 | 65.9 | 518 | 68.12 |
 | `9358419` | Track C: 12% fewer instructions per record | `run-ab6a888b238c` | 0.1771 | 65.4 | 518 | 68.37 |
 | `ff3de8e` | Track C: read the country after its prefetch again, keeping the other instruction cuts | `run-5cafa0474a51` | 0.1707 | 66.0 | 518 | 68.73 |
+| `41d7902` | PERF: log board runs (A 84.76, C 80.69 with the instruction cuts) | `run-ea4d2d5a1b16` | 0.1787 | 65.9 | 518 | 68.24 |
+| `0301fbf` | Track A: the SIMD partition shares the scalar loop for its tail | `run-c98b5285f489` | 0.1712 | 66.1 | 518 | 68.70 |
+| `e80c817` | Track C: amount and region in one two-lane fold, tables by value, no hash finalizer (from  | `run-793fbbd3658d` | 0.1877 | 66.0 | 518 | 67.70 |
+| `c967879` | Tracks A and B: cheaper scans from the cloud branches | `run-d07a5e86b81f` | 0.1818 | 66.4 | 518 | 68.02 |
 
 <!-- board-runs:end -->
