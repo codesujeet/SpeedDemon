@@ -98,7 +98,7 @@ u64 digits(const char* s, const char* e) { return fold(load8(e - 8), e - s); }
 // the dot's byte dropped, are one number.
 u64 money(const char* s, const char* e) {
     u64 w = load8(e - 8);
-    return fold((w & 0xFFFFFFFFFF) << 8 | (w & 0xFFFF000000000000), e - s - 1);
+    return fold(_pext_u64(w, 0xFFFF00FFFFFFFFFF) << 8, e - s - 1);
 }
 
 // The first c at or after p (one is known to follow). 64 bytes at a time:
@@ -133,7 +133,7 @@ struct Text {
     u32 pairs = 0;
     const char* q = s + 1;
     for (u64 m = match32(q, '"') | u64(match32(q + 32, '"')) << 32;;) {
-        u32 i = m ? __builtin_ctzll(m) : 64;
+        u32 i = _tzcnt_u64(m);
         if (i >= 63) {  // none, or the byte after it is out of view: move on
             q += i;
             m = match32(q, '"') | u64(match32(q + 32, '"')) << 32;
@@ -174,9 +174,7 @@ public:
             if (len - i < 8) w &= (u64(1) << 8 * (len - i)) - 1;
             h = (h ^ w) * 0x94D049BB133111EBull;
         }
-        h = (h ^ h >> 31) * 0xD6E8FEB86659FD93ull;
-        h ^= h >> 32;
-        return h + (h == 0);  // 0 marks a free slot
+        return (h ^ h >> 31) * 0xD6E8FEB86659FD93ull | 1;  // 0 marks a free slot
     }
 
     void prefetch(u64 k) const { _mm_prefetch((const char*)&slots_[k >> (64 - BITS)], _MM_HINT_T0); }
@@ -188,8 +186,8 @@ public:
         for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
             __m256i v = _mm256_load_si256((const __m256i*)&slots_[i]);
             u32 hit = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(k))));
-            u32 free = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
             if (hit) return i + __builtin_ctz(hit);
+            u32 free = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
             for (; free; free &= free - 1) {
                 u32 j = i + __builtin_ctz(free);
                 u64 s = 0;
@@ -233,41 +231,33 @@ struct NamesSeen {
     }
 };
 
-// Parse every record that starts in [p, end). A record's region row and name
-// slot are prefetched when it is parsed; LAG records later its country is
-// read, its sums go to totals, its name is looked up and that name's bitset
-// word prefetched; LAG records after that the name is marked. So each of the
-// three random reads (region table, name table, bitsets) has a steady lead.
+// Parse every record that starts in [p, end). A record's sums go to its country
+// at once; its name slot is prefetched, LAG records later the name is looked up
+// and its bitset word prefetched, and LAG records after that it is marked. The
+// rings start and end full of a dummy name in the unused country SPARE, so no
+// step has to test whether its slot holds a record yet.
+constexpr u32 SPARE = 255;
+
 void parse_records(const char* p, const char* end, const char* file_end, const u8* country_of,
                    size_t regions, NameTable& names, NamesSeen& seen, Totals* totals) {
-    constexpr u64 LAG = 16;
+    constexpr u32 LAG = 16;
     struct Pending {
         u64 name;
-        u32 region, id, name_bytes, note_bytes;
-        i64 cents;
+        u32 country;
     } pending[LAG];
     struct Mark {
         u32 country, id;
     } marks[LAG];
-    u64 n = 0, last = UINT64_MAX;  // records started; all of them once known
-    // Retires ring slot n % LAG.
-    auto advance = [&]() __attribute__((always_inline)) {
-        u32 k = n % LAG;
-        if (n >= 2 * LAG && n - 2 * LAG < last) totals[marks[k].country].distinct += seen.mark(marks[k].country, marks[k].id);
-        if (n >= LAG && n - LAG < last) {
-            const Pending& old = pending[k];
-            u32 c = old.region < regions ? country_of[old.region] : 0;
-            Totals& t = totals[c];
-            ++t.count;
-            t.id_sum += old.id;
-            t.amount_sum += old.cents;
-            t.amount_min = std::min(t.amount_min, old.cents);
-            t.amount_max = std::max(t.amount_max, old.cents);
-            t.name_bytes += old.name_bytes;
-            t.note_bytes += old.note_bytes;
-            marks[k] = {c, names.id(old.name)};
-            seen.prefetch(c, marks[k].id);
-        }
+    std::fill_n(pending, LAG, Pending{1, SPARE});
+    std::fill_n(marks, LAG, Mark{SPARE, 0});
+    u32 n = 0;
+    auto advance = [&](u64 key, u32 country) __attribute__((always_inline)) {
+        u32 k = n++ % LAG;
+        totals[marks[k].country].distinct += seen.mark(marks[k].country, marks[k].id);
+        marks[k] = {pending[k].country, names.id(pending[k].name)};
+        seen.prefetch(marks[k].country, marks[k].id);
+        pending[k] = {key, country};
+        names.prefetch(key);
     };
 
     while (p < end) {
@@ -288,19 +278,23 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         const char* amount = f4 + 1;
         const char* eol = lf ? p + __builtin_ctz(lf) : file_end;
         const char* amount_end = eol - (eol[-1] == '\r');
-        bool negative = *amount == '-';
-        i64 cents = (negative ? -1 : 1) * i64(money(amount + negative, amount_end));
+        i64 negative = *amount == '-';
+        i64 cents = (i64(money(amount + negative, amount_end)) ^ -negative) + negative;
 
-        // Region ids are below 10^7 (fit u32); one past the table means none.
-        u32 r = region < regions ? u32(region) : u32(regions);
-        _mm_prefetch((const char*)(country_of + r), _MM_HINT_T0);
-        advance();
-        u64 key = NameTable::key(name.at, name.raw);
-        pending[n++ % LAG] = {key, r, u32(id), name.length, note.length, cents};
-        names.prefetch(key);
+        // Region ids are below 10^7; the table's spare row (no country) is past the last.
+        u32 c = country_of[std::min(region, u64(regions))];
+        Totals& t = totals[c];
+        ++t.count;
+        t.id_sum += id;
+        t.amount_sum += cents;
+        t.amount_min = std::min(t.amount_min, cents);
+        t.amount_max = std::max(t.amount_max, cents);
+        t.name_bytes += name.length;
+        t.note_bytes += note.length;
+        advance(NameTable::key(name.at, name.raw), c);
         p = eol + 1;
     }
-    for (last = n; n < last + 2 * LAG; ++n) advance();
+    for (u32 i = 0; i < 2 * LAG; ++i) advance(1, SPARE);
 }
 
 // 15-bit code of a three-letter country; numeric order is alphabetical order.
@@ -364,7 +358,7 @@ int main() {
     // the last line holds the largest id.
     const char* last = static_cast<const char*>(memrchr(regions, '\n', rsize - 1)) + 1;
     const size_t nregions = atoll(last) + 1;
-    u8* country_of = zeroed<u8>(nregions);  // 0 = no such region
+    u8* country_of = zeroed<u8>(nregions + 1);  // 0 = no such region
     std::vector<size_t> rcut = split(regions, strchr(regions, '\n') - regions + 1, rsize, nthreads, "\n");
     std::vector<std::atomic<u8>> present(1 << 15);
     std::array<u8, 1 << 15> index_of{};
@@ -373,7 +367,7 @@ int main() {
     auto number_countries = [&] {
         for (u32 k = 0; k < present.size(); ++k)
             if (present[k]) codes.push_back(k), index_of[k] = codes.size();
-        if (codes.size() > 255) fputs("too many countries\n", stderr), _exit(1);
+        if (codes.size() >= SPARE) fputs("too many countries\n", stderr), _exit(1);
     };
 
     // records.csv: skip the BOM and header, then split after CRLFs into eight
