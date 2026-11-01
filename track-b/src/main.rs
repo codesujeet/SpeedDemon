@@ -25,6 +25,8 @@ const GAP: u32 = 15;
 const ID_BITS: u32 = 18;
 const ID_MASK: u64 = (1 << ID_BITS) - 1;
 const BIG: usize = 768;
+const K1: u64 = 0x9E37_79B9_7F4A_7C01;
+const K2: u64 = 0x01B2_AE3D_27D4_EB4F;
 
 fn map(path: &str) -> &'static [u8] {
     let file = std::fs::File::open(path).expect(path);
@@ -68,14 +70,18 @@ fn number(text: &[u8], i: usize) -> u32 {
 }
 
 unsafe fn hash(p: *const u8, len: usize) -> u64 {
-    static KEEP: [u128; 4] = [!0, !0, 0, 0];
-    let mask = _mm256_loadu_si256(KEEP.as_ptr().cast::<u8>().add(32 - len).cast());
-    let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
-    let w: [u64; 4] = std::mem::transmute(_mm256_and_si256(v, mask));
-    let a = (w[0] ^ w[2].rotate_left(23)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let b = (w[1] ^ w[3].rotate_left(23)).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    let h = a ^ b.rotate_left(29);
-    (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93)
+    static KEEP: [u128; 2] = [!0, 0];
+    let part = |q: *const u8, n: usize, k: u64| {
+        let mask = _mm_loadu_si128(KEEP.as_ptr().cast::<u8>().add(16 - n).cast());
+        let v = _mm_and_si128(_mm_or_si128(_mm_loadu_si128(q.cast()), _mm_set1_epi8(0x20)), mask);
+        let m = (_mm_cvtsi128_si64(v) as u64 ^ k) as u128 * (_mm_extract_epi64::<1>(v) as u64 ^ K2) as u128;
+        m as u64 ^ (m >> 64) as u64
+    };
+    match len {
+        0..=16 => part(p, len, K1),
+        17..=32 => part(p, 16, K1) ^ part(p.add(16), len - 16, K1 ^ 1 << 40).rotate_left(32),
+        _ => 0,
+    }
 }
 
 struct Terms {
@@ -89,7 +95,7 @@ impl Terms {
         loop {
             let s = unsafe { *self.slot.get_unchecked(i) };
             if s == 0 || s >> ID_BITS == h >> ID_BITS {
-                return ((s & ID_MASK) as u32).wrapping_sub(1).min(self.n as u32);
+                return ((s & ID_MASK) as u32).wrapping_sub(1);
             }
             i = (i + 1) & mask;
         }
@@ -129,50 +135,47 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
-unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
+unsafe fn tokens<P>(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const P) -> *const u8 {
     const LAG: usize = 8;
     let mut ring = [0u64; LAG];
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     loop {
-        (ids.set_len(out), ids.reserve(32 + LAG));
+        (ids.set_len(out), ids.reserve(33 + LAG));
         let buf = ids.as_mut_ptr();
         let mut look = |&h: &u64| {
             let id = t.find(h);
-            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
+            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id.wrapping_add(1) as usize).cast());
             (*buf.add(out), out) = (id, out + 1);
         };
-        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
-        let (word, nl) = classes(p);
-        let stop = nl.trailing_zeros();
-        let mut m = word & ((1u128 << stop) - 1) as u64;
-        let mut next = 64;
-        while m != 0 {
-            let s = m.trailing_zeros();
-            let mut len = (!(m >> s)).trailing_zeros();
-            if s + len == 64 && nl == 0 {
-                if s != 0 {
-                    next = s;
-                    break;
-                }
-                while (*p.add(next as usize)).is_ascii_alphanumeric() {
-                    next += 1;
-                }
-                len = next;
-            }
-            m &= m.wrapping_add(m & m.wrapping_neg());
-            let h = if len <= 32 { hash(p.add(s as usize), len as usize) } else { 0 };
+        let mut push = |h: u64| {
             _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
             if n >= LAG {
                 look(&ring[n % LAG]);
             }
             (ring[n % LAG], n) = (h, n + 1);
+        };
+        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
+        let (word, nl) = classes(p);
+        let stop = nl.trailing_zeros();
+        let w = word & nl.wrapping_sub(1) & !nl;
+        let (mut starts, mut ends) = (w & !(w << 1), w & !(w >> 1 | 1 << 63));
+        while ends != 0 {
+            let s = starts.trailing_zeros();
+            let len = ends.trailing_zeros() + 1 - s;
+            (starts, ends) = (starts & starts.wrapping_sub(1), ends & ends.wrapping_sub(1));
+            push(hash(p.add(s as usize), len as usize));
+        }
+        let mut next = starts.trailing_zeros().min(64) as usize;
+        if next == 0 {
+            next = (0..).find(|&i| !(*p.add(i)).is_ascii_alphanumeric()).unwrap();
+            push(hash(p, next));
         }
         if nl != 0 {
             (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
             ids.set_len(out);
             return p.add(stop as usize + 1);
         }
-        p = p.add(next as usize);
+        p = p.add(next);
     }
 }
 
@@ -297,7 +300,7 @@ fn line(out: &mut String, docs: &Docs) {
     out.push('\n');
 }
 
-fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32, &[u32])) -> u32 {
+fn walk<P>(s: &[u8], first: u32, t: &Terms, pre: *const P, mut f: impl FnMut(u32, &[u32])) -> u32 {
     let (mut p, end) = (s.as_ptr(), s.as_ptr_range().end);
     let (mut doc, mut ids) = (first, Vec::with_capacity(1 << 12));
     while p < end {
@@ -386,7 +389,7 @@ fn main() {
     let first_doc = |c: usize| text.get(c).map_or(ndocs as u32, |_| number(text, c));
     let firsts: Vec<u32> = cut[..THREADS].iter().map(|&c| first_doc(c)).collect();
 
-    let (nbits, a0, lists, nkeep, anchored, astart) = {
+    let (nbits, a0, lists, _, anchored, astart, info) = {
         let mut in_bool = vec![false; nterms];
         for &(_, from, to) in spans.iter().filter(|s| !s.0) {
             ids[from as usize..to as usize].iter().for_each(|&id| in_bool[id as usize] = true);
@@ -395,14 +398,14 @@ fn main() {
             let (mut df, mut last) = (vec![0u32; nterms + 1], vec![0u16; nterms + 1]);
             let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 32];
             let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
-                let mark = (doc + 1) as u16;
                 for &id in toks {
-                    if std::mem::replace(&mut last[id as usize], mark) != mark {
-                        df[id as usize] += 1;
+                    let i = id.wrapping_add(1) as usize;
+                    if std::mem::replace(&mut last[i], doc as u16 + 1) != doc as u16 + 1 {
+                        df[i] += 1;
                     }
                 }
             });
-            (n as usize, df)
+            (n as usize, df.split_off(1))
         });
         let sampled: usize = samples.iter().map(|s| s.0).sum();
         let mut df = vec![0u32; nterms + 1];
@@ -414,7 +417,8 @@ fn main() {
             let rarity = |&j: &u32| df[ids[j as usize] as usize];
             let j = (from..to).min_by_key(rarity).unwrap();
             let a = ids[j as usize];
-            (anchored.push((a, q as u32, j - from)), anchor[a as usize] = true);
+            let nb = if j + 1 < to { j + 1 } else { j - 1 };
+            (anchored.push((a, q as u32, j - from, nb - from, ids[nb as usize])), anchor[a as usize] = true);
         }
         let class = |i: usize| match (in_bool[i], anchor[i]) {
             (true, false) => (df[i] as usize * 32 <= sampled) as usize,
@@ -433,55 +437,63 @@ fn main() {
         }
         terms.renumber(&new);
         ids.iter_mut().for_each(|id| *id = new[*id as usize]);
-        anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
+        anchored.iter_mut().for_each(|a| (a.0, a.4) = (new[a.0 as usize], new[a.4 as usize]));
         anchored.sort_unstable();
         let first_of = |i: usize| anchored.partition_point(|a| (a.0 as usize) < i);
         let astart: Vec<usize> = (a0..=nkeep).map(first_of).collect();
-        (nbits, a0, lists, nkeep, anchored, astart)
+        let info = |r: usize| match r {
+            r if r < nbits => r as u16 + 8,
+            r if r < a0 => 1 << 15 | (r & 7) as u16,
+            r if r < lists => 3 << 14 | (r & 7) as u16,
+            r if r < nkeep => 1 << 14 | (r & 7) as u16,
+            _ => (r & 7) as u16,
+        };
+        let info: Vec<u16> = [0].into_iter().chain((0..nterms).map(info)).collect();
+        (nbits, a0, lists, nkeep, anchored, astart, info)
     };
 
     let words = ndocs.div_ceil(256) * 4;
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
-        let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
+        let (mut count, mut last) = (vec![0u16; lists], vec![0u16; lists]);
         let (mut mine, mut kept, mut anchors) = (vec![], vec![0; 1 << 12], vec![0; 1 << 12]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units::default()).collect();
         let first = firsts[t];
-        let (mut pending, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
+        let (mut pending, mut block) = (vec![0u64; nbits + 8], first as usize / 64);
         let flush = |pending: &mut [u64], w: usize| {
-            for (b, x) in pending[..nbits].iter_mut().enumerate() {
+            for (b, x) in pending[8..].iter_mut().enumerate() {
                 if *x != 0 {
                     bits[b * words + w].fetch_or(std::mem::take(x), Relaxed);
                 }
             }
         };
-        let (share, pre) = (&text[cut[t]..cut[t + 1]], last.as_ptr());
+        let (share, pre) = (&text[cut[t]..cut[t + 1]], info.as_ptr());
         walk(share, first, &terms, pre, |doc, toks| {
             if doc as usize / 64 != block {
                 let w = std::mem::replace(&mut block, doc as usize / 64);
                 flush(&mut pending, w);
             }
-            let (mark, bit) = ((doc - first + 1) as u16, 1u64 << (doc % 64));
-            let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
-            let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
+            let (mark, bit, off) = ((doc - first + 1) as u16, 1u64 << (doc % 64), doc - first);
             kept.resize(kept.len().max(toks.len()), 0);
             anchors.resize(anchors.len().max(toks.len()), 0);
             let (mut n, mut na) = (0, 0);
+            let (pending, info) = (pending.as_mut_ptr(), info.as_ptr());
+            let (ap, kp) = (anchors.as_mut_ptr(), kept.as_mut_ptr());
             for (at, &id) in toks.iter().enumerate() {
-                let i = (id as usize).min(nkeep);
                 unsafe {
-                    *anchors.get_unchecked_mut(na) = at;
-                    na += (i.wrapping_sub(a0) < nkeep - a0) as usize;
-                    let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
-                    *pending.get_unchecked_mut(i.min(nbits)) |= (i < nbits) as u64 * bit;
-                    *kept.get_unchecked_mut(n) = i as u32;
-                    n += (new & (i.wrapping_sub(nbits) < lists - nbits)) as usize;
+                    let v = *info.add(id.wrapping_add(1) as usize);
+                    *pending.add((v & 0x3FFF) as usize) |= bit;
+                    (*ap.add(na), na) = (at, na + (v >> 14 & 1) as usize);
+                    (*kp.add(n), n) = (id, n + (v >> 15) as usize);
                 }
             }
             for &at in &anchors[..na] {
-                let k = (toks[at] as usize).min(nkeep) - a0;
-                for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
+                let k = toks[at] as usize - a0;
+                for &(_, q, j, nb, id) in &anchored[astart[k]..astart[k + 1]] {
+                    if toks.get((at + nb as usize).wrapping_sub(j as usize)) != Some(&id) {
+                        continue;
+                    }
                     let span = spans[q as usize];
                     let phrase = &ids[span.1 as usize..span.2 as usize];
                     let s = at.wrapping_sub(j as usize);
@@ -491,8 +503,10 @@ fn main() {
                 }
             }
             for &i in &kept[..n] {
-                buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
-                count[i as usize] += 1;
+                if std::mem::replace(&mut last[i as usize], mark) != mark {
+                    buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
+                    count[i as usize] += 1;
+                }
             }
         });
         flush(&mut pending, block);
