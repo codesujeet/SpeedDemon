@@ -102,7 +102,7 @@ impl Terms {
                 if hit | _mm256_movemask_pd(_mm256_castsi256_pd(free)) as u32 != 0 {
                     let w: [u64; 4] = std::mem::transmute(v);
                     let id = (w[hit.trailing_zeros() as usize & 3] & ID_MASK) as u32;
-                    return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), self.n as u32);
+                    return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), NONE);
                 }
                 i = (i + 1) & mask;
             }
@@ -152,69 +152,51 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
-unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16, st: &mut Vec<u64>) -> *const u8 {
+unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
     const LAG: usize = 4;
-    // Pass 1: each token of the document becomes one word, its address with its length (at most 33) above bit 56. Each
-    // window writes 16 words with no branch on how many tokens it has (the count advances by the popcount), and a token
-    // that reaches the window's last byte is left for the next window, which then starts at its first byte.
-    let mut count = 0usize;
-    let end = loop {
-        (st.set_len(count), st.reserve(64));
+    let mut ring = [0u64; LAG];
+    let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
+    loop {
+        (ids.set_len(out), ids.reserve(32 + LAG));
+        let buf = ids.as_mut_ptr();
+        let mut look = |&h: &u64| {
+            let id = t.find(h);
+            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id.wrapping_add(1) as usize).cast());
+            (*buf.add(out), out) = (id, out + 1);
+        };
+        let mut push = |q: *const u8, len: u32| {
+            let h = if len <= 32 { hash(q, len as usize) } else { 1 << 63 };
+            _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
+            if n >= LAG {
+                look(&ring[n % LAG]);
+            }
+            (ring[n % LAG], n) = (h, n + 1);
+        };
+        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
         let (word, nl) = classes(p);
         let stop = nl.trailing_zeros();
-        let mut m = word & ((1u128 << stop) - 1) as u64;
-        let k = (!m).leading_zeros();
-        if k == 64 {
-            let mut len = 64;
-            while (*p.add(len)).is_ascii_alphanumeric() {
-                len += 1;
-            }
-            *st.as_mut_ptr().add(count) = p as u64 | 33 << 56;
-            (count, p) = (count + 1, p.add(len));
-            continue;
+        // Token starts and ends in the bytes before the newline; a token that reaches the window's last byte has
+        // no end here, so its start is left over and the next window begins there.
+        let w = word & nl.wrapping_sub(1) & !nl;
+        let (mut starts, mut ends) = (w & !(w << 1), w & !(w >> 1 | 1 << 63));
+        while ends != 0 {
+            let s = starts.trailing_zeros();
+            let len = ends.trailing_zeros() + 1 - s;
+            (starts, ends) = (starts & starts.wrapping_sub(1), ends & ends.wrapping_sub(1));
+            push(p.add(s as usize), len);
         }
-        m &= u64::MAX >> k;
-        let (mut s, mut e) = (m & !(m << 1), m & !(m >> 1));
-        let c = s.count_ones() as usize;
-        let out = st.as_mut_ptr().add(count);
-        for j in 0..10 {
-            let (a, b) = (s.trailing_zeros(), e.trailing_zeros());
-            *out.add(j) = p.wrapping_add(a as usize) as u64 | ((b.wrapping_sub(a) + 1).min(33) as u64) << 56;
-            (s, e) = (s & s.wrapping_sub(1), e & e.wrapping_sub(1));
+        let mut next = starts.trailing_zeros().min(64) as usize;
+        if next == 0 {
+            next = (0..).find(|&i| !(*p.add(i)).is_ascii_alphanumeric()).unwrap();
+            push(p, next as u32);
         }
-        for j in 10..c {
-            let (a, b) = (s.trailing_zeros(), e.trailing_zeros());
-            *out.add(j) = p.wrapping_add(a as usize) as u64 | ((b.wrapping_sub(a) + 1).min(33) as u64) << 56;
-            (s, e) = (s & s.wrapping_sub(1), e & e.wrapping_sub(1));
-        }
-        count += c;
         if nl != 0 {
-            break p.add(stop as usize + 1);
+            (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
+            ids.set_len(out);
+            return p.add(stop as usize + 1);
         }
-        p = p.add(64 - k as usize);
-    };
-    // Pass 2: hash each token, prefetch its slot, and look up the token LAG places back.
-    let (mut ring, mask, out) = ([0u64; LAG], t.slot.len() - 1, ids.len());
-    ids.reserve(count + LAG);
-    let buf = ids.as_mut_ptr().add(out);
-    let look = |h: u64, i: usize| {
-        let id = t.find(h);
-        _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
-        *buf.add(i) = id;
-    };
-    for i in 0..count {
-        let w = *st.as_ptr().add(i);
-        let (q, len) = ((w & (1 << 56) - 1) as *const u8, (w >> 56) as usize);
-        let h = if len <= 32 { hash(q, len) } else { 1 << 63 };
-        _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
-        if i >= LAG {
-            look(ring[i % LAG], i - LAG);
-        }
-        ring[i % LAG] = h;
+        p = p.add(next);
     }
-    (count.saturating_sub(LAG)..count).for_each(|i| look(ring[i % LAG], i));
-    ids.set_len(out + count);
-    end
 }
 
 enum Docs<'a> {
@@ -344,14 +326,14 @@ fn line(out: &mut String, docs: &Docs) {
 
 fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32, &[u32])) -> u32 {
     let (mut p, end) = (s.as_ptr(), s.as_ptr_range().end);
-    let (mut doc, mut ids, mut st) = (first, Vec::with_capacity(1 << 12), Vec::with_capacity(1 << 12));
+    let (mut doc, mut ids) = (first, Vec::with_capacity(1 << 12));
     while p < end {
         unsafe {
             while *p != b'\t' {
                 p = p.add(1);
             }
             ids.clear();
-            p = tokens(p, t, &mut ids, pre, &mut st);
+            p = tokens(p, t, &mut ids, pre);
         }
         (f(doc, &ids), doc += 1);
     }
@@ -406,7 +388,7 @@ fn main() {
     let first_doc = |c: usize| text.get(c).map_or(ndocs as u32, |_| number(text, c));
     let firsts: Vec<u32> = cut[..THREADS].iter().map(|&c| first_doc(c)).collect();
 
-    let (nbits, a0, lists, nkeep, anchored, astart) = {
+    let (nbits, a0, lists, anchored, astart, info) = {
         let mut in_bool = vec![false; nterms];
         for &(_, from, to) in spans.iter().filter(|s| !s.0) {
             ids[from as usize..to as usize].iter().for_each(|&id| in_bool[id as usize] = true);
@@ -417,8 +399,8 @@ fn main() {
             let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
                 let mark = (doc + 1) as u16;
                 for &id in toks {
-                    if std::mem::replace(&mut last[id as usize], mark) != mark {
-                        df[id as usize] += 1;
+                    if std::mem::replace(&mut last[id.wrapping_add(1) as usize], mark) != mark {
+                        df[id.wrapping_add(1) as usize] += 1;
                     }
                 }
             });
@@ -429,6 +411,7 @@ fn main() {
         for (_, d) in samples {
             df.iter_mut().zip(d).for_each(|(a, b)| *a += b);
         }
+        let df = df.split_off(1);
         let (mut anchored, mut anchor) = (vec![], vec![false; nterms]);
         for (q, &(_, from, to)) in spans.iter().enumerate().filter(|s| s.1 .0) {
             let rarity = |&j: &u32| df[ids[j as usize] as usize];
@@ -457,50 +440,57 @@ fn main() {
         anchored.sort_unstable();
         let first_of = |i: usize| anchored.partition_point(|a| (a.0 as usize) < i);
         let astart: Vec<usize> = (a0..=nkeep).map(first_of).collect();
-        (nbits, a0, lists, nkeep, anchored, astart)
+        // One entry per term id, shifted by one so that a miss (NONE) reads entry 0: the bits are the pending word to OR
+        // (the bitmap's own, or one of eight scratch words in front of them), then "anchor" and "list".
+        let info = |r: usize| match r {
+            r if r < nbits => r as u16 + 8,
+            r if r < a0 => 1 << 15 | (r & 7) as u16,
+            r if r < lists => 3 << 14 | (r & 7) as u16,
+            r if r < nkeep => 1 << 14 | (r & 7) as u16,
+            _ => (r & 7) as u16,
+        };
+        let info: Vec<u16> = [0].into_iter().chain((0..nterms).map(info)).collect();
+        (nbits, a0, lists, anchored, astart, info)
     };
 
     let words = ndocs.div_ceil(256) * 4;
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
-        let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
+        let (mut count, mut last) = (vec![0u16; lists], vec![0u16; lists]);
         let (mut mine, mut kept, mut anchors) = (vec![], vec![0; 1 << 12], vec![0; 1 << 12]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units { v: Vec::with_capacity(1 << 15), prev: 0 }).collect();
         let first = firsts[t];
-        let (mut pending, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
+        let (mut pending, mut block) = (vec![0u64; nbits + 8], first as usize / 64);
         let flush = |pending: &mut [u64], w: usize| {
-            for (b, x) in pending[..nbits].iter_mut().enumerate() {
+            for (b, x) in pending[8..].iter_mut().enumerate() {
                 if *x != 0 {
                     bits[b * words + w].fetch_or(std::mem::take(x), Relaxed);
                 }
             }
         };
-        let (share, pre) = (&text[cut[t]..cut[t + 1]], last.as_ptr());
+        let (share, pre) = (&text[cut[t]..cut[t + 1]], info.as_ptr());
         walk(share, first, &terms, pre, |doc, toks| {
             if doc as usize / 64 != block {
                 let w = std::mem::replace(&mut block, doc as usize / 64);
                 flush(&mut pending, w);
             }
-            let (mark, bit) = ((doc - first + 1) as u16, 1u64 << (doc % 64));
-            let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
-            let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
+            let (mark, bit, off) = ((doc - first + 1) as u16, 1u64 << (doc % 64), doc - first);
             kept.resize(kept.len().max(toks.len()), 0);
             anchors.resize(anchors.len().max(toks.len()), 0);
             let (mut n, mut na) = (0, 0);
             for (at, &id) in toks.iter().enumerate() {
-                let i = (id as usize).min(nkeep);
                 unsafe {
+                    let v = *info.get_unchecked(id.wrapping_add(1) as usize);
+                    *pending.get_unchecked_mut((v & 0x3FFF) as usize) |= bit;
                     *anchors.get_unchecked_mut(na) = at;
-                    na += (i.wrapping_sub(a0) < nkeep - a0) as usize;
-                    let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
-                    *pending.get_unchecked_mut(i.min(nbits)) |= (i < nbits) as u64 * bit;
-                    *kept.get_unchecked_mut(n) = i as u32;
-                    n += (new & (i.wrapping_sub(nbits) < lists - nbits)) as usize;
+                    na += (v >> 14 & 1) as usize;
+                    *kept.get_unchecked_mut(n) = id;
+                    n += (v >> 15) as usize;
                 }
             }
             for &at in &anchors[..na] {
-                let k = (toks[at] as usize).min(nkeep) - a0;
+                let k = toks[at] as usize - a0;
                 for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
                     let span = spans[q as usize];
                     let phrase = &ids[span.1 as usize..span.2 as usize];
@@ -511,8 +501,10 @@ fn main() {
                 }
             }
             for &i in &kept[..n] {
-                buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
-                count[i as usize] += 1;
+                if std::mem::replace(&mut last[i as usize], mark) != mark {
+                    buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
+                    count[i as usize] += 1;
+                }
             }
         });
         flush(&mut pending, block);
