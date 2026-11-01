@@ -504,7 +504,7 @@ fn main() {
             let (mut n, mut na, mut nk) = (0, 0, 0);
             unsafe {
                 for (at, &id) in toks.iter().enumerate() {
-                    let i = (id as usize).min(nkeep);
+                    let i = id as usize;
                     *pending.get_unchecked_mut(i.min(nbits)) |= bit; // slot nbits is a sink, flush skips it
                     *anchors.get_unchecked_mut(n) = at;
                     n += (i.wrapping_sub(nbits) < nkeep - nbits) as usize;
