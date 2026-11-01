@@ -46,6 +46,11 @@ inline u32 eq32(const char* p, char c) {
     return _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c)));
 }
 
+// Bit i is set when byte i of the 16 at p is a space.
+inline u32 eq16(const char* p) {
+    return _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i*)p), _mm_set1_epi8(' ')));
+}
+
 // The number of decimal digits in x.
 inline u32 width(u32 x) {
     static constexpr u32 p10[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
@@ -93,12 +98,6 @@ inline void select(u32* a, u32 n, u32 k) {
     }
 }
 
-// The first c at or after s; one is known to follow.
-inline const char* next_byte(const char* s, char c) {
-    for (;; s += 32)
-        if (u32 m = eq32(s, c)) return s + __builtin_ctz(m);
-}
-
 // Endpoint names to ids, one table for all threads. Open addressing on a CRC
 // of the name's first and last eight bytes (masked when the name is shorter;
 // the rest of the line keeps both loads in bounds), and a name's id is its
@@ -118,7 +117,7 @@ struct Names {
         memcpy(&a, s.data(), 8);
         if (s.size() >= 8) memcpy(&b, s.data() + s.size() - 8, 8);
         else a &= (u64(1) << 8 * s.size()) - 1;
-        for (u32 i = _mm_crc32_u64(_mm_crc32_u64(s.size(), a), b), end = i + SLOTS; i != end; ++i) {
+        for (u32 i = _mm_crc32_u64(_mm_crc32_u64(s.size(), a), b);; ++i) {
             u64 v = slot[i % SLOTS].load(std::memory_order_acquire);
             if (v == 0) {
                 u32 at = used.fetch_add(s.size());
@@ -128,7 +127,6 @@ struct Names {
             }
             if (same(name(v), s)) return i % SLOTS;
         }
-        _exit(2);  // more names than slots
     }
 
     // 64 bytes can always be read from either name (the rest of the line and
@@ -147,14 +145,17 @@ static Names endpoints;  // zero pages until written
 // shared). The output file's pages count toward peak memory as it is written,
 // so chunks are handed back while it grows: see Parser::release.
 struct Chunk {
-    static constexpr u32 CAP = (16384 - 16) / 4;
+    static constexpr u32 CAP = (16384 - 12) / 4;
     Chunk* prev;
-    u32 n, hour;
+    u32 hour;
     u32 rec[CAP];
 };
 
 struct Parser {
     Chunk* last[HOURS] = {};
+    // Each hour's next free record. Chunks are aligned to their size, so a cursor
+    // with no low bits is either null or just past a full chunk.
+    u32* to[HOURS] = {};
     // (latency, key) of the long ones.
     std::vector<std::pair<u32, u32>> wide[HOURS];
     // next: where the next chunk is carved; kept: first one not yet released.
@@ -163,8 +164,9 @@ struct Parser {
     // Room for a log of `size` bytes: a line is at least 40 bytes, and each
     // hour may leave one chunk part full. Pages are charged only once written.
     void map(size_t size) {
-        size_t bytes = (size / 40 / Chunk::CAP + 1 + HOURS) * sizeof(Chunk);
-        next = kept = (Chunk*)mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        size_t bytes = (size / 40 / Chunk::CAP + 2 + HOURS) * sizeof(Chunk);
+        auto at = (uintptr_t)mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        next = kept = (Chunk*)((at + sizeof(Chunk) - 1) & -sizeof(Chunk));
     }
 
     void run(const char* p, const char* end) {
@@ -177,37 +179,37 @@ struct Parser {
             u32 n = 0;
             for (const char* stop = std::min(scan + 4096, end); scan < stop; scan += 64) {
                 u64 m = eq32(scan, '\n') | u64(eq32(scan + 32, '\n')) << 32;
-                if (end - scan < 64) m &= (u64(1) << (end - scan)) - 1;
-                ends[n] = scan + _tzcnt_u64(m), n += m != 0, m &= m - 1;
-                ends[n] = scan + _tzcnt_u64(m), n += m != 0;
+                ends[n] = scan + _tzcnt_u64(m), ends[n + 1] = scan + _tzcnt_u64(_blsr_u64(m));
+                n += __builtin_popcountll(m);
             }
+            while (n && ends[n - 1] >= end) --n;  // the last block's may be the next piece's
             for (u32 i = 0; i < n; ++i) {
                 const char* eol = ends[i];
                 // The file's pages are scattered in memory and the hardware
                 // prefetcher stops at each 4 KB page; this reaches into the next ones.
                 _mm_prefetch(p + 4096, _MM_HINT_T0);
-                // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
-                int day = (p[8] - '0') * 10 + (p[9] - '0'), hour = (p[11] - '0') * 10 + (p[12] - '0');
-                int h = (p[6] == '0' ? day - 30 : day + 1) * 24 + hour - 18;
+                // YYYY-MM-DDTHH: the month's last digit at 6 (bit 0) plus the day's at 9
+                // (two bits) count the days 0 to 3, the hour is at 11-12. One multiply
+                // gathers days * 24 + tens * 10 + units in the top byte.
+                u64 t;
+                memcpy(&t, p + 6, 8);
+                int h = int((t & 0x000F0F0003000001) * 0x18000018000A0100 >> 56) - 18;
 
-                // Spaces in the 64 bytes after the timestamp. Only an endpoint of about
-                // 60 bytes or more pushes the name's end past the window.
-                const char* m = p + 28;
-                u64 sp = eq32(m, ' ') | u64(eq32(m + 32, ' ')) << 32;
-                const char* name = m + __builtin_ctzll(sp) + 1;
-                u64 rest = sp & (sp - 1);  // the spaces after the method's
-                const char* name_end = rest ? m + __builtin_ctzll(rest) : next_byte(name, ' ');
-                u32 key = endpoints(std::string_view(name, name_end - name)) | (name_end[1] == '5' ? ERR : 0);
-                u32 latency = decode(eol, eol - name_end - 5);  // after " SSS "
+                // The method (3 to 7 bytes) ends within 16 bytes of the timestamp, and
+                // the 16 bytes before the line's end hold " SSS latency", at most 10 digits.
+                const char* name = p + 29 + __builtin_ctz(eq16(p + 28));
+                const char* sp = eol - 16 + (31 - __builtin_clz(eq16(eol - 16)));
+                u32 key = endpoints(std::string_view(name, sp - 4 - name)) | (sp[-3] == '5' ? ERR : 0);
+                u32 latency = decode(eol, eol - sp - 1);
                 p = eol + 1;
 
                 if (__builtin_expect(latency >= PACKED_MAX, 0)) {
                     wide[h].push_back({latency, key});
                     continue;
                 }
-                Chunk*& c = last[h];
-                if (!c || c->n == Chunk::CAP) next->prev = c, next->n = 0, next->hour = h, c = next++;
-                c->rec[c->n++] = latency << KEY_BITS | key;
+                u32*& w = to[h];
+                if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) next->prev = last[h], next->hour = h, last[h] = next, w = next++->rec;
+                *w++ = latency << KEY_BITS | key;
             }
         }
     }
@@ -229,8 +231,9 @@ struct Parser {
     // Calls f(endpoint rank, key, latency) for every record of hour h.
     template <class F>
     void each(int h, const u32* rank, F&& f) const {
-        for (const Chunk* c = last[h]; c; c = c->prev)
-            for (u32 i = 0; i < c->n; ++i) f(rank[c->rec[i] & ID_MASK], c->rec[i] & ERR, c->rec[i] >> KEY_BITS);
+        u32 n = last[h] ? to[h] - last[h]->rec : 0;  // the newest chunk's; the older ones are full
+        for (const Chunk* c = last[h]; c; c = c->prev, n = Chunk::CAP)
+            for (u32 i = 0; i < n; ++i) f(rank[c->rec[i] & ID_MASK], c->rec[i] & ERR, c->rec[i] >> KEY_BITS);
         for (auto [latency, key] : wide[h]) f(rank[key & ID_MASK], key & ERR, latency);
     }
 };
