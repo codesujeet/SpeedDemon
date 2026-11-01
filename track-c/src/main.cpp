@@ -259,8 +259,8 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         ++t.count;
         t.id_sum += old.id;
         t.amount_sum += old.cents;
-        t.amount_min = std::min(t.amount_min, old.cents);
-        t.amount_max = std::max(t.amount_max, old.cents);
+        if (__builtin_expect(old.cents < t.amount_min, 0)) t.amount_min = old.cents;
+        if (__builtin_expect(old.cents > t.amount_max, 0)) t.amount_max = old.cents;
         t.name_bytes += old.name_bytes;
         t.note_bytes += old.note_bytes;
         marks[k] = {c, names.id(old.name)};
