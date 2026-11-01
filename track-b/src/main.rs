@@ -118,8 +118,7 @@ impl Terms {
         }
     }
 
-    fn insert(&mut self, term: &[u8]) -> u32 {
-        let h = unsafe { hash(term.as_ptr(), term.len()) };
+    fn insert(&mut self, h: u64) -> u32 {
         let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
         loop {
             let w: &mut [u64; 4] = unsafe { std::mem::transmute(&mut self.slot[i]) };
@@ -360,7 +359,7 @@ fn main() {
     let qtext = map("/data/queries.txt");
     let slot = vec![unsafe { _mm256_setzero_si256() }; (qtext.len() / 32).next_power_of_two()];
     let mut terms = Terms { slot, n: 0 };
-    let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
+    let (mut spans, mut ids, mut ops, mut hs) = (vec![], vec![], vec![], vec![]);
     // Each word's length is one count of the letter-or-digit bits after it; a word ends at a space, the closing
     // quote or the LF. Terms are lower case and operators upper case, so the first byte tells them apart.
     let mut i = 0;
@@ -372,7 +371,7 @@ fn main() {
             let word = &qtext[i..i + len];
             match word[0].is_ascii_uppercase() {
                 true => *ops.last_mut().unwrap() = word[0],
-                false => (ids.push(terms.insert(word)), ops.push(0)).1,
+                false => (ids.push(0), hs.push(unsafe { hash(word.as_ptr(), word.len()) }), ops.push(0)).2,
             }
             i += len + 1;
             if qtext[i - 1] != b' ' {
@@ -381,6 +380,11 @@ fn main() {
         }
         i += phrase as usize;
         spans.push((phrase, from, ids.len() as u32));
+    }
+    for (k, &h) in hs.iter().enumerate() {
+        let ahead = hs.get(k + 16).map_or(0, |&h| h as usize & (terms.slot.len() - 1));
+        unsafe { _mm_prefetch::<_MM_HINT_T0>(terms.slot.as_ptr().add(ahead).cast()) };
+        ids[k] = terms.insert(h);
     }
     let nterms = terms.n;
     let text = map("/data/docs.txt");
