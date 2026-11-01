@@ -264,5 +264,6 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `c27bda3` | Track A: build with -O2 instead of -O3 (experiment, same source) | `run-6586416f183c` | 0.1882 | 65.7 | 518 | 67.69 |
 | `8218980` | PERF: A -O2 note names its run ID | `run-7cf138e5bdf7` | 0.1716 | 65.8 | 518 | 68.69 |
 | `7f5e52c` | Track C: one #include <bits/stdc++.h> instead of twelve standard-library includes | `run-52a11b934009` | 0.1734 | 65.2 | 518 | 68.62 |
+| `79d68e7` | Track C: region_line also accepts a CRLF region file (fixes a crash in the previous commit | `run-9fb887a192a9` | 0.1733 | 65.7 | 518 | 68.58 |
 
 <!-- board-runs:end -->

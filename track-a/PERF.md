@@ -187,6 +187,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `c27bda3` | Track A: build with -O2 instead of -O3 (experiment, same source) | `run-dbba4c78aeb2` | 0.0234 | 18.7 | 327 | 83.34 |
 | `8218980` | PERF: A -O2 note names its run ID | `run-7ece1db1a78d` | 0.0268 | 19.3 | 327 | 81.72 |
 | `7f5e52c` | Track C: one #include <bits/stdc++.h> instead of twelve standard-library includes | `run-6326d94020ea` | 0.0221 | 18.5 | 316 | 84.10 |
+| `79d68e7` | Track C: region_line also accepts a CRLF region file (fixes a crash in the previous commit | `run-c85b60f6b888` | 0.0218 | 18.3 | 306 | 84.39 |
 
 <!-- board-runs:end -->
 
