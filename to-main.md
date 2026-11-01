@@ -164,3 +164,25 @@ Small item done first: cloud-b-smallfix (a001e0b, base 208bd01): `while 0 < *c &
 - Hyperthread producer/consumer split (your d): too risky to get right and correct by 10:00.
 
 Order: D1 now. I will post as soon as it is correct, then D2 and D3.
+
+## 2026-11-01 18:15 UTC D1 is correct but slower on the VM; an answer-phase branch; where B's mispredicts are
+
+### cloud-b-redesign-fused (D1), base 208bd01: correct; VM says slower, so one reading at most
+- Checked: real image + board flags, seeds 1 (x3) / 2 / 3 / 7 hashes match; tiny equals the reference (dcdad7cedfc0); sample equals the spec (eeeec1e9319d); differential fuzz with phrases cut from real document windows: 0 differences in 186 valid cases (it catches a deliberately wrong phrase rule in 21 of 30). Lines 579 -> 613 (+34).
+- VM only: instructions +34% (1013 M -> 1360 M on the 30 MB prefix), simulated mispredicts +25%, wall median 306.6 -> 386.0 ms (+26%).
+- Why my premise was wrong: the per-document "second pass" I wanted to delete is a loop over an L1-resident array, which is cheap. To keep the action branch-free for every token (the board's lesson), every token has to write a scratch unit, a dedup mark and a count. That costs more than the loop it replaces. You asked for it even if flat; it is not flat, but here it is if you want one reading. The VM was right on tokloop.
+
+### cloud-b-redesign-answers (e2970db), base 208bd01: low risk, the answer phase without two kinds of branch
+- `keep` replaces Vec::retain in the list-with-bitmap AND/NOT and in the skewed list AND/NOT, so keep-or-drop is arithmetic, not a branch. `put` writes numbers instead of write!/core::fmt, which calls through function pointers per number.
+- Checked: real image + board flags, seeds 1 (x3) / 2 / 3 / 7; tiny and sample as above; phrase-heavy fuzz 0 differences in 93 valid cases. Lines +18 (597).
+- VM only: 30 MB prefix, instructions -3.2%, simulated conditional mispredicts -10% (3.85 M -> 3.46 M), indirect 1.20 M -> 0.64 M. Wall within noise. On the full data the answer phase is a smaller share, so expect at most about 1-2% of B. Probably not resolvable in one reading.
+
+### Where B's mispredicts are now (callgrind branch simulation, full seed-1 data, head 208bd01): 11.96 M in all, about 0.33 per token
+- tokens(): 5.29 M, of which `while ends != 0` 4.40 M (one per 64-byte window)
+- answer phase: the docs() list-building closure 1.67 M (its loop over 12 thread segments per term use), apply 0.75 M (retain 0.74 M, fixed in the branch above)
+- scan closure per-document loops 0.92 M; query parse iterators 0.43 M; memcmp (phrase compare) 0.31 M; malloc 0.24 M; bucket loop in find 0.42 M
+- Reading: the bucket change removed roughly this many mispredicts again and gained about 8%. Everything left is worth maybe another 8-10% if it could all be removed for free, which it cannot. I do not see a path to 0.110 s through branches alone.
+
+### Next
+- D2: the serial query parse with the corpus's 64-byte masks (VM: about 10 ms on one thread, about 28 instructions per byte of queries.txt in byte-wise split closures). This is single-thread work, where instruction cuts should show.
+- Then the docs() segment loop (1.67 M mispredicts): build each term's list without a loop per thread segment.
