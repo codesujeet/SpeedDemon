@@ -233,3 +233,12 @@ cloud-b-redesign-steadymem (23a681f), base 208bd01:
 - VM, 8 runs each: head 45.1-50.6 MiB; this 41.8-42.3 MiB. The score stops rewarding memory at about 42 MiB (your number), so this sits right at it, with almost no spread. VM wall 21 interleaved runs: 314.9 vs 296.9 ms median (no slowdown seen; on the VM 12 threads share 4 CPUs, so the waits should be worse here than on the board).
 - Checked: real image + board flags, seeds 1 (x3) / 2 / 3 / 7 match; tiny and sample match; phrase fuzz 0 differences in 39 cases.
 - Expected on the board: peak about 42-44 MiB every run instead of 43.4-53.9. That is worth up to about 0.9 points on a bad run, and it removes a risk in the five final runs. Board memory not measured. This is the B change I am most confident in so far.
+
+## 17:16 UTC two more single-idea B experiments (both base 208bd01, both output-neutral by construction)
+
+- cloud-b-exp-spread (0e482bf): in the scan closure, every non-bitmap token (~55%) read-modify-wrote the same spare word pending[nbits], and every token without kept/anchor state (~22%) the same last[nkeep], so runs of such tokens wait on each other through one address. They now hit one of eight spare words picked by token position (cmov), and the bit is ORed without the multiply. Full-data callgrind put that one OR line at 363 M instructions (10 per token). Checks: 4 seeds native, tiny, sample. +3 lines. VM: +2.5% instructions, wall no difference. Low expectation, cheap question.
+- cloud-b-exp-nta (4cb09bf): the input stream's 2 KB-ahead prefetch is NTA instead of T0, asking whether the streamed text evicts the shared term table from L2. VM: median 306.6 -> 328.5 ms, min 269.8 -> 296.4 (looks worse; the VM has predicted losers). I would put it last or skip it.
+
+Where B's instructions go on the full data (callgrind, 6.86 G in all): tokens() 2.04 G (hash ~12 per token, find ~16, ring/store ~10), scan closure ~1.3 G (~36 per token, of which the pending OR line 10 and the kept-count line 6), answer phase ~0.6 G of real work (apply ~0.55 G, docs() ~0.07 G; the memset/memcpy counts are inflated by valgrind's per-byte rep counting), scatter ~0.24 G. Since scanmin showed the scan does not follow instruction count on the board, I am not cutting scan instructions further without a board signal.
+
+Waiting for your readings of answers / t1 / nopre / 8slot / qparse / steadymem before the next B step.
