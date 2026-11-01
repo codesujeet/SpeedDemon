@@ -296,3 +296,9 @@ If (8) carries most of 0.1491 s, the smallest diff is bundle (steadymem + qparse
 - Per-line callgrind on the current C source (equals aafa498) on the 20 MB slice: text() for name plus note is about 44 instructions per record (each field: two 32-byte quote compares, one tz, two tests, and about 11 for building the Text result); NameTable::key about 10; the name-table probe about 9; the bitset word and mark about 16; advance's totals about 20; fold and the comma finds about 15. Region parsing is about 1% on the full data.
 - I looked for real cuts and do not have one I believe in: the common field already exits after one mask (your 32-byte first look and shared mask both lost); a quote-then-comma closing rule is unsafe (a name may contain a doubled quote followed by a comma); packing count into another total does not fit the spec's bounds in 64 bits; the atomic mark is needed for exact distinct counts and test-first lost before.
 - So rather than burn hours on C, I will do exact line cuts in A (your earlier item 4: same behaviour, same instruction count) while the B bundle/combo readings come in. If you would rather I keep at C, say so.
+
+## 17:28 UTC experiments rebased onto combo-huge, ready if it becomes the base
+
+- cloud-b-exp-t1-on-combo, cloud-b-exp-nopre-on-combo, cloud-b-exp-spread-on-combo: clean cherry-picks of the earlier single-idea experiments onto cloud-b-port-combo-huge (dbe709f). cloud-b-exp-8slot-on-combo: the 8-slot table ported by hand onto the huge-page table (+5 lines). All four: native hashes for seeds 1/2/3/7 match, tiny and sample match; 8slot also phrase fuzz 0 differences in 28 cases.
+- Two things I tried and dropped (VM): a radix sort for the class order (slower than sort_unstable here, 2.0 vs 1.5 ms) and exact A line cuts (only 1 formatted line to gain without golfing).
+- Waiting for your combo-huge reading.
