@@ -49,7 +49,8 @@ inline u32 eq32(const char* p, char c) {
 // The number of decimal digits in x.
 inline u32 width(u32 x) {
     static constexpr u32 p10[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
-    u32 t = (32 - __builtin_clz(x | 1)) * 1233 >> 12;  // about bit length x log10(2)
+    // About the bit length times log10(2).
+    u32 t = (32 - __builtin_clz(x | 1)) * 1233 >> 12;
     return t + ((x | 1) >= p10[t]);
 }
 
@@ -59,7 +60,7 @@ inline u32 width(u32 x) {
 // cost about 5% more instructions in all.)
 inline u32 decode(const char* end, u32 len) {
     __m128i v = _mm_subs_epu8(_mm_loadu_si128((const __m128i*)(end - 16)), _mm_set1_epi8('0'));
-    __m128i lane = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    __m128i lane = _mm_set_epi64x(0x0F0E0D0C0B0A0908, 0x0706050403020100);
     v = _mm_and_si128(v, _mm_cmpgt_epi8(lane, _mm_set1_epi8(char(15 - len))));
     v = _mm_maddubs_epi16(v, _mm_set1_epi16(0x010A));  // pairs (10, 1)
     v = _mm_madd_epi16(v, _mm_set1_epi32(0x00010064));  // pairs (100, 1)
@@ -88,8 +89,7 @@ inline void select(u32* a, u32 n, u32 k) {
         }
         std::swap(a[lt], a[n - 1]);
         if (k == lt) return;
-        if (k < lt) n = lt;
-        else a += lt + 1, k -= lt + 1, n -= lt + 1;
+        k < lt ? n = lt : (a += lt + 1, k -= lt + 1, n -= lt + 1);
     }
 }
 
@@ -241,7 +241,7 @@ int main() {
     cut[0] = 0;
     for (int k = 1; k < pieces; ++k)
         for (cut[k] = std::max(cut[k - 1], size * k / pieces); cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
-    std::atomic<int> claim_piece{0};
+    std::atomic<int> claim_piece{0}, claim{0}, claim_text{0};
 
     // Between the phases, endpoints are ranked in unsigned byte order (a
     // proper prefix first), which is the order lines are printed in an hour.
@@ -260,7 +260,6 @@ int main() {
     // time then releases whatever chunks that frees.
     std::vector<std::atomic<bool>> finished(HOURS);
     std::atomic_flag releasing;
-    std::atomic<int> claim{0}, claim_text{0};
     struct Line {
         u32 e, n, p50, p95, p99, errors;
     };
@@ -276,9 +275,7 @@ int main() {
         for (int h = 0; h < HOURS; ++h) total += std::exchange(at[h], total);
         at[HOURS] = total;
         if (total == 0) return;
-        if (ftruncate(out, total) != 0) _exit(1);
-        text = (char*)mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, out, 0);
-        if (text == MAP_FAILED) _exit(1);
+        if (ftruncate(out, total) || (text = (char*)mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, out, 0)) == MAP_FAILED) _exit(1);
     });
 
     std::vector<std::thread> pool;
@@ -352,7 +349,5 @@ int main() {
         }
     });
     for (auto& th : pool) th.join();
-    close(out);
     _exit(0);
-    return 0;
 }
