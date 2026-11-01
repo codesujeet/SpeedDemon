@@ -386,6 +386,7 @@ fn main() {
         unsafe { _mm_prefetch::<_MM_HINT_T0>(terms.slot.as_ptr().add(ahead).cast()) };
         ids[k] = terms.insert(h);
     }
+    drop(hs);
     let nterms = terms.n;
     let text = map("/data/docs.txt");
     let mut cut: Vec<usize> = (0..=THREADS).map(|t| text.len() * t / THREADS).collect();
