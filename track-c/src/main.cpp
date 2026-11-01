@@ -55,9 +55,9 @@ T* zeroed(size_t n) {
 // call, so the work is spread too. (Without MADV_POPULATE_WRITE the pages
 // are simply faulted in later.)
 template <class T>
-void populate_share(T* p, size_t n, int t, int nthreads) {
+void populate_share(T* p, size_t n, int t, int nthreads, int advice = MADV_POPULATE_WRITE) {
     const size_t pages = (n * sizeof(T) + 4095) / 4096, from = pages * t / nthreads, to = pages * (t + 1) / nthreads;
-    if (to > from) madvise(reinterpret_cast<char*>(p) + from * 4096, (to - from) * 4096, MADV_POPULATE_WRITE);
+    if (to > from) madvise(reinterpret_cast<char*>(p) + from * 4096, (to - from) * 4096, advice);
 }
 
 // Map a file over a spare zero page, so 64-byte loads past its end are safe.
@@ -209,6 +209,7 @@ public:
 
     // Each of n threads populates its share up front (see zeroed).
     void populate(int t, int n) const { populate_share(slots_, SLOTS, t, n); }
+    void release(int t, int n) const { populate_share(slots_, SLOTS, t, n, MADV_DONTNEED); }
 
 private:
     std::atomic<u64>* slots_ = zeroed<std::atomic<u64>>(SLOTS);  // 0 = free
@@ -428,6 +429,10 @@ int main() {
                 uintptr_t to = uintptr_t(records + cut[k + 1]) & ~uintptr_t(4095);
                 if (to > from) madvise(reinterpret_cast<void*>(from), to - from, MADV_DONTNEED);
             });
+            // Every piece is done, so the tables are not read again: each thread drops its share.
+            populate_share(seen.bits, (codes.size() + 1) * NamesSeen::WORDS, t, nthreads, MADV_DONTNEED);
+            names.release(t, nthreads);
+            populate_share(country_of, nregions, t, nthreads, MADV_DONTNEED);
         });
     for (auto& th : pool) th.join();
 
