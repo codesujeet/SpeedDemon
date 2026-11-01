@@ -81,3 +81,21 @@ Measured on the 4-vCPU VM only (not the board), vs 4423afa, same toolchain:
 Reading: the window-level branches (while-exit, straddle test) are not what limits the scan. The old loop interleaves extraction with hashing and lookups, so out-of-order execution overlaps them; staging the positions first adds stores and reloads and serializes that overlap, which costs more than the removed mispredicts save. The VM is a Skylake-class Xeon, not Raptor Lake, so the sign could differ on the board, but I would not bet on it. Everything points at the lookups, not the tokenizer, which fits your bucket test.
 
 Next, in your order: (1) A diagnostics, then C diagnostics, as correct-output branches, each commit marked DIAGNOSTIC; (2) B #2 (count and last in one u32 array) as its own branch on top of the current speed-demon.
+
+## 2026-11-01 17:30 UTC A and C diagnostic branches (six, all marked DIAGNOSTIC, correct output, base aafa498)
+
+Rule: each runs ONE phase twice and keeps the output correct, so T(diag) - T(head) is the cost of that phase on the board. Do not merge. Hashes match on seeds 1, 2, 3, 7 for all six (A native build with the Dockerfile flags; C built with the real Dockerfile and the committed gcc profile, run with the board flags). VM numbers are medians of 15-21 interleaved runs on a 4-vCPU Xeon, shown only as a rough guide; they are NOT the board.
+
+Track A (cloud-a-diag-parse 06bd22a, cloud-a-diag-hours d0c13d0, cloud-a-diag-text 334d2d8): one-file change in track-a/src/main.cpp each.
+- parse: each worker runs a second Parser over every piece before the real one. The throwaway parser does the whole parse and endpoint interning but writes its records into one reused 16 KB scratch chunk (so it skips per-hour chunk carving only). VM: head 49.4 ms -> 63.5.
+- hours: each hour's counting sort, select and line sizing run twice; the first result goes to a throwaway vector and does not release the hour's records. This includes select. VM: 49.4 -> 60.7.
+- text: each hour's lines are formatted into the mapped output twice (same bytes). The first pass takes the output page faults. VM: 49.4 -> 53.3.
+- Caveat: the second pass of parse is warm (the first took the file's page faults), so it under-reads a cold parse a little. A's hours phase and text phase are claimed per hour by all threads with barriers between, so the extra work lands partly on the critical path and partly in idle time; read the delta as an upper-ish bound on the phase's contribution.
+
+Track C (cloud-c-diag-parse 6dc01a8, cloud-c-diag-regions 2b68de3, cloud-c-diag-threads a8e2c70): one-file change in track-c/src/main.cpp each; parse_records is untouched in all three, so its gcc profile still matches (only the thread lambda in main changes, which the profile never covered well).
+- parse: after the real parse of a piece, parse_records runs again over the same piece with its own throwaway Totals (names and bitset marks are already set, so real output cannot change). VM: head 47.1 ms -> 83.8.
+- regions: after the real flag and fill phases, two more phases redo the same idempotent stores (present[] flags, country_of[] table), no populate. VM: 47.1 -> 50.3.
+- threads: twelve empty threads are created and joined before the real pool. VM: 47.1 -> 47.5.
+- Set-up apart from the parse, as I read your request: T(head) - delta(parse) is roughly everything else (mmap, populate, release, exit); delta(regions) and delta(threads) split two of its pieces. If you wanted a literal "populate twice", it is meaningless (second populate hits resident pages), so I did not build it.
+
+Next: B #2 (count and last in one u32 array) on top of the current speed-demon, as its own branch.
