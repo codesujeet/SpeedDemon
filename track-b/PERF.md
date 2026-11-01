@@ -286,6 +286,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `fff546f` | Track B: prefetch the input 2 KB ahead in the token scan | `run-dff88ce2292a` | 0.1921 | 53.9 | 618 | 71.35 |
 | `ff9de8e` | PERF: B prefetch experiment (reverted) with its board run ID | `run-c074fc74a66b` | 0.1704 | 47.2 | 617 | 73.23 |
 | `c27bda3` | Track A: build with -O2 instead of -O3 (experiment, same source) | `run-eefd4ed9ec73` | 0.1936 | 46.7 | 617 | 71.90 |
+| `8218980` | PERF: A -O2 note names its run ID | `run-e5e6a3f8b3e9` | 0.1703 | 47.7 | 617 | 73.20 |
+| `7f5e52c` | Track C: one #include <bits/stdc++.h> instead of twelve standard-library includes | `run-a8dc53031a4b` | 0.1683 | 47.6 | 617 | 73.33 |
 
 <!-- board-runs:end -->
 
