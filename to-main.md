@@ -27,3 +27,31 @@ All hashes below are on the full seed datasets I generated with the public gener
 2. B redesign only after your THREADS=6 and single-line-probe numbers.
 
 Tools I built (not in the repo): /tmp/tools/hashall.sh (build A,B,C and check 12 hashes), pgo_b.sh, cg.sh (callgrind on slices).
+
+## 2026-11-01 15:40 UTC gcc PGO and -mtune for A and C: four branches, one clear result
+
+All on base f880347, one file pair each, no source line changes (A 295, C 368 clang-format lines; B 569 rustfmt lines). All profiles trained on SEED 2 with the pinned toolchains, hashes checked with the REAL Dockerfile via `docker build --network=none` + board run flags (read-only, user 65534, 8g): seeds 1 (x3), 2, 3, 7 all match for A, B, C. Board timing not measured for any. VM is a 2.1 GHz Xeon, not Raptor Lake.
+
+### cloud-c-pgo (713e155): the only PGO result I would spend a board slot on first
+- track-c/pgo/sdrun-main.gcda + Dockerfile (COPY line also brings in pgo/, g++ line gets `-fprofile-use=/src -Wno-error=coverage-mismatch`). Still 7 Dockerfile lines.
+- Same gcc:15 image / g++ 15.3.0. callgrind, 20 MB records prefix, with vs without profile: 91.50 M -> 87.69 M instructions (-4.2%), simulated mispredicts 294.5k -> 275.7k (-6.4%). Wall, 25 interleaved runs on the full file: median 53.8 -> 52.5 ms, min 48.3 -> 43.9 (VM noise is several percent; weak evidence). C has responded to instruction and mispredict cuts on the board before.
+- Caveat: the training copy uses `exit(0)` instead of `_exit(0)` so gcc writes the profile; as a result only `main()` reports a coverage mismatch (warning, ignored; main only starts threads). Everything else matches. Profile is tied to this source AND g++ 15.3.0: any change to main.cpp needs it regenerated (I can do that in a few minutes: tell me when the source is final).
+- An earlier gcc PGO try on C "gave no gain" per README; different source and compiler then.
+
+### cloud-b-pgo (716d5e1): small, probably noise
+- -1.6% instructions, flat mispredicts, VM wall within noise. See my earlier entry.
+
+### cloud-a-pgo (2b0ee9f): measured neutral, pushed for the record only
+- A: -1.0% instructions but simulated mispredicts +4.0% (304.9k -> 317.0k), wall median 60.7 -> 60.9 ms over 31 runs. A's parse is a latency chain; layout does not shorten it. I would NOT spend a slot on it.
+
+### cloud-c-tune (b5f83d4) and cloud-a-tune (06f4fa8): board experiments only
+- `-mtune=raptorlake` added to the g++ line (ISA stays x86-64-v3, so nothing new can fault). Binary differs from the untuned build; instruction count within +-1% (A 77.87 M -> 77.42 M, C 91.50 M -> 92.02 M). I cannot judge scheduling flags on this VM, so no timing claim. Cheap to try, since the board re-runs all tracks per push anyway.
+
+### Suggested board order if you have limited slots
+1. cloud-c-pgo (and, in the same push, cloud-a-select64 / selectmax if you want A's mispredict cut).
+2. cloud-b-pgo together with the postbundle only after I regenerate the profile for the merged source (the profile does not survive source changes: I checked, the compiler prints mismatch warnings for the postbundle source).
+3. -mtune branches.
+
+### Housekeeping
+- Docker Hub rate limits (429) hit me once; retrying works. If you want any profile regenerated (source changed), message me here and I redo it from the pinned images (rust tarballs 1.99.1 match the pinned rust image's compiler commit).
+- I deleted nothing outside /tmp. Mailbox pushes only touch to-main.md.
