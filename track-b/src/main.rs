@@ -354,7 +354,7 @@ impl Units {
 }
 
 fn main() {
-    unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
+    unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
     let slot = vec![0; (qtext.len() / 8).next_power_of_two()];
     let mut terms = Terms { slot, n: 0 };
