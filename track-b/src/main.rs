@@ -376,7 +376,7 @@ fn main() {
     let text = map("/data/docs.txt");
     let mut cut: Vec<usize> = (0..=THREADS).map(|t| text.len() * t / THREADS).collect();
     for c in &mut cut[1..THREADS] {
-        while *c < text.len() && text[*c - 1] != b'\n' {
+        while 0 < *c && *c < text.len() && text[*c - 1] != b'\n' {
             *c += 1;
         }
     }
