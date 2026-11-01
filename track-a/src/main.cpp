@@ -109,6 +109,9 @@ inline u32 split(u32* a, u32 n, u32 pivot, u32* spare) {
 inline void select(u32* a, u32 n, u32 k, u32* spare) {
     for (int round = 0; n > 1; ++round) {
         if (round == 40) return std::nth_element(a, a + k, a + n);
+        // The largest of the range (the p99 of every group of 99 or fewer, and
+        // its p95 up to 19) is one scan, not a partition.
+        if (k + 1 == n) return std::swap(*std::max_element(a, a + n), a[n - 1]);
         u32 m = n / 2;  // sort a[0], a[m], a[n - 1], then the median is the pivot
         if (a[m] < a[0]) std::swap(a[m], a[0]);
         if (a[n - 1] < a[m]) std::swap(a[n - 1], a[m]);
@@ -150,14 +153,19 @@ struct Names {
         else a &= (u64(1) << 8 * s.size()) - 1;
         for (u32 i = _mm_crc32_u64(_mm_crc32_u64(s.size(), a), b);; ++i) {
             u64 v = slot[i % SLOTS].load(std::memory_order_acquire);
-            if (v == 0) {
-                u32 at = used.fetch_add(s.size());
-                if (at + s.size() > ARENA) _exit(2);
-                memcpy(arena + at, s.data(), s.size());
-                if (slot[i % SLOTS].compare_exchange_strong(v, u64(s.size()) << 32 | at)) return i % SLOTS;
-            }
+            if (v == 0 && (v = insert(slot[i % SLOTS], s)) == 0) return i % SLOTS;
             if (same(name(v), s)) return i % SLOTS;
         }
+    }
+
+    // Copies a new name into the arena and claims slot t for it: 0 if that
+    // worked, else the name another thread put there first.
+    [[gnu::noinline, gnu::cold]] u64 insert(std::atomic<u64>& t, std::string_view s) {
+        u32 at = used.fetch_add(s.size());
+        if (at + s.size() > ARENA) _exit(2);
+        memcpy(arena + at, s.data(), s.size());
+        u64 v = 0;
+        return t.compare_exchange_strong(v, u64(s.size()) << 32 | at) ? 0 : v;
     }
 
     // 64 bytes can always be read from either name (the rest of the line and
@@ -288,7 +296,7 @@ int main() {
     std::vector<size_t> cut(pieces + 1, size);
     cut[0] = 0;
     for (int k = 1; k < pieces; ++k)
-        for (cut[k] = std::max(cut[k - 1], size * k / pieces); cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
+        for (cut[k] = std::max(cut[k - 1], size * k / pieces); cut[k] && cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
     std::atomic<int> claim_piece{0}, claim{0}, claim_text{0};
 
     // Between the phases, endpoints are ranked in unsigned byte order (a
