@@ -174,6 +174,11 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-b87352798d2d` | 0.0333 | 19.6 | 310 | 79.46 |
 | `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-08c55254bc3e` | 0.0270 | 18.3 | 329 | 81.84 |
 | `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-e4130a512def` | 0.0267 | 19.1 | 321 | 81.84 |
+| `8b2268b` | Write-ups for the second A, B and C drafts, with board run IDs | `run-6221fb7f6371` | 0.0289 | 20.2 | 321 | 80.76 |
+| `f34afab` | Track B: BIG 768 -> 1536 (experiment) | `run-9b0793be0739` | 0.0264 | 18.6 | 321 | 82.10 |
+| `576267e` | Tracks A and C: each thread releases a consumed input piece's pages at once (from the new  | `run-442bba74c314` | 0.0220 | 18.5 | 326 | 84.02 |
+| `a94d376` | Track B: each thread releases its share of docs.txt after the scan | `run-9934a3ba4185` | 0.0229 | 18.8 | 326 | 83.54 |
+| `4dde5ce` | Track B: DIAGNOSTIC (answers computed twice) to measure the answer phase on the board; wil | `run-6b8564b1b12d` | 0.0229 | 18.9 | 326 | 83.51 |
 
 <!-- board-runs:end -->
 
@@ -184,3 +189,7 @@ The Rust version (0.026-0.029 s, 22-26 MiB, S 508-510) was replaced by a C++ bui
 ## Second C++ version
 
 Locally the new draft was 6-8% faster in interleaved runs (median 74-75 ms against 80 ms). I also tried its extra pass that counts the records of every hour before sizing the latency buffer; it adds 8 source lines and ran no faster, so it is not in the final file. Board: `run-08c55254bc3e` (`a46cccc`, with the counting pass) 0.0270 s, S 329, 81.84; `run-e4130a512def` (`428ae7e`, without it) 0.0267 s, S 321, 81.84. 16 work pieces per thread instead of 8 gave 81.27 (`70fee14`), so 8 stays.
+
+## Releasing consumed input pages in the parse threads (`576267e`)
+
+Each thread now drops a piece's input pages (`MADV_DONTNEED` on the page-aligned part of the piece) as soon as it has parsed it, instead of one thread unmapping all of the log's pages at process exit. On a private, unmodified file mapping this only drops pages, so a later read would fault them in again and cannot change the output. Idea taken from the team's newer draft (which also carried the record-counting pass I had already dropped). Locally there was no measurable difference (the laptop does not show the exit cost), but on the board: `run-442bba74c314` (`576267e`) 0.0220 s, 19.4 MiB, S 326, 84.02, against 0.0267 s before; the re-run `run-9934a3ba4185` (`a94d376`, unchanged A code) gave 0.0229 s, 83.54. 120 local runs matched the hash and outputs matched the Rust build on seeds 1, 2, 3 and 7.

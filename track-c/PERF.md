@@ -158,6 +158,11 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-ac01e190d19e` | 0.0340 | 9.9 | 398 | 76.97 |
 | `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-99100127449b` | 0.0369 | 9.1 | 398 | 76.44 |
 | `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-d3acf3d74dfa` | 0.0333 | 8.9 | 398 | 77.63 |
+| `8b2268b` | Write-ups for the second A, B and C drafts, with board run IDs | `run-fd72dee16964` | 0.0334 | 8.6 | 398 | 77.74 |
+| `f34afab` | Track B: BIG 768 -> 1536 (experiment) | `run-6d67ba4e96ab` | 0.0333 | 8.6 | 398 | 77.79 |
+| `576267e` | Tracks A and C: each thread releases a consumed input piece's pages at once (from the new  | `run-cdf91eefd7e7` | 0.0299 | 9.1 | 400 | 78.68 |
+| `a94d376` | Track B: each thread releases its share of docs.txt after the scan | `run-b9a1d8e18814` | 0.0297 | 8.9 | 400 | 78.86 |
+| `4dde5ce` | Track B: DIAGNOSTIC (answers computed twice) to measure the answer phase on the board; wil | `run-202087ed39eb` | 0.0293 | 8.6 | 400 | 79.18 |
 
 <!-- board-runs:end -->
 
@@ -168,3 +173,7 @@ The Rust version (0.0412-0.0496 s, S 542) was replaced by a C++ build of the tea
 ## Second C++ version (`8d367d9`)
 
 The team drafted a new C++ file (64-bit hash name key with 8-byte slots probed four at a time, field-by-field parsing, distinct counts taken from the bitset marks, work-claiming phases instead of barriers). Locally it was about 25% faster than the first C++ version (median 65-67 ms against 82-93 ms in interleaved runs). Board: run `run-dbdb4a8194b4` (`8d367d9`) 0.0344 s, 10.1 MiB, S 398, 76.95; `run-ac01e190d19e` (`2ce9b21`, unchanged code) 0.0340 s, 76.97; `run-d3acf3d74dfa` (`428ae7e`, unchanged code) 0.0333 s, 77.63. Static link and `_exit(0)` kept from the first C++ version (`17ce1b0`, `run` rows in the table below: 0.0376 s against 0.0426 s dynamic). Also tried and dropped: gcc PGO (no local gain), LAG 32 instead of 16 (75.61 against 75.7).
+
+## Releasing consumed input pages in the parse threads (`576267e`)
+
+Same change as Track A, from the team's newer C draft: after parsing a piece, the thread drops its input pages at once. Board: `run-cdf91eefd7e7` (`576267e`) 0.0299 s, 9.6 MiB, S 400, 78.68, against 0.0333 s before; the re-run `run-b9a1d8e18814` (`a94d376`, unchanged C code) gave 0.0297 s, 78.86. Output matched the Rust build on seeds 1, 2, 3 and 7.

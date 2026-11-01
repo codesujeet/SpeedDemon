@@ -251,5 +251,10 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-0637a97b287a` | 0.1726 | 66.1 | 518 | 68.60 |
 | `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-5bb911630f51` | 0.1712 | 66.3 | 518 | 68.68 |
 | `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-a2ae390e4894` | 0.1712 | 65.9 | 518 | 68.71 |
+| `8b2268b` | Write-ups for the second A, B and C drafts, with board run IDs | `run-0e3ac4fbb477` | 0.1792 | 66.0 | 518 | 68.20 |
+| `f34afab` | Track B: BIG 768 -> 1536 (experiment) | `run-afafed8933d3` | 0.1782 | 65.9 | 518 | 68.27 |
+| `576267e` | Tracks A and C: each thread releases a consumed input piece's pages at once (from the new  | `run-b16343da8915` | 0.1731 | 65.9 | 518 | 68.59 |
+| `a94d376` | Track B: each thread releases its share of docs.txt after the scan | `run-d53ce99c8597` | 0.1730 | 65.8 | 518 | 68.60 |
+| `4dde5ce` | Track B: DIAGNOSTIC (answers computed twice) to measure the answer phase on the board; wil | `run-97f90d34d610` | 0.1810 | 65.9 | 518 | 68.10 |
 
 <!-- board-runs:end -->

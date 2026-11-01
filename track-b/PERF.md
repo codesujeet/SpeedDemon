@@ -275,9 +275,20 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-42bec5c66bdc` | 0.1767 | 47.2 | 609 | 72.87 |
 | `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-dff4c67a492f` | 0.1866 | 47.3 | 609 | 72.27 |
 | `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-bfc9e1bb8e38` | 0.1728 | 47.1 | 609 | 73.13 |
+| `8b2268b` | Write-ups for the second A, B and C drafts, with board run IDs | `run-8e894fb86087` | 0.1818 | 50.7 | 609 | 72.27 |
+| `f34afab` | Track B: BIG 768 -> 1536 (experiment) | `run-834f45470648` | 0.1748 | 47.3 | 609 | 72.99 |
+| `576267e` | Tracks A and C: each thread releases a consumed input piece's pages at once (from the new  | `run-a6aebb16d412` | 0.1737 | 47.2 | 609 | 73.07 |
+| `a94d376` | Track B: each thread releases its share of docs.txt after the scan | `run-d58c749305c7` | 0.1674 | 47.2 | 617 | 73.42 |
+| `4dde5ce` | Track B: DIAGNOSTIC (answers computed twice) to measure the answer phase on the board; wil | `run-1401c9180e0e` | 0.1919 | 47.2 | 619 | 71.93 |
 
 <!-- board-runs:end -->
 
 ## Second draft (`2ce9b21`)
 
 Locally about 17% faster than the first draft in interleaved runs (median about 425 ms against 522 ms) with 46 MB against 50 MB peak. Board: `run-42bec5c66bdc` (`2ce9b21`) 0.1767 s, 49.5 MiB, S 609, 72.87; `run-bfc9e1bb8e38` (`428ae7e`, unchanged code) 0.1728 s, 73.13.
+
+## Releasing the scanned text, and a measurement of the answer phase (`a94d376`, `4dde5ce`)
+
+Each thread drops its share of `docs.txt` after the scan (`MADV_DONTNEED`, clean private mapping, so it cannot change the output). Board: `run-d58c749305c7` (`a94d376`) 0.1674 s, 49.5 MiB, S 617, 73.42, against 0.1737 s and 0.1728 s for the code before it; the gain is small and close to run-to-run noise.
+
+To see how much of B is the answer phase, commit `4dde5ce` temporarily answered every query twice (the first answers overwritten): `run` for that commit read 0.1919 s against 0.1674 s, so the answer phase costs about 25 ms of 167 on the board (about 15%); the scan and the rest is about 140 ms. That commit was reverted straight away (`c127df2`), and it is not part of the final code. The laptop run of the same diagnostic suggested the phase was much larger (about 200 ms of 425), which is why the board number is the one used.
