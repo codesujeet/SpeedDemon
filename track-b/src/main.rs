@@ -491,10 +491,10 @@ fn main() {
     let first_doc = |c: usize| text.get(c).map_or(ndocs as u32, |_| number(text, c));
     let firsts: Vec<u32> = cut[..THREADS].iter().map(|&c| first_doc(c)).collect();
 
-    // The sample: documents per term in the first 1/32 of each share.
+    // The sample: documents per term in the first 1/64 of each share.
     let samples = on_threads(|t| {
         let (mut df, mut last) = (vec![0u32; nterms + 1], vec![NONE; nterms + 1]);
-        let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 32];
+        let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 64];
         let n = walk(sample, firsts[t], &terms, std::ptr::null(), |doc, toks| {
             for &id in toks {
                 if std::mem::replace(&mut last[id as usize], doc) != doc {
@@ -582,8 +582,8 @@ fn main() {
             // after which captured values would be loaded again for every token.
             let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
             let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
-            kept.resize(toks.len(), 0);
-            anchors.resize(toks.len(), 0);
+            // Grow-only: both are written before they are read, so a shorter document needs no refill.
+            (kept.len() < toks.len()).then(|| (kept.resize(toks.len(), 0), anchors.resize(toks.len(), 0)));
             let (mut n, mut na) = (0, 0);
             for (at, &id) in toks.iter().enumerate() {
                 let i = (id as usize).min(nkeep);
