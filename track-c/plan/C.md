@@ -11,6 +11,18 @@ Board now (run-b47f848afb8a): T 0.026457 s, M 8,900,608 B, S 373, 80.55 pts.
 Derived reference values (not measured): with Tref 14.44 s and Sref 108 (from docs/EXPERIMENTS.md), the board's 80.55 implies Mref ≈ 370 MB.
 That puts the memory cap of 50 at about 7.4 MB (7.06 MiB), so memory still has about 0.8 pt of headroom.
 
+# Phase 2 results (gcc 15.3, built with the Dockerfile image; base moved to ff3de8e)
+
+origin/speed-demon advanced to ff3de8e during phase 2. It already contains the sentinel, the placeholder ring and part of the finalizer cut (pieces c and d, and part of a, of the bundle below). The branches therefore carry only the remaining pieces.
+
+| Branch | Change | Instructions, callgrind, full data (gcc 15) | Mispredicts | Lines | Hash |
+|---|---|---|---|---|---|
+| cloud-c-parsecut (8d7fe32, on ff3de8e) | two-lane region+amount fold (dot gets weight 0); tables passed by value; key = h \| 1 (last bijective step dropped) | 860.5 M -> 783.7 M (−8.9%) | 2.185 M -> 2.166 M | 369 -> 367 | d8088b1c on 3 docker runs; CRLF set same as old |
+| cloud-c-minmaxbranch (58ea37c, stacked on parsecut) | min/max as rarely taken branches | 783.7 M -> 773.9 M (−1.3%); alone on ff3de8e: −1.15% but mispredicts +6% | 2.166 M -> 2.183 M | 367 -> 369 | d8088b1c on 3 docker runs; CRLF same |
+| #2 dense ids (built, not pushed) | dense ids in blocks of 64; word-major bitsets with stride 256 | 783.7 M -> 793.3 M (+1.2%) | about the same | +8 | d8088b1c |
+
+For #2, peak memory was measured in a fresh cgroup-v1 memory group per run, native, 4 threads: 7.07-7.60 MB -> 6.82 MB. That is only −0.26 MB, not the 0.9 MB estimated. Net is about 0 after the instruction and line costs, so it was dropped.
+
 ## Ranking (expected net points, after line cost)
 
 | # | Idea | Lines (clang-format LLVM, my count) | Expected net | Status |
