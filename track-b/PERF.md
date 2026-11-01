@@ -320,6 +320,22 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `27bcbd7` | Track B: DIAGNOSTIC (one extra classify and hash pass, no lookup) to time it on the board; | `run-f7a899f05ebd` | 0.1989 | 43.8 | 591 | 72.02 |
 | `3ee9986` | Track B: term table half the size (experiment) | `run-c679ec081890` | 0.1745 | 43.8 | 576 | 73.52 |
 | `adb642e` | Track B: a small table of the hottest terms ahead of the main one (experiment) | `run-508baa669fca` | 0.1988 | 43.8 | 608 | 71.93 |
+| `f880347` | Track B back to eee525f (hot table 0.1988 s); Track C: one field for both text byte sums;  | `run-572bc36b45b3` | 0.1683 | 44.0 | 576 | 73.90 |
+| `d67679d` | Tracks A, B, C: transparent huge pages left on (experiment, board reading only) | `run-8f5cbea8cb8b` | 0.1677 | 54.5 | 576 | 73.00 |
+| `5515114` | Huge pages off again; Track B post-scan bundle; Track A 64-bit partition index | `run-c49a186a586e` | 0.1678 | 44.3 | 562 | 73.97 |
+| `4f631af` | Track B: DIAGNOSTIC 6 threads instead of 12, to see what hyperthreading gives on the board | `run-bba12539ce61` | 0.1866 | 41.2 | 562 | 73.06 |
+| `35b0214` | Track B: back to 12 threads; prefetch lag 16 instead of 8 (experiment) | `run-0a1d892208d5` | 0.2136 | 43.5 | 562 | 71.44 |
+| `90b7e41` | Track B: prefetch lag 4 (experiment) | `run-9d76cc9eafd4` | 0.1651 | 49.6 | 562 | 73.66 |
+| `b774a66` | Track B: prefetch lag 2 (experiment); Track C: gcc profile from cloud-c-pgo | `run-8af3606d4e84` | 0.1667 | 45.8 | 562 | 73.90 |
+| `4423afa` | Track B: four-slot SIMD buckets with no branch on hit or miss, lag 4 (experiment); Tracks  | `run-231e85babe46` | 0.1545 | 43.9 | 585 | 74.78 |
+| `aafa498` | Tracks A, C: no -mtune (A 0.0223 s, C 0.0246 s: no gain). Track B buckets kept (0.1545 s,  | `run-9324d7c1b788` | 0.1571 | 43.9 | 585 | 74.60 |
+| `960565b` | Track C: closing quotes found with no branch per quote, 8-slot name buckets, profile regen | `run-1dc829833835` | 0.1519 | 43.6 | 585 | 75.00 |
+| `6c7f67e` | Track A: no branches in the median of three, tagged four-slot name buckets; Track C back t | `run-eade7e749910` | 0.1549 | 43.7 | 585 | 74.78 |
+| `5c38f17` | Track B: token starts and ends from two masks (cloud-b-masks); no hash has a free slot's t | `run-8774ab58203c` | 0.1617 | 43.4 | 585 | 74.33 |
+| `95bf78f` | Track A: one sort of three that also finishes short ranges, and a range update with no bra | `run-c153495b745f` | 0.1555 | 43.4 | 585 | 74.76 |
+| `4dd910c` | Tracks A, C: DIAGNOSTIC (each parse run twice, from cloud-a-diag-parse and cloud-c-diag-pa | `run-4b3a2c2b51b8` | 0.1521 | 43.7 | 585 | 74.97 |
+| `15d4eb3` | Track A: DIAGNOSTIC (hours phase run twice); Track B: token positions staged first, from c | `run-de21404d3d76` | 0.1629 | 44.1 | 607 | 74.06 |
+| `55b45da` | Track B: tokloop out (0.1629 s, S 607), cloud-b-info in (experiment); Track A: hours diagn | `run-17fe52804bec` | 0.1673 | 48.8 | 589 | 73.44 |
 
 <!-- board-runs:end -->
 

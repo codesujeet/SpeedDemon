@@ -102,7 +102,7 @@ impl Terms {
                 if hit | _mm256_movemask_pd(_mm256_castsi256_pd(free)) as u32 != 0 {
                     let w: [u64; 4] = std::mem::transmute(v);
                     let id = (w[hit.trailing_zeros() as usize & 3] & ID_MASK) as u32;
-                    return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), NONE);
+                    return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), self.n as u32);
                 }
                 i = (i + 1) & mask;
             }
@@ -161,7 +161,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         let buf = ids.as_mut_ptr();
         let mut look = |&h: &u64| {
             let id = t.find(h);
-            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id.wrapping_add(1) as usize).cast());
+            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
             (*buf.add(out), out) = (id, out + 1);
         };
         let mut push = |q: *const u8, len: u32| {
@@ -388,7 +388,7 @@ fn main() {
     let first_doc = |c: usize| text.get(c).map_or(ndocs as u32, |_| number(text, c));
     let firsts: Vec<u32> = cut[..THREADS].iter().map(|&c| first_doc(c)).collect();
 
-    let (nbits, a0, lists, anchored, astart, info) = {
+    let (nbits, a0, lists, nkeep, anchored, astart) = {
         let mut in_bool = vec![false; nterms];
         for &(_, from, to) in spans.iter().filter(|s| !s.0) {
             ids[from as usize..to as usize].iter().for_each(|&id| in_bool[id as usize] = true);
@@ -399,8 +399,8 @@ fn main() {
             let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
                 let mark = (doc + 1) as u16;
                 for &id in toks {
-                    if std::mem::replace(&mut last[id.wrapping_add(1) as usize], mark) != mark {
-                        df[id.wrapping_add(1) as usize] += 1;
+                    if std::mem::replace(&mut last[id as usize], mark) != mark {
+                        df[id as usize] += 1;
                     }
                 }
             });
@@ -411,7 +411,6 @@ fn main() {
         for (_, d) in samples {
             df.iter_mut().zip(d).for_each(|(a, b)| *a += b);
         }
-        let df = df.split_off(1);
         let (mut anchored, mut anchor) = (vec![], vec![false; nterms]);
         for (q, &(_, from, to)) in spans.iter().enumerate().filter(|s| s.1 .0) {
             let rarity = |&j: &u32| df[ids[j as usize] as usize];
@@ -440,57 +439,50 @@ fn main() {
         anchored.sort_unstable();
         let first_of = |i: usize| anchored.partition_point(|a| (a.0 as usize) < i);
         let astart: Vec<usize> = (a0..=nkeep).map(first_of).collect();
-        // One entry per term id, shifted by one so that a miss (NONE) reads entry 0: the bits are the pending word to OR
-        // (the bitmap's own, or one of eight scratch words in front of them), then "anchor" and "list".
-        let info = |r: usize| match r {
-            r if r < nbits => r as u16 + 8,
-            r if r < a0 => 1 << 15 | (r & 7) as u16,
-            r if r < lists => 3 << 14 | (r & 7) as u16,
-            r if r < nkeep => 1 << 14 | (r & 7) as u16,
-            _ => (r & 7) as u16,
-        };
-        let info: Vec<u16> = [0].into_iter().chain((0..nterms).map(info)).collect();
-        (nbits, a0, lists, anchored, astart, info)
+        (nbits, a0, lists, nkeep, anchored, astart)
     };
 
     let words = ndocs.div_ceil(256) * 4;
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
-        let (mut count, mut last) = (vec![0u16; lists], vec![0u16; lists]);
+        let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
         let (mut mine, mut kept, mut anchors) = (vec![], vec![0; 1 << 12], vec![0; 1 << 12]);
         let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units { v: Vec::with_capacity(1 << 15), prev: 0 }).collect();
         let first = firsts[t];
-        let (mut pending, mut block) = (vec![0u64; nbits + 8], first as usize / 64);
+        let (mut pending, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
         let flush = |pending: &mut [u64], w: usize| {
-            for (b, x) in pending[8..].iter_mut().enumerate() {
+            for (b, x) in pending[..nbits].iter_mut().enumerate() {
                 if *x != 0 {
                     bits[b * words + w].fetch_or(std::mem::take(x), Relaxed);
                 }
             }
         };
-        let (share, pre) = (&text[cut[t]..cut[t + 1]], info.as_ptr());
+        let (share, pre) = (&text[cut[t]..cut[t + 1]], last.as_ptr());
         walk(share, first, &terms, pre, |doc, toks| {
             if doc as usize / 64 != block {
                 let w = std::mem::replace(&mut block, doc as usize / 64);
                 flush(&mut pending, w);
             }
-            let (mark, bit, off) = ((doc - first + 1) as u16, 1u64 << (doc % 64), doc - first);
+            let (mark, bit) = ((doc - first + 1) as u16, 1u64 << (doc % 64));
+            let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
+            let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
             kept.resize(kept.len().max(toks.len()), 0);
             anchors.resize(anchors.len().max(toks.len()), 0);
             let (mut n, mut na) = (0, 0);
             for (at, &id) in toks.iter().enumerate() {
+                let i = (id as usize).min(nkeep);
                 unsafe {
-                    let v = *info.get_unchecked(id.wrapping_add(1) as usize);
-                    *pending.get_unchecked_mut((v & 0x3FFF) as usize) |= bit;
                     *anchors.get_unchecked_mut(na) = at;
-                    na += (v >> 14 & 1) as usize;
-                    *kept.get_unchecked_mut(n) = id;
-                    n += (v >> 15) as usize;
+                    na += (i.wrapping_sub(a0) < nkeep - a0) as usize;
+                    let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
+                    *pending.get_unchecked_mut(i.min(nbits)) |= (i < nbits) as u64 * bit;
+                    *kept.get_unchecked_mut(n) = i as u32;
+                    n += (new & (i.wrapping_sub(nbits) < lists - nbits)) as usize;
                 }
             }
             for &at in &anchors[..na] {
-                let k = toks[at] as usize - a0;
+                let k = (toks[at] as usize).min(nkeep) - a0;
                 for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
                     let span = spans[q as usize];
                     let phrase = &ids[span.1 as usize..span.2 as usize];
@@ -501,10 +493,8 @@ fn main() {
                 }
             }
             for &i in &kept[..n] {
-                if std::mem::replace(&mut last[i as usize], mark) != mark {
-                    buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
-                    count[i as usize] += 1;
-                }
+                buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
+                count[i as usize] += 1;
             }
         });
         flush(&mut pending, block);
