@@ -206,4 +206,4 @@ One line in the scan loop: `_mm_prefetch(p + 4096, _MM_HINT_T0)`. The hardware p
 
 ### `-O2` instead of `-O3` (tried, reverted)
 
-Same source, one build flag. Board `run` on `c27bda3`: 0.0234 s, 18.7 MiB, 83.34, against 0.0214–0.0218 s with `-O3`. That board run was slow for every track (C on unchanged code went from 0.0296 s to 0.0382 s), so the size of the loss is not reliable; there was no sign of a gain, so `-O3` stays.
+Same source, one build flag. Board `run-dbba4c78aeb2` (`c27bda3`): 0.0234 s, 18.7 MiB, 83.34, against 0.0214–0.0218 s with `-O3`. That board run was slow for every track (C on unchanged code went from 0.0296 s to 0.0382 s), so the size of the loss is not reliable; there was no sign of a gain, so `-O3` stays.
