@@ -81,16 +81,6 @@ fn number(text: &[u8], i: usize) -> u32 {
     digits.fold(0, |v, &b| v * 10 + (b - b'0') as u32)
 }
 
-/// Token bytes: [A-Za-z0-9].
-static WORD: [bool; 256] = {
-    let mut t = [false; 256];
-    let mut c = 0;
-    while c < 256 {
-        (t[c], c) = ((c as u8).is_ascii_alphanumeric(), c + 1);
-    }
-    t
-};
-
 /// The key of the token of len (at most 32) bytes at p: its bytes lowercased
 /// (OR-ing 0x20 lowercases letters and keeps digits) and zero padded.
 unsafe fn key(p: *const u8, len: usize) -> __m256i {
@@ -215,7 +205,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
                     next = s; // the token may go on: start the next window at it
                     break;
                 }
-                while WORD[*p.add(next as usize) as usize] {
+                while (*p.add(next as usize)).is_ascii_alphanumeric() {
                     next += 1; // 64 bytes or more
                 }
                 len = next;
@@ -622,9 +612,7 @@ fn main() {
         // instead of all of the file's at exit by one (MADV_DONTNEED on a clean
         // private mapping only drops pages; a later read would fault them in).
         let (from, to) = ((text.as_ptr() as usize + cut[t] + 4095) & !4095, (text.as_ptr() as usize + cut[t + 1]) & !4095);
-        if to > from {
-            unsafe { madvise(from as *mut u8, to - from, 4) };
-        }
+        unsafe { madvise(from as *mut u8, to.max(from) - from, 4) };
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
