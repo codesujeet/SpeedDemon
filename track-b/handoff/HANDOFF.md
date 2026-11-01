@@ -1,0 +1,64 @@
+# Handoff prompt for the next cloud session (paste everything below the line)
+
+---
+
+You are continuing Speed Demon 2026 work for the solo team "Microsecond" (repo codesujeet/SpeedDemon). Read this whole
+note before acting.
+
+## Where things are
+- Live code: branch `speed-demon`. NEVER push to it unless the user says so for a specific change. No tags. Do not edit
+  PERF.md, README.md, real-spec/board-runs.jsonl or other tracks' files.
+- Research notes and tools: branch `cloud-research-notes`:
+  - `track-a/RESEARCH_A.md`, `track-b/RESEARCH_B.md`, `track-c/RESEARCH_C.md`: every measurement and negative
+    result so far. Read them; never re-propose a dead idea.
+  - `track-b/handoff/BRIEF.md`: the scoring formula, board hardware, current scores and leader gaps, the dead-idea
+    list and the B profile on 8eb3624. The four review agents were given this brief.
+  - `track-b/handoff/tools/`: helper scripts. Each has the old scratchpad path hard-coded in it
+    (`/tmp/claude-0/-home-user-SpeedDemon/41f9d852-.../scratchpad`). Edit that to your own scratch dir first.
+    - bench.py `reps cpus bin...`: interleaved wall/CPU medians. Mount tmpfs on /out first; it deletes the outputs before each run.
+    - cgpeak.sh `cpus bin`: peak memory (cgroup v1).
+    - rlines.py (rustfmt, max_width=100) and slines.py (clang-format LLVM): formatted code-line counts.
+    - fuzz_bd.py `base new [cases]`: differential fuzz for B. Terms are 1-32 bytes, per the spec's 32-byte maximum.
+    - fuzz_a.py, fuzz_c.py, gen_a.py, ref_a.py: generator, oracle and fuzzers for A and C.
+    - g15build.sh: builds C++ with the board's gcc-15 image; it also restarts dockerd if it died.
+- Unmerged experiment branches: `cloud-b-compactkeys` is obsolete (written for the old key-comparing lookup), and the
+  other `cloud-*` branches are already merged or recorded as dead in the notes.
+
+## Data (not in git; download again)
+- Seed 1: `https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/data/track-{a,b,c}/full-seed1/...`, listed in
+  `https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/data/SHA256SUMS.txt`. B: docs.txt and queries.txt.
+  The programs read `/data/...` and write `/out/...`. Symlink /data to the track's data dir.
+- Seeds 2, 3 and 7 are NOT public. Ask the user (their main session has them) or have them run the hashes.
+- Expected output hashes (sha256 prefixes): seed 1 A 495ca096, B f86973c21022, C d8088b1c.
+  A 2:fe3469ff10 3:5207056c6c 7:b384b9ddf5; B 2:7f224ef6 3:7e004661 7:a5a56828; C 2:f99e6f9133 3:4fb4eeb21b 7:da8b48aef3.
+- The live board feed is `https://s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/board/board.json` (team "Microsecond").
+
+## Environment notes
+- apt works. perf: use `/usr/lib/linux-tools-6.8.0-147/perf` with `-e cpu-clock` (there is no PMU). valgrind/callgrind is the
+  instruction counter; `--branch-sim=yes` gives a mispredict proxy. Run valgrind on the binary directly, not via taskset.
+- Docker: start dockerd yourself (see g15build.sh). Verify with the real Dockerfile, `docker build --network=none`, then
+  `docker run --rm --network=none --read-only --user 65534 --memory 8g -v DATA:/data:ro --tmpfs /tmp -v OUT:/out IMAGE`,
+  and compare the output hash on 3 or more runs. Build from a clean copy of the track dir, so no target/ and no Cargo.lock go in.
+- The VM has 4 vCPUs and no SMT. The board is an i5-13500 with 6 P-cores and SMT, running 12 threads. Gains from
+  latency tricks shrink on the board; cuts to instructions and mispredicts carry over. Delete Cargo.lock before
+  committing (it is untracked, and the stop hook complains about it).
+
+## State at handoff (Nov 1 ~13:00 UTC; freeze Nov 2 15:00 UTC; stop pushing code ~14:00 UTC)
+- Board: overall about 79.6, rank 8/96. A about 84.2 (0.0218 s, S 317). B 73.96 (0.1679 s, 43.6 MiB, S 576; hash-only
+  Terms::find, head 8eb3624). C about 80.5. Leaders: B #1 81.05 (0.0744 s, S 960).
+- Four Opus review agents were started (research only): A, C, B-scan, B-post-scan. Their outputs were planned in the old
+  scratchpad `plan/{A,C,B_scan,B_post}.md`. If they are not in this branch they were lost. Re-run that review with
+  BRIEF.md if the user wants it.
+- Planned next step: merge the agents' findings into `FORWARD_PLAN.md` (ranked by net points after line cost, cross-checked
+  against the notes). Then implement each idea on its own branch `cloud-<track>-<idea>`, based on the latest
+  origin/speed-demon. Verify each with Docker and its hash, measure callgrind instructions, interleaved 1 and 4 CPU timing,
+  peak memory and the line delta. Commit one idea per commit, with a message that matches the diff, gives the numbers and
+  says "board timing not measured". Push, and report each idea to the user: branch, gain, line delta, risk.
+
+## Rules (from the user)
+- Byte-identical output. One failed run zeroes a track.
+- Zero dependencies, no Cargo.lock, no data files, no third-party packages or skills in the repo. Keep the Dockerfile allowlisted and pinned.
+- Never invent numbers; say plainly what was and was not measured.
+- Points: 1% faster is about +0.11 pt; one formatted line is about -0.009 pt; gains under about 0.2 pt are not worth a board slot.
+- Only push to speed-demon itself if the user allows it. Then all four seed hashes must match, run `git pull --rebase` first,
+  touch only that track, need a 3% or better measured gain, and check the board twice afterwards, reverting if it got worse.
