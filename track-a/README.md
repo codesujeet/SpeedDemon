@@ -19,3 +19,7 @@ Facts the spec guarantees: 27-byte timestamps inside a fixed 72-hour span, well-
 ## Checks
 
 100 back-to-back full-size runs with the harness flags, all matching the published hash. The first Rust-to-C++ board run (`308cbff`) measured 0.0277 s, 19.3 MiB, S 310.
+
+## Latest version
+
+The current `src/main.cpp` is a second team draft: a branch-free number-width helper, a name compare that checks 64 bytes in two AVX2 steps (94% of lines), and 64 spare bytes after the name arena for the over-read. `_exit(0)` after the output and the static link stay from the first C++ version. 80 back-to-back full-size runs of the draft matched the published hash.

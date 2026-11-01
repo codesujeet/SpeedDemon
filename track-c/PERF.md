@@ -150,9 +150,21 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `9e9667f` | Re-run board on static+_exit Track C (noise check) | `run-21362694e839` | 0.0375 | 10.5 | 389 | 75.71 |
 | `308cbff` | Track A: C++ (gcc 15, static, _exit after the output); Rust version stays at tag best-19 | `run-70be1284d180` | 0.0375 | 10.5 | 389 | 75.70 |
 | `4d1d805` | Tracks B and D: exit right after the output so the big arrays are not freed one by one | `run-52c4ca2339d6` | 0.0379 | 10.6 | 389 | 75.55 |
+| `d68c42e` | Untrack Cargo.lock files added by mistake | `run-41a98fbb02ed` | 0.0373 | 10.6 | 389 | 75.74 |
+| `23561b4` | Track C: LAG 16 -> 32 (experiment) | `run-f99f3b0dbb28` | 0.0379 | 10.4 | 389 | 75.61 |
+| `a302a61` | Track C: LAG back to 16 (32 scored 75.61, no gain) | `run-ebe1702a8125` | 0.0406 | 10.8 | 389 | 74.74 |
+| `70fee14` | Track A: 16 pieces per thread (experiment) | `run-188198b6f1aa` | 0.0376 | 10.5 | 389 | 75.67 |
+| `8d367d9` | Track C: new user-drafted C++ (64-bit hash key, field-by-field parse, distinct counts from | `run-dbdb4a8194b4` | 0.0344 | 9.6 | 398 | 76.95 |
+| `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-ac01e190d19e` | 0.0340 | 9.9 | 398 | 76.97 |
+| `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-99100127449b` | 0.0369 | 9.1 | 398 | 76.44 |
+| `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-d3acf3d74dfa` | 0.0333 | 8.9 | 398 | 77.63 |
 
 <!-- board-runs:end -->
 
 ## Language switch to C++
 
 The Rust version (0.0412-0.0496 s, S 542) was replaced by a C++ build of the team's own ChatGPT-drafted design (commit `b573d30`). Local interleaved runs showed it about 10% faster (median 85 ms against 94.5 ms); the first board run measured 0.0426 s, 10.6 MiB, S 388. The gain on the board is mostly the smaller source: time was within the Rust version's noise. A Rust port of the same design (commits 7827d83 and f47d313) was 3-5 ms slower than the older Rust code on two board runs; the C++ build of the same design was not slower on its first board run. gcc PGO: no gain locally, dropped.
+
+## Second C++ version (`8d367d9`)
+
+The team drafted a new C++ file (64-bit hash name key with 8-byte slots probed four at a time, field-by-field parsing, distinct counts taken from the bitset marks, work-claiming phases instead of barriers). Locally it was about 25% faster than the first C++ version (median 65-67 ms against 82-93 ms in interleaved runs). Board: run `run-dbdb4a8194b4` (`8d367d9`) 0.0344 s, 10.1 MiB, S 398, 76.95; `run-ac01e190d19e` (`2ce9b21`, unchanged code) 0.0340 s, 76.97; `run-d3acf3d74dfa` (`428ae7e`, unchanged code) 0.0333 s, 77.63. Static link and `_exit(0)` kept from the first C++ version (`17ce1b0`, `run` rows in the table below: 0.0376 s against 0.0426 s dynamic). Also tried and dropped: gcc PGO (no local gain), LAG 32 instead of 16 (75.61 against 75.7).

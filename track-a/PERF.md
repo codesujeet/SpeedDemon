@@ -166,9 +166,21 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `9e9667f` | Re-run board on static+_exit Track C (noise check) | `run-a2dc253315df` | 0.0352 | 24.4 | 510 | 76.29 |
 | `308cbff` | Track A: C++ (gcc 15, static, _exit after the output); Rust version stays at tag best-19 | `run-ccae47851733` | 0.0277 | 18.4 | 310 | 81.71 |
 | `4d1d805` | Tracks B and D: exit right after the output so the big arrays are not freed one by one | `run-f676f02c28ef` | 0.0277 | 18.4 | 310 | 81.72 |
+| `d68c42e` | Untrack Cargo.lock files added by mistake | `run-675fa046c3d5` | 0.0277 | 18.6 | 310 | 81.68 |
+| `23561b4` | Track C: LAG 16 -> 32 (experiment) | `run-7b877d515593` | 0.0283 | 18.9 | 310 | 81.38 |
+| `a302a61` | Track C: LAG back to 16 (32 scored 75.61, no gain) | `run-60f2532bf9bd` | 0.0299 | 18.7 | 310 | 80.84 |
+| `70fee14` | Track A: 16 pieces per thread (experiment) | `run-020e3f03e219` | 0.0283 | 19.4 | 310 | 81.27 |
+| `8d367d9` | Track C: new user-drafted C++ (64-bit hash key, field-by-field parse, distinct counts from | `run-a0ac1d68073a` | 0.0281 | 18.4 | 310 | 81.56 |
+| `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-b87352798d2d` | 0.0333 | 19.6 | 310 | 79.46 |
+| `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-08c55254bc3e` | 0.0270 | 18.3 | 329 | 81.84 |
+| `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-e4130a512def` | 0.0267 | 19.1 | 321 | 81.84 |
 
 <!-- board-runs:end -->
 
 ## Language switch to C++
 
 The Rust version (0.026-0.029 s, 22-26 MiB, S 508-510) was replaced by a C++ build of the team's own ChatGPT-drafted design. Board run `run-ccae47851733` (commit `308cbff`): 0.0277 s, 19.3 MiB, S 310, 81.71 points; a second run `run-f676f02c28ef` (`4d1d805`) gave 0.0277 s, 19.3 MiB, S 310, 81.72. The gain is mostly the smaller source (S 310 against 508) and about 4 MiB less memory; time is about the same as the Rust version. A Rust port of this same design (commit `4c454fe`) had scored 78.62 and 78.14 and was reverted, so the C++ build, not only the design, matters. The static link and the `_exit(0)` after the output were added in the same change and were not measured separately on A.
+
+## Second C++ version
+
+Locally the new draft was 6-8% faster in interleaved runs (median 74-75 ms against 80 ms). I also tried its extra pass that counts the records of every hour before sizing the latency buffer; it adds 8 source lines and ran no faster, so it is not in the final file. Board: `run-08c55254bc3e` (`a46cccc`, with the counting pass) 0.0270 s, S 329, 81.84; `run-e4130a512def` (`428ae7e`, without it) 0.0267 s, S 321, 81.84. 16 work pieces per thread instead of 8 gave 81.27 (`70fee14`), so 8 stays.

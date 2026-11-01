@@ -243,5 +243,13 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `9e9667f` | Re-run board on static+_exit Track C (noise check) | `run-1dfc0257aa37` | 0.2038 | 66.1 | 517 | 66.80 |
 | `308cbff` | Track A: C++ (gcc 15, static, _exit after the output); Rust version stays at tag best-19 | `run-6ed34af0f2f4` | 0.1724 | 65.7 | 517 | 68.65 |
 | `4d1d805` | Tracks B and D: exit right after the output so the big arrays are not freed one by one | `run-f19739011738` | 0.1711 | 65.3 | 518 | 68.75 |
+| `d68c42e` | Untrack Cargo.lock files added by mistake | `run-d36722b5d600` | 0.1738 | 66.1 | 518 | 68.53 |
+| `23561b4` | Track C: LAG 16 -> 32 (experiment) | `run-13f7637d3f4f` | 0.1985 | 65.4 | 518 | 67.13 |
+| `a302a61` | Track C: LAG back to 16 (32 scored 75.61, no gain) | `run-590fdacc489a` | 0.1923 | 65.6 | 518 | 67.47 |
+| `70fee14` | Track A: 16 pieces per thread (experiment) | `run-7ea14a500420` | 0.1722 | 65.4 | 518 | 68.67 |
+| `8d367d9` | Track C: new user-drafted C++ (64-bit hash key, field-by-field parse, distinct counts from | `run-ba337fa71396` | 0.1902 | 65.4 | 518 | 67.60 |
+| `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-0637a97b287a` | 0.1726 | 66.1 | 518 | 68.60 |
+| `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-5bb911630f51` | 0.1712 | 66.3 | 518 | 68.68 |
+| `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-a2ae390e4894` | 0.1712 | 65.9 | 518 | 68.71 |
 
 <!-- board-runs:end -->

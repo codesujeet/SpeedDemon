@@ -267,5 +267,17 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `9e9667f` | Re-run board on static+_exit Track C (noise check) | `run-46b0cfef039b` | 0.2378 | 48.7 | 611 | 69.51 |
 | `308cbff` | Track A: C++ (gcc 15, static, _exit after the output); Rust version stays at tag best-19 | `run-3376333db36a` | 0.2675 | 53.2 | 611 | 67.85 |
 | `4d1d805` | Tracks B and D: exit right after the output so the big arrays are not freed one by one | `run-67cd42ebed11` | 0.2336 | 49.5 | 612 | 69.62 |
+| `d68c42e` | Untrack Cargo.lock files added by mistake | `run-9c57c827fbde` | 0.2397 | 49.9 | 612 | 69.31 |
+| `23561b4` | Track C: LAG 16 -> 32 (experiment) | `run-9278efa3d8ca` | 0.2329 | 49.6 | 612 | 69.65 |
+| `a302a61` | Track C: LAG back to 16 (32 scored 75.61, no gain) | `run-3ffa11504876` | 0.2377 | 49.7 | 612 | 69.42 |
+| `70fee14` | Track A: 16 pieces per thread (experiment) | `run-bd19791e600a` | 0.2321 | 49.6 | 612 | 69.69 |
+| `8d367d9` | Track C: new user-drafted C++ (64-bit hash key, field-by-field parse, distinct counts from | `run-c679335928ce` | 0.2597 | 55.9 | 612 | 67.95 |
+| `2ce9b21` | Track B: new user-drafted Rust (token id stream, CRC hash, bitmap for big lists, persisten | `run-42bec5c66bdc` | 0.1767 | 47.2 | 609 | 72.87 |
+| `a46cccc` | Track A: new user-drafted C++ (branch-free width, 64-byte name compare, latency buffer siz | `run-dff4c67a492f` | 0.1866 | 47.3 | 609 | 72.27 |
+| `428ae7e` | Track A: new file without the sizing pass over all records (experiment) | `run-bfc9e1bb8e38` | 0.1728 | 47.1 | 609 | 73.13 |
 
 <!-- board-runs:end -->
+
+## Second draft (`2ce9b21`)
+
+Locally about 17% faster than the first draft in interleaved runs (median about 425 ms against 522 ms) with 46 MB against 50 MB peak. Board: `run-42bec5c66bdc` (`2ce9b21`) 0.1767 s, 49.5 MiB, S 609, 72.87; `run-bfc9e1bb8e38` (`428ae7e`, unchanged code) 0.1728 s, 73.13.

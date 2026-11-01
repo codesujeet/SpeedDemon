@@ -55,3 +55,7 @@ None.
 ## Dependencies
 
 None.
+
+## Latest version
+
+The current `src/main.rs` is a second team draft (ChatGPT, reviewed and measured by us): tokens go into an id stream first and phrases are matched from it, lists over 768 documents meet other lists as bitmaps, terms are hashed from the first 16 bytes with the CRC32 instruction (the key comparison tells apart any that collide), and the threads are started once and reused. The process ends with `exit(0)` after the output. Output matched the previous version on seeds 1, 2, 3 and 7, and 40 back-to-back full-size runs matched the published hash.
