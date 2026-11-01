@@ -78,40 +78,62 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
     (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93)
 }
 
+// Open addressing over 32-byte buckets of four slots, each the hash's top bits above
+// id + 1 (0 if free). One compare settles nearly every lookup, a term or not, with no
+// branch on which: telling those apart in a loop mispredicted about one token in three.
 struct Terms {
-    slot: Vec<u64>,
+    slot: Vec<__m256i>,
     n: usize,
 }
 
 impl Terms {
     fn find(&self, h: u64) -> u32 {
-        let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
-        loop {
-            let s = unsafe { *self.slot.get_unchecked(i) };
-            if s == 0 || s >> ID_BITS == h >> ID_BITS {
-                return ((s & ID_MASK) as u32).wrapping_sub(1).min(self.n as u32);
+        let mask = self.slot.len() - 1;
+        let mut i = h as usize & mask;
+        unsafe {
+            let tag = _mm256_set1_epi64x((h & !ID_MASK) as i64);
+            let keep = _mm256_set1_epi64x(!ID_MASK as i64);
+            loop {
+                let v = *self.slot.get_unchecked(i);
+                let eq = _mm256_cmpeq_epi64(_mm256_and_si256(v, keep), tag);
+                let free = _mm256_cmpeq_epi64(v, _mm256_setzero_si256());
+                let hit = _mm256_movemask_pd(_mm256_castsi256_pd(eq)) as u32;
+                if hit | _mm256_movemask_pd(_mm256_castsi256_pd(free)) as u32 != 0 {
+                    let w: [u64; 4] = std::mem::transmute(v);
+                    let id = (w[hit.trailing_zeros() as usize & 3] & ID_MASK) as u32;
+                    return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), self.n as u32);
+                }
+                i = (i + 1) & mask;
             }
-            i = (i + 1) & mask;
         }
     }
 
     fn renumber(&mut self, new: &[u32]) {
-        for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
+        for b in &mut self.slot {
+            let w: &mut [u64; 4] = unsafe { std::mem::transmute(b) };
+            for s in w.iter_mut().filter(|s| **s != 0) {
+                *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
+            }
         }
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
         let h = unsafe { hash(term.as_ptr(), term.len()) };
         let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
-        while self.slot[i] != 0 {
-            if self.slot[i] >> ID_BITS == h >> ID_BITS {
-                return (self.slot[i] & ID_MASK) as u32 - 1;
+        loop {
+            let w: &mut [u64; 4] = unsafe { std::mem::transmute(&mut self.slot[i]) };
+            for s in w.iter_mut() {
+                if *s == 0 {
+                    self.n += 1;
+                    *s = (h & !ID_MASK) | self.n as u64;
+                    return self.n as u32 - 1;
+                }
+                if *s >> ID_BITS == h >> ID_BITS {
+                    return (*s & ID_MASK) as u32 - 1;
+                }
             }
             i = (i + 1) & mask;
         }
-        (self.n += 1, self.slot[i] = (h & !ID_MASK) | self.n as u64);
-        self.n as u32 - 1
     }
 }
 
@@ -130,7 +152,7 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 }
 
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
-    const LAG: usize = 2;
+    const LAG: usize = 4;
     let mut ring = [0u64; LAG];
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     loop {
@@ -335,7 +357,7 @@ impl Units {
 fn main() {
     unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
     let qtext = map("/data/queries.txt");
-    let slot = vec![0; (qtext.len() / 8).next_power_of_two()];
+    let slot = vec![unsafe { _mm256_setzero_si256() }; (qtext.len() / 32).next_power_of_two()];
     let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
