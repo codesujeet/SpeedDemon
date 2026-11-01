@@ -299,6 +299,9 @@ int main() {
     std::vector<std::thread> pool;
     for (int t = 0; t < nt; ++t) pool.emplace_back([&, t] {
         for (int k; (k = claim_piece++) < pieces;) {
+            // Map the piece's pages in one call, not by a fault every 16 pages as the parse reaches them.
+            uintptr_t page = uintptr_t(log + cut[k]) & ~uintptr_t(4095);
+            madvise((void*)page, uintptr_t(log + cut[k + 1]) - page, MADV_POPULATE_READ);
             parsers[t].run(log + cut[k], log + cut[k + 1]);
             // The piece is not read again: its pages are unmapped now, by this
             // thread, instead of all of the log's at exit by one.
@@ -344,8 +347,7 @@ int main() {
         }
         sized.arrive_and_wait();
 
-        for (int h; (h = claim_text++) < HOURS;)
-        for (int rep = 0; rep < 2; ++rep) {  // DIAGNOSTIC: the hour's text is written twice (same bytes)
+        for (int h; (h = claim_text++) < HOURS;) {
             char label[24];
             int day = (h + 18) / 24;
             snprintf(label, sizeof label, "2026-%02d-%02dT%02d:00:00Z ", day < 2 ? 10 : 11, day < 2 ? 30 + day : day - 1, (h + 18) % 24);
@@ -359,7 +361,7 @@ int main() {
                 }
                 *o++ = '\n';
             }
-            if (rep) std::vector<Line>().swap(lines[h]);
+            std::vector<Line>().swap(lines[h]);
         }
     });
     for (auto& th : pool) th.join();
