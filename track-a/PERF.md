@@ -213,6 +213,12 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `0301fbf` | Track A: the SIMD partition shares the scalar loop for its tail | `run-eb1b03aedfca` | 0.0214 | 18.9 | 334 | 84.16 |
 | `e80c817` | Track C: amount and region in one two-lane fold, tables by value, no hash finalizer (from  | `run-87a4e9f7491e` | 0.0214 | 19.4 | 334 | 84.08 |
 | `c967879` | Tracks A and B: cheaper scans from the cloud branches | `run-c57953fc8e3d` | 0.0213 | 18.9 | 327 | 84.28 |
+| `248a537` | PERF: log board runs (C 81.01 with the two-lane fold) | `run-9707dec31cdd` | 0.0227 | 20.1 | 327 | 83.36 |
+| `f7de92a` | Track A: back to the line list, with one stretch of chunks per hour; Track B: back to eee5 | `run-058393b70483` | 0.0210 | 19.0 | 301 | 84.69 |
+| `9f5f49b` | Track B: DIAGNOSTIC (one extra token and lookup pass) to time it on the board; will be rev | `run-fab8683e0eb5` | 0.0210 | 19.0 | 301 | 84.68 |
+| `27bcbd7` | Track B: DIAGNOSTIC (one extra classify and hash pass, no lookup) to time it on the board; | `run-d25a7778ff90` | 0.0207 | 19.6 | 301 | 84.69 |
+| `3ee9986` | Track B: term table half the size (experiment) | `run-44d3d3c26609` | 0.0208 | 19.2 | 301 | 84.76 |
+| `adb642e` | Track B: a small table of the hottest terms ahead of the main one (experiment) | `run-e38477b7743d` | 0.0216 | 19.0 | 301 | 84.39 |
 
 <!-- board-runs:end -->
 
@@ -235,3 +241,17 @@ One line in the scan loop: `_mm_prefetch(p + 4096, _MM_HINT_T0)`. The hardware p
 ### `-O2` instead of `-O3` (tried, reverted)
 
 Same source, one build flag. Board `run-dbba4c78aeb2` (`c27bda3`): 0.0234 s, 18.7 MiB, 83.34, against 0.0214–0.0218 s with `-O3`. That board run was slow for every track (C on unchanged code went from 0.0296 s to 0.0382 s), so the size of the loss is not reliable; there was no sign of a gain, so `-O3` stays.
+
+### Instruction cuts, and what the board kept (Nov 1)
+
+Callgrind on the full data gave exact counts per line: 805 M instructions, 260 a line, 160 of them in the parse. Five cuts took it to 738 M: the hour from one 8-byte load and one multiply; the endpoint's ends from two 16-byte compares (the spec bounds the method at 7 bytes and `" SSS latency"` at 15), which removed the 64-byte window and its fallback search; a popcount for the line ends; a per-hour write cursor over size-aligned chunks; no bound check in the name probe. Board: `run-b20f497b4193` 0.0209 s and `run-6fbe7156e8a3` 0.0207 s at S 315, 84.76, a new best.
+
+Fewer instructions did not always mean less time:
+
+| Change | Instructions | Board | Kept? |
+|---|---|---|---|
+| SIMD partition in `select` (`pdep`/`pext`, no table) | 738 M to 701 M | `run-824aa7a58edd` 0.0217 s S 346; `run-eb1b03aedfca` 0.0214 s S 334 | no |
+| Line ends found from each line again, no 4 KB list, with the above | 610 M | `run-c57953fc8e3d` 0.0213 s S 327; `run-9707dec31cdd` 0.0227 s S 327 | no |
+| One stretch of chunks per hour, released in one `madvise` | 739 M | `run-058393b70483` 0.0210 s S 301; `run-44d3d3c26609` 0.0208 s S 301, 84.76 | yes |
+
+The chunk change kept the time and cost 14 fewer lines. S counts formatted code lines only: comments are free, and a line wrapped at 80 columns counts each time.

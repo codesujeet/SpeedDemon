@@ -25,7 +25,6 @@ const GAP: u32 = 15;
 const ID_BITS: u32 = 18;
 const ID_MASK: u64 = (1 << ID_BITS) - 1;
 const BIG: usize = 768;
-const HOT_BITS: u32 = 14; // the hot table has 2^HOT_BITS slots
 
 fn map(path: &str) -> &'static [u8] {
     let file = std::fs::File::open(path).expect(path);
@@ -79,12 +78,8 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
     (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93)
 }
 
-// The term table is larger than a core's L2, and waiting for it was about 40% of
-// the run on the board. Most tokens are a few common terms, so each hot slot (by
-// the hash's top bits) holds the commonest term of the sample that falls there.
 struct Terms {
     slot: Vec<u64>,
-    hot: Vec<u64>,
     n: usize,
 }
 
@@ -100,18 +95,8 @@ impl Terms {
         }
     }
 
-    fn heat(&mut self, df: &[u32]) {
-        let mut best = vec![0; self.hot.len()];
-        for &s in self.slot.iter().filter(|s| **s != 0) {
-            let (i, d) = ((s >> (64 - HOT_BITS)) as usize, df[(s & ID_MASK) as usize - 1]);
-            if d > best[i] {
-                (best[i], self.hot[i]) = (d, s);
-            }
-        }
-    }
-
     fn renumber(&mut self, new: &[u32]) {
-        for s in self.slot.iter_mut().chain(&mut self.hot).filter(|s| **s != 0) {
+        for s in self.slot.iter_mut().filter(|s| **s != 0) {
             *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
         }
     }
@@ -146,15 +131,15 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
     const LAG: usize = 8;
-    let mut ring = [(0u64, 0usize); LAG];
+    let mut ring = [0u64; LAG];
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     loop {
-        (ids.set_len(out), ids.reserve(32));
+        (ids.set_len(out), ids.reserve(32 + LAG));
         let buf = ids.as_mut_ptr();
-        let mut look = |&(h, at): &(u64, usize)| {
+        let mut look = |&h: &u64| {
             let id = t.find(h);
             _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
-            *buf.add(at) = id;
+            (*buf.add(out), out) = (id, out + 1);
         };
         _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
         let (word, nl) = classes(p);
@@ -175,22 +160,12 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
                 len = next;
             }
             m &= m.wrapping_add(m & m.wrapping_neg());
-            let h = if len <= 32 { hash(p.add(s as usize), len as usize) } else { !0 };
-            let hot = *t.hot.get_unchecked((h >> (64 - HOT_BITS)) as usize);
-            if hot >> ID_BITS == h >> ID_BITS {
-                // A hot term is known at once; the others wait their turn in the ring,
-                // holding their place in the list.
-                let id = (hot & ID_MASK) as u32 - 1;
-                _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
-                *buf.add(out) = id;
-            } else {
-                _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
-                if n >= LAG {
-                    look(&ring[n % LAG]);
-                }
-                (ring[n % LAG], n) = ((h, out), n + 1);
+            let h = if len <= 32 { hash(p.add(s as usize), len as usize) } else { 0 };
+            _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
+            if n >= LAG {
+                look(&ring[n % LAG]);
             }
-            out += 1;
+            (ring[n % LAG], n) = (h, n + 1);
         }
         if nl != 0 {
             (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
@@ -382,7 +357,7 @@ fn main() {
     unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
     let qtext = map("/data/queries.txt");
     let slot = vec![0; (qtext.len() / 8).next_power_of_two()];
-    let mut terms = Terms { slot, hot: vec![0; 1 << HOT_BITS], n: 0 };
+    let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
         let (phrase, from) = (q[0] == b'P', ids.len() as u32);
@@ -456,7 +431,6 @@ fn main() {
         for (r, &k) in packed.iter().enumerate() {
             new[k as usize & 0xFF_FFFF] = r as u32;
         }
-        terms.heat(&df);
         terms.renumber(&new);
         ids.iter_mut().for_each(|id| *id = new[*id as usize]);
         anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);

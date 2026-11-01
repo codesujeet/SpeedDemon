@@ -200,7 +200,7 @@ private:
 
 // One country's running aggregates (per thread, summed at the end).
 struct Totals {
-    u64 count = 0, id_sum = 0, name_bytes = 0, note_bytes = 0, distinct = 0;
+    u64 count = 0, id_sum = 0, text_bytes = 0, distinct = 0;  // text_bytes: name << 32 | note
     i64 amount_sum = 0, amount_min = INT64_MAX, amount_max = INT64_MIN;
 };
 
@@ -240,13 +240,14 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
     constexpr u32 LAG = 16;
     struct Pending {
         u64 name;
-        u32 region, id, name_bytes, note_bytes;
+        u32 region, id;
+        u64 text_bytes;
         i64 cents;
     } pending[LAG];
     struct Mark {
         u32 country, id;
     } marks[LAG];
-    const Pending dummy{1, u32(regions) + 1, 0, 0, 0, 0};
+    const Pending dummy{1, u32(regions) + 1, 0, 0, 0};
     std::fill_n(pending, LAG, dummy);
     std::fill_n(marks, LAG, Mark{SPARE, 0});
     u32 n = 0;
@@ -261,8 +262,7 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         t.amount_sum += old.cents;
         t.amount_min = std::min(t.amount_min, old.cents);
         t.amount_max = std::max(t.amount_max, old.cents);
-        t.name_bytes += old.name_bytes;
-        t.note_bytes += old.note_bytes;
+        t.text_bytes += old.text_bytes;
         marks[k] = {c, names.id(old.name)};
         seen.prefetch(c, marks[k].id);
         pending[k] = next;
@@ -291,7 +291,7 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         u32 r = std::min(u64(region), u64(regions));
         _mm_prefetch((const char*)(country_of + r), _MM_HINT_T0);
         u64 key = NameTable::key(name.at, name.raw);
-        advance({key, r, u32(id), name.length, note.length, cents});
+        advance({key, r, u32(id), u64(name.length) << 32 | note.length, cents});
         names.prefetch(key);
         p = eol + 1;
     }
@@ -425,8 +425,7 @@ int main() {
             const Totals& t = per_thread[c];
             sum.count += t.count;
             sum.id_sum += t.id_sum;
-            sum.name_bytes += t.name_bytes;
-            sum.note_bytes += t.note_bytes;
+            sum.text_bytes += t.text_bytes;
             sum.distinct += t.distinct;
             sum.amount_sum += t.amount_sum;
             sum.amount_min = std::min(sum.amount_min, t.amount_min);
@@ -441,7 +440,7 @@ int main() {
         }
         for (u64 v : {sum.count, sum.id_sum}) out += ' ' + std::to_string(v);
         for (i64 v : {sum.amount_sum, sum.amount_min, sum.amount_max}) put_money(out, v);
-        for (u64 v : {sum.distinct, sum.name_bytes, sum.note_bytes}) out += ' ' + std::to_string(v);
+        for (u64 v : {sum.distinct, sum.text_bytes >> 32, sum.text_bytes & 0xFFFFFFFF}) out += ' ' + std::to_string(v);
         out += '\n';
     }
     FILE* f = fopen("/out/aggregates.txt", "wb");

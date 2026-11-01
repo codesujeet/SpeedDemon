@@ -290,5 +290,11 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `0301fbf` | Track A: the SIMD partition shares the scalar loop for its tail | `run-c98b5285f489` | 0.1712 | 66.1 | 518 | 68.70 |
 | `e80c817` | Track C: amount and region in one two-lane fold, tables by value, no hash finalizer (from  | `run-793fbbd3658d` | 0.1877 | 66.0 | 518 | 67.70 |
 | `c967879` | Tracks A and B: cheaper scans from the cloud branches | `run-d07a5e86b81f` | 0.1818 | 66.4 | 518 | 68.02 |
+| `248a537` | PERF: log board runs (C 81.01 with the two-lane fold) | `run-871cf6a7e54d` | 0.1763 | 66.4 | 518 | 68.36 |
+| `f7de92a` | Track A: back to the line list, with one stretch of chunks per hour; Track B: back to eee5 | `run-bda9c765697c` | 0.1805 | 65.8 | 518 | 68.14 |
+| `9f5f49b` | Track B: DIAGNOSTIC (one extra token and lookup pass) to time it on the board; will be rev | `run-7fcdcec13e77` | 0.1727 | 66.2 | 518 | 68.59 |
+| `27bcbd7` | Track B: DIAGNOSTIC (one extra classify and hash pass, no lookup) to time it on the board; | `run-e04d5a281fca` | 0.1773 | 65.8 | 518 | 68.33 |
+| `3ee9986` | Track B: term table half the size (experiment) | `run-4976e8b9b94e` | 0.1740 | 66.0 | 518 | 68.52 |
+| `adb642e` | Track B: a small table of the hottest terms ahead of the main one (experiment) | `run-b5e635d118de` | 0.1860 | 65.6 | 518 | 67.83 |
 
 <!-- board-runs:end -->

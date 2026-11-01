@@ -314,6 +314,12 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `0301fbf` | Track A: the SIMD partition shares the scalar loop for its tail | `run-23889509f88a` | 0.1723 | 43.7 | 576 | 73.68 |
 | `e80c817` | Track C: amount and region in one two-lane fold, tables by value, no hash finalizer (from  | `run-a71d525a4251` | 0.1732 | 43.9 | 576 | 73.59 |
 | `c967879` | Tracks A and B: cheaper scans from the cloud branches | `run-3beb6ac01111` | 0.1828 | 44.1 | 594 | 72.89 |
+| `248a537` | PERF: log board runs (C 81.01 with the two-lane fold) | `run-9b8a93be5f40` | 0.1725 | 44.6 | 594 | 73.48 |
+| `f7de92a` | Track A: back to the line list, with one stretch of chunks per hour; Track B: back to eee5 | `run-a4238da3d77a` | 0.1746 | 47.4 | 576 | 73.17 |
+| `9f5f49b` | Track B: DIAGNOSTIC (one extra token and lookup pass) to time it on the board; will be rev | `run-2f2401390c27` | 0.2715 | 48.6 | 588 | 68.20 |
+| `27bcbd7` | Track B: DIAGNOSTIC (one extra classify and hash pass, no lookup) to time it on the board; | `run-f7a899f05ebd` | 0.1989 | 43.8 | 591 | 72.02 |
+| `3ee9986` | Track B: term table half the size (experiment) | `run-c679ec081890` | 0.1745 | 43.8 | 576 | 73.52 |
+| `adb642e` | Track B: a small table of the hottest terms ahead of the main one (experiment) | `run-508baa669fca` | 0.1988 | 43.8 | 608 | 71.93 |
 
 <!-- board-runs:end -->
 
@@ -330,3 +336,15 @@ To see how much of B is the answer phase, commit `4dde5ce` temporarily answered 
 ### Prefetch 2 KB ahead in the token scan (tried, reverted)
 
 `_mm_prefetch(p + 2048)` once per 64-byte window, the same trick that helped A. A separate research session measured about 8% less wall on its own 4-vCPU machine. On the board `run-dff88ce2292a` (`fff546f`) gave 0.1921 s, 53.9 MiB, 71.35, against 0.1708 s, 47.5 MiB, 73.18 without it (`3cbb939`). B's board noise is about ±5%, but this was worse on both time and memory, so it was reverted and not re-tried. The scan here already prefetches each token's state, so a second stream of prefetches may only compete with it.
+
+### Where the time goes on the board (Nov 1)
+
+`cloud-b-scanmin` cut instructions 23% (6,937 M to 5,323 M), and a 4-vCPU VM ran it 14-18% faster, but the board read `run-3beb6ac01111` 0.1828 s and `run-9b8a93be5f40` 0.1725 s at S 594, no faster than the 0.168-0.176 s before it. So it was reverted, and the time was measured on the board itself by adding one extra pass to a build with correct output:
+
+| Extra pass | Board run | T | Added |
+|---|---|---|---|
+| none | `run-c679ec081890` (half-size table, otherwise the same) | 0.1745 s | |
+| classify and hash every token, no table | `run-f7a899f05ebd` | 0.1989 s | about 27 ms |
+| classify, hash and look up every token | `run-2f2401390c27` | 0.2715 s | about 100 ms |
+
+So the term lookups take about 73 ms of about 172 ms, with noise of several ms on each reading. They are the largest single cost, and the classify and hash work is much smaller. Two attempts at the lookups did not help: a table half the size (1 MB, below a core's 1.25 MB L2) read `run-c679ec081890` 0.1745 s, and a 128 KB table of the hottest terms in front of the main one read `run-508baa669fca` 0.1988 s at S 608, worse. The hot table adds one unpredictable branch per token, about as many tokens hitting as missing it. Neither was kept.

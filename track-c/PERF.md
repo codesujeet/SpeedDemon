@@ -193,6 +193,12 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `0301fbf` | Track A: the SIMD partition shares the scalar loop for its tail | `run-3e9ef2b010cd` | 0.0260 | 8.9 | 375 | 80.55 |
 | `e80c817` | Track C: amount and region in one two-lane fold, tables by value, no hash finalizer (from  | `run-a29d9f3b42d0` | 0.0251 | 8.7 | 373 | 81.01 |
 | `c967879` | Tracks A and B: cheaper scans from the cloud branches | `run-d9f84951ebf8` | 0.0252 | 8.7 | 373 | 80.97 |
+| `248a537` | PERF: log board runs (C 81.01 with the two-lane fold) | `run-59eaf057b1a5` | 0.0259 | 8.7 | 373 | 80.69 |
+| `f7de92a` | Track A: back to the line list, with one stretch of chunks per hour; Track B: back to eee5 | `run-c0b5c2e66081` | 0.0247 | 8.6 | 373 | 81.26 |
+| `9f5f49b` | Track B: DIAGNOSTIC (one extra token and lookup pass) to time it on the board; will be rev | `run-38ea29e6968a` | 0.0247 | 8.8 | 373 | 81.14 |
+| `27bcbd7` | Track B: DIAGNOSTIC (one extra classify and hash pass, no lookup) to time it on the board; | `run-a4e8d647c58a` | 0.0257 | 9.0 | 373 | 80.62 |
+| `3ee9986` | Track B: term table half the size (experiment) | `run-5525bc98524f` | 0.0250 | 10.1 | 373 | 80.41 |
+| `adb642e` | Track B: a small table of the hottest terms ahead of the main one (experiment) | `run-c7db923f395d` | 0.0253 | 8.5 | 373 | 81.02 |
 
 <!-- board-runs:end -->
 
@@ -242,3 +248,14 @@ Both were measured on the 13th-gen laptop with the performance governor (full se
 * **Chunked `pread` instead of the mapping.** Each worker read its piece in 128 KiB chunks into its own buffer, parsing the whole records and carrying the partial one over. Instructions fell 4% (no madvise calls, no page-fault handling) but cycles rose 9% (816 M) and the run took 19.4 ms against 17.0 ms: the copy through the kernel costs more than the page mapping it saves.
 
 A callgrind count of the committed loop on the sample (285 instructions a record) shows no hot line: the largest single line is the bitset word access at about 14 instructions a record, so there is no one place left to cut.
+
+### Instruction cuts that did reach the board (Nov 1)
+
+Unlike B, C's board time follows its instruction count. Callgrind on the full data: 950 M instructions at `8eb3624`.
+
+| Change | Instructions | Board |
+|---|---|---|
+| `tzcnt` for no quote, cheaper sign and dot, no zero test in the hash, free slots only on a miss, no warm-up tests in the rings (dummy records in the unused country 255) | 861 M | `run-2d01f677d216` 0.0260 s, 80.69 |
+| Region and amount in one two-lane fold, tables by value, no hash finalizer (a bijection, so its collision odds are unchanged) | 784 M | `run-a29d9f3b42d0` 0.0251 s, 81.01; `run-c0b5c2e66081` 0.0247 s, 81.26 |
+
+One cut went too far: reading the country at parse time, with no prefetch and no lag, took 834 M instructions at that stage but `9358419` read 0.0280 s, since the region table's misses stall each record. The prefetched ring stayed.
