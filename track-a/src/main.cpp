@@ -87,7 +87,7 @@ inline void select(u32* a, u32 n, u32 k) {
         if (a[n - 1] < a[m]) std::swap(a[n - 1], a[m]);
         if (a[m] < a[0]) std::swap(a[m], a[0]);
         std::swap(a[m], a[n - 1]);
-        u32 pivot = a[n - 1], lt = 0;
+        u64 pivot = a[n - 1], lt = 0;
         for (u32 i = 0; i + 1 < n; ++i) {
             u32 x = a[i];
             a[i] = a[lt], a[lt] = x, lt += x < pivot;
