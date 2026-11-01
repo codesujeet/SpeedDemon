@@ -18,3 +18,9 @@ Real files (records.csv `36166f4a...`, regions.csv `414c57c4...`), hash prefix `
 
 ## Gap to the leaders
 NickTrapp 18 ms / 13 MB / 303 lines vs ours 29 ms / 9 MB / 400: time is 5.2 pts of the 4.5-pt gap, memory costs them 1.6, lines are +0.9 for them. 1 ms = 0.37 pts, 1 MiB = 0.48 pts.
+
+## Update (base `fff546f`)
+| Idea | Result | Verdict |
+|---|---|---|
+| parallel release of tables (branch `cloud-c-release`) | 4 CPUs wall 38.8 -> 39.8 ms, 1 CPU flat, memory same, +9 lines | no gain |
+| one `#include <bits/stdc++.h>` for 12 std includes (branch `cloud-c-includes`) | speed and memory identical, 394 -> 383 formatted lines | pure line cut, about +0.09 pts |

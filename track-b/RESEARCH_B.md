@@ -22,3 +22,14 @@ Real full dataset (docs.txt `6cd46167...`, queries.txt `77ef7ffc...`), results h
 
 ## Points arithmetic for B (board 167 ms, 50 MB, 617 lines)
 1 ms = 0.065 pts, 10% of T = +1.15 pts, 1 MiB = 0.09 pts, 10 lines = 0.05 pts. Leaders: another ello 74 ms, Cause Of Death 100 ms.
+
+## Update (base `fff546f`): ideas from the brief
+| Idea | Result | Verdict |
+|---|---|---|
+| parallel release of `post` (20 MB) and `bits` (11 MB) before the write (branch `cloud-b-release`) | 4 CPUs wall 243.9 -> 246.7 ms, 1 CPU 815 -> 817 ms, memory same, +14 formatted lines | no gain |
+| `MADV_POPULATE_READ` of each thread's share before its scan | 4 CPUs wall 245.8 -> 250.7 ms, 1 CPU 793 -> 777 ms (flat) | no gain here (the board's contention cannot be reproduced on 4 vCPUs) |
+| balance the cut points | see below | cannot help |
+
+**Balancing cut points cannot help.** Tokens per share: 3,020,245-3,026,589 (+-0.2%); phrase hits 1,556-1,685; scan CPU per share on 1 CPU 45.6-47.2 ms (+-1.7%). The shares are already equal in work. The 140 ms board scan against about 46 ms of CPU per share means the board threads are stalled (shared-core hyper-threads, page-fault or memory contention, staggered start), not unbalanced; only dynamic claiming would absorb that, and it is out of scope.
+
+**Instruction profile (callgrind, full data): 7.17 G Ir, about 197 per token over 36.3 M tokens.** `tokens()` 44% (84 per token), the scan closure 27%, answers (`apply`, closures) about 20%, memset 5.5%. No line above 6%. 77.5% of all tokens are query terms and 45% fall on only 377 bitmap terms, so an early "is it a term" filter would not skip much. Per-line leaders: the bitmap `pending[...] |=` line 6.1%, the term-slot compare 4.0%, the lag ring `look` 3.7%, the id store 2.6%. Any real gain here needs a different per-token structure, not a tweak.

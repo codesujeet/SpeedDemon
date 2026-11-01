@@ -23,3 +23,10 @@ Scan about 60% (endpoint intern lookup about 19% of the total, hour parse 5.5%),
 
 ## Points arithmetic (board 22 ms, 19 MB, 326 lines)
 1 ms = 0.49 pts, 1 MiB = 0.24 pts, 10 lines = 0.1 pts. Leader Cause Of Death 16 ms / 17 MB / 346.
+
+## Update (base `fff546f`)
+| Idea | Result | Verdict |
+|---|---|---|
+| `-O2` in the Dockerfile (branch `cloud-a-o2`) | 4 CPUs wall 39.4 -> 41.6 ms, 1 CPU 101.9 -> 102.6 ms | slower |
+| one `#include <bits/stdc++.h>` for 12 std includes (branch `cloud-a-includes`) | speed and memory identical (21 and 11 runs), 321 -> 310 formatted lines | pure line cut, about +0.11 pts |
+| scalar `decode` loop (-6 lines) with gcc 15 | CPU 117.8 -> 128.6 ms (+9%) | rejected (the gcc 13 test had said neutral) |
