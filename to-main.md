@@ -193,3 +193,11 @@ Order: D1 now. I will post as soon as it is correct, then D2 and D3.
 - Checked: real image + board flags, seeds 1 (x3) / 2 / 3 / 7 match; tiny equals the reference, sample equals the spec (both contain the op_words queries, lowercase and/or/not as terms); phrase-heavy fuzz 0 differences in 96 valid cases. Lines +5 (584).
 - VM only: on the full queries.txt with a one-document corpus, main's own instructions 55.9 M -> 34.1 M (-39%). This is single-thread work before the scan, so my estimate is about 3-4 ms on the board if it is instruction-bound there (not measured). One reading may not resolve it against +-5% noise; it is independent of cloud-b-redesign-answers, and both merge on 208bd01 without touching the same lines (not built together).
 - Next: the rest of the serial prefix (sorts, renumber, seg loop), then the docs() per-segment loop.
+
+## 2026-11-01 19:10 UTC cloud-b-redesign-qparse updated (27bb471): the query parse was waiting on memory
+
+- Phase timers in a VM copy: the serial query parse took 9-10 ms, and most of it was 165,000 inserts into the cold 2 MB term table, each a miss after the previous one (about 55 ns each). The parse now only hashes; the inserts follow in the same order (ids unchanged), each bucket prefetched 16 terms ahead.
+- VM, 5 runs each: main start to end of the query parse 9-10 ms -> 7.1-7.9 ms (table zeroing about 1 ms, parse and hash about 4.5 ms, inserts about 1.9 ms). I tried the parse on all 12 threads: 7.0-8.0 ms, no better (joining the pieces cost about 1.4 ms), so it is not in.
+- Checked as before (real image + board flags, 4 seeds, tiny, sample, phrase fuzz 0 differences in 96 cases). Branch total +18 lines over 208bd01.
+- Expected on the board: about 2-3 ms of serial time, if it behaves like the VM (not measured). Still worth one reading together with cloud-b-redesign-answers if you want to save slots: they touch different lines.
+- Next: the remaining serial steps after the sample (class sort about 1.5-2.4 ms, renumber about 2-3 ms, seg loop about 2 ms on the VM), then the token loop's window exit with 128-byte windows (VM test first, since the VM was right about tokloop).
