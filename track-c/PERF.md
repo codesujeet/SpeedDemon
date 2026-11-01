@@ -237,6 +237,17 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `dfa797b` | Track B: lookups prefetch into L2 not L1, from cloud-b-exp-t1-on42 (experiment); nopre out | `run-c1004860843c` | 0.0239 | 9.2 | 374 | 81.26 |
 | `03a7f25` | Track B: spare words spread by token position, from cloud-b-exp-spread-on42 (experiment);  | `run-502dfec1e628` | 0.0243 | 9.3 | 374 | 81.06 |
 | `fbfc622` | Track B: term buckets of eight slots in one cache line, from cloud-b-exp-8slot-on42 (exper | `run-edd9422842d1` | 0.0243 | 8.8 | 374 | 81.31 |
+| `e80818f` | Track B: back to best-42 (8slot 0.1450 s S 645, spread 0.1445 s S 646, t1 0.1409 s, nopre  | `run-62171b562145` | 0.0284 | 8.8 | 374 | 79.61 |
+| `a5e18a4` | Log board runs for e80818f (restored best sources) | `run-f815ec8ec443` | 0.0238 | 8.8 | 374 | 81.49 |
+| `42f185b` | Track B: fill gate distance 2 -> 8 buckets (experiment; from agent-b-phases a8a1d49) | `run-f58b9bb8ceb4` | 0.0243 | 8.9 | 374 | 81.24 |
+| `2c4de9a` | Track B: bitmap rows take every token's bit (slot nbits is a sink), no compare and multipl | `run-ce287149e4e9` | 0.0239 | 8.4 | 374 | 81.66 |
+| `fdf11ec` | Track B: last[] and the first-in-document test only for terms between the bitmaps and the  | `run-632f1fb04221` | 0.0243 | 9.3 | 374 | 81.07 |
+| `748922e` | Track B: term renumbering by one counting sort instead of sorting 76k packed keys | `run-c636f7b1f0f0` | 0.0243 | 8.5 | 374 | 81.44 |
+| `6efb41f` | Log board runs through 748922e | `run-b8a31e97e700` | 0.0240 | 8.2 | 374 | 81.77 |
+| `52421b0` | Track B: phrase anchors grouped by a counting sort instead of sorting 19k triples | `run-e6efc375eced` | 0.0239 | 8.3 | 374 | 81.73 |
+| `2bb727f` | Track C: link with gc-sections and no separate code segment (binary pages mapped at run ti | `run-cfcb9beba21f` | 0.0238 | 8.4 | 374 | 81.70 |
+| `36a75bc` | Track B: token lengths from the run of ones in the class mask, one mask instead of two | `run-a57a58e739ed` | 0.0240 | 8.5 | 374 | 81.63 |
+| `218638a` | Track A: hour-sized buffers in their own mappings (mallopt 32 KiB) and exact lines reserve | `run-6212be084235` | 0.0241 | 8.6 | 374 | 81.45 |
 
 <!-- board-runs:end -->
 
