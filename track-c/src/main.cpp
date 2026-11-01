@@ -385,6 +385,11 @@ int main() {
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
     Phase flag{.pieces = nthreads}, fill{.pieces = nthreads}, parse{.pieces = pieces};
+    {  // DIAGNOSTIC: a round of twelve threads that do nothing, started and joined before the real ones
+        std::vector<std::thread> idle;
+        for (int t = 0; t < nthreads; ++t) idle.emplace_back([] {});
+        for (auto& th : idle) th.join();
+    }
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
         pool.emplace_back([&, t] {
