@@ -283,6 +283,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `ab00e1a` | Write-ups for the page-release changes and the answer-phase measurement; board run IDs | `run-34580d586e8f` | 0.1756 | 47.6 | 617 | 72.87 |
 | `bb07ac5` | Track A: 16 pieces per thread, now that pieces are released as they finish (experiment) | `run-1d25a19ab139` | 0.1734 | 47.2 | 617 | 73.04 |
 | `3cbb939` | Track A: prefetch the input 4 KB ahead in the scan loop | `run-4ed70e00b26d` | 0.1708 | 47.5 | 617 | 73.18 |
+| `fff546f` | Track B: prefetch the input 2 KB ahead in the token scan | `run-dff88ce2292a` | 0.1921 | 53.9 | 618 | 71.35 |
 
 <!-- board-runs:end -->
 
@@ -295,3 +296,7 @@ Locally about 17% faster than the first draft in interleaved runs (median about 
 Each thread drops its share of `docs.txt` after the scan (`MADV_DONTNEED`, clean private mapping, so it cannot change the output). Board: `run-d58c749305c7` (`a94d376`) 0.1674 s, 49.5 MiB, S 617, 73.42, against 0.1737 s and 0.1728 s for the code before it; the gain is small and close to run-to-run noise.
 
 To see how much of B is the answer phase, commit `4dde5ce` temporarily answered every query twice (the first answers overwritten): `run` for that commit read 0.1919 s against 0.1674 s, so the answer phase costs about 25 ms of 167 on the board (about 15%); the scan and the rest is about 140 ms. That commit was reverted straight away (`c127df2`), and it is not part of the final code. The laptop run of the same diagnostic suggested the phase was much larger (about 200 ms of 425), which is why the board number is the one used.
+
+### Prefetch 2 KB ahead in the token scan (tried, reverted)
+
+`_mm_prefetch(p + 2048)` once per 64-byte window, the same trick that helped A. A separate research session measured about 8% less wall on its own 4-vCPU machine. On the board `run-dff88ce2292a` (`fff546f`) gave 0.1921 s, 53.9 MiB, 71.35, against 0.1708 s, 47.5 MiB, 73.18 without it (`3cbb939`). B's board noise is about ±5%, but this was worse on both time and memory, so it was reverted and not re-tried. The scan here already prefetches each token's state, so a second stream of prefetches may only compete with it.

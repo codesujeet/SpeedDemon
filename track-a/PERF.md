@@ -182,6 +182,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `ab00e1a` | Write-ups for the page-release changes and the answer-phase measurement; board run IDs | `run-1332852988a0` | 0.0235 | 22.0 | 326 | 82.56 |
 | `bb07ac5` | Track A: 16 pieces per thread, now that pieces are released as they finish (experiment) | `run-9e02e3230cc7` | 0.0228 | 19.2 | 326 | 83.52 |
 | `3cbb939` | Track A: prefetch the input 4 KB ahead in the scan loop | `run-9edb429d5aae` | 0.0214 | 18.4 | 327 | 84.34 |
+| `fff546f` | Track B: prefetch the input 2 KB ahead in the token scan | `run-10d571793035` | 0.0215 | 18.7 | 327 | 84.23 |
 
 <!-- board-runs:end -->
 
