@@ -1,14 +1,9 @@
-# Track A — Ingest. Two-stage build matching the allowlist's published
-# example. Digests confirmed 2026-10-25 by pulling both tags locally
-# (they matched the rules page's own example exactly) and build-tested
-# end to end with docker build --network=none plus the harness's exact
-# docker run flags. Re-check speeddemon.dev/allowlist.json at freeze in
-# case either image gets re-tagged before Oct 28.
-FROM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS build
-COPY . /src
-WORKDIR /src
-RUN cargo build --release --offline
+# Track A - Ingest, in C++. Two-stage build on the allowlisted gcc image, then the
+# allowlisted debian runtime (both digests from speeddemon.dev/allowlist.json).
+FROM gcc:15@sha256:eb5e64286ad47187b32bda75c6b6916166ecb41da56559b8b09e0001748d2cce AS build
+COPY src/main.cpp /src/main.cpp
+RUN g++ -O3 -march=x86-64-v3 -mpclmul -mbmi2 -std=c++20 -pthread -static -o /sdrun /src/main.cpp
 
 FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-COPY --from=build /src/target/release/track-a /app/run
+COPY --from=build /sdrun /app/run
 ENTRYPOINT ["/app/run"]
