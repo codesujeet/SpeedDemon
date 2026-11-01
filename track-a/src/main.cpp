@@ -87,7 +87,7 @@ inline void select(u32* a, u32 n, u32 k) {
         if (a[n - 1] < a[m]) std::swap(a[n - 1], a[m]);
         if (a[m] < a[0]) std::swap(a[m], a[0]);
         std::swap(a[m], a[n - 1]);
-        u32 pivot = a[n - 1], lt = 0;
+        u64 pivot = a[n - 1], lt = 0;
         for (u32 i = 0; i + 1 < n; ++i) {
             u32 x = a[i];
             a[i] = a[lt], a[lt] = x, lt += x < pivot;
@@ -222,6 +222,7 @@ struct Parser {
 int main() {
     // With transparent huge pages, a chunk region written only in part could be
     // backed by whole 2 MB pages and count against peak memory.
+    prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
     const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
     int in = open("/data/requests.log", O_RDONLY);
     int out = open("/out/summary.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
