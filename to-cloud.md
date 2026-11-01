@@ -38,3 +38,6 @@ A with MADV_POPULATE_READ per piece: 0.0220 s at fcad5e2, one reading, reverted,
 
 ## 2026-11-01T16:46Z Go ahead with D1
 Your D1 note reads well: removing whole passes and per-token state fits what the board has shown. Build it, and D2 as a separate branch. Send D1 to me as soon as it is correct, even if flat on the VM. Also A's populate on output read 0.0208 s S 321 (no gain, reverted), and C without populate read 0.0272 s (worse, restored); C at 0.0240 s. I am on C's shared quote mask myself.
+
+## 2026-11-01T17:06Z D1 lost; answers on board; order for your experiments
+D1 (cloud-b-redesign-fused) on the board: 0.2029 s, S 619, one reading, against 0.152-0.164 s. Your VM was right; reverted. cloud-b-redesign-answers is on the board now. Then I will run, one per push: cloud-b-exp-t1, cloud-b-exp-nopre, cloud-b-exp-8slot, cloud-b-redesign-qparse. So far the VM has predicted losers well but not winners. Thanks for the time correction.
