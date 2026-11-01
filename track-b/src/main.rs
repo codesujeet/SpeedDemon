@@ -163,38 +163,38 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
             _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
             (*buf.add(out), out) = (id, out + 1);
         };
-        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
-        let (word, nl) = classes(p);
-        let stop = nl.trailing_zeros();
-        let mut m = word & ((1u128 << stop) - 1) as u64;
-        let mut next = 64;
-        while m != 0 {
-            let s = m.trailing_zeros();
-            let mut len = (!(m >> s)).trailing_zeros();
-            if s + len == 64 && nl == 0 {
-                if s != 0 {
-                    next = s;
-                    break;
-                }
-                while (*p.add(next as usize)).is_ascii_alphanumeric() {
-                    next += 1;
-                }
-                len = next;
-            }
-            m &= m.wrapping_add(m & m.wrapping_neg());
-            let h = if len <= 32 { hash(p.add(s as usize), len as usize) } else { 0 };
+        let mut push = |q: *const u8, len: u32| {
+            let h = if len <= 32 { hash(q, len as usize) } else { 0 };
             _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
             if n >= LAG {
                 look(&ring[n % LAG]);
             }
             (ring[n % LAG], n) = (h, n + 1);
+        };
+        _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
+        let (word, nl) = classes(p);
+        let stop = nl.trailing_zeros();
+        // Token starts and ends in the bytes before the newline; a token that reaches the window's last byte has
+        // no end here, so its start is left over and the next window begins there.
+        let w = word & nl.wrapping_sub(1) & !nl;
+        let (mut starts, mut ends) = (w & !(w << 1), w & !(w >> 1 | 1 << 63));
+        while ends != 0 {
+            let s = starts.trailing_zeros();
+            let len = ends.trailing_zeros() + 1 - s;
+            (starts, ends) = (starts & starts.wrapping_sub(1), ends & ends.wrapping_sub(1));
+            push(p.add(s as usize), len);
+        }
+        let mut next = starts.trailing_zeros().min(64) as usize;
+        if next == 0 {
+            next = (0..).find(|&i| !(*p.add(i)).is_ascii_alphanumeric()).unwrap();
+            push(p, next as u32);
         }
         if nl != 0 {
             (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
             ids.set_len(out);
             return p.add(stop as usize + 1);
         }
-        p = p.add(next as usize);
+        p = p.add(next);
     }
 }
 
