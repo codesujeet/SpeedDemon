@@ -81,69 +81,61 @@ unsafe fn hash(p: *const u8, len: usize) -> u64 {
     (h ^ h >> 31).wrapping_mul(0xD6E8_FEB8_6659_FD93) | 1 << 63
 }
 
-// Cuckoo hashing on single 8-byte slots (the hash's top bits above id + 1, 0 if free): a term sits in one of
-// two slots picked by two other bit fields of its hash, so four tokens are looked up at once with two gathers,
-// two compares and a blend, with no branch on hit or miss.
+// Open addressing over 32-byte buckets of four slots, each the hash's top bits above
+// id + 1 (0 if free). One compare settles nearly every lookup, a term or not, with no
+// branch on which: telling those apart in a loop mispredicted about one token in three.
 struct Terms {
-    slot: &'static mut [u64],
+    slot: &'static mut [__m256i],
     n: usize,
 }
 
 impl Terms {
-    fn at(&self, h: u64) -> [usize; 2] {
-        let mask = self.slot.len() as u64 - 1;
-        [(h >> 18 & mask) as usize, (h >> 40 & mask) as usize]
-    }
-
     fn find(&self, h: u64) -> u32 {
-        let [a, b] = self.at(h);
-        let (sa, sb) = (self.slot[a], self.slot[b]);
-        let s = (sa & 0u64.wrapping_sub((sa & !ID_MASK == h & !ID_MASK) as u64))
-            | (sb & 0u64.wrapping_sub((sb & !ID_MASK == h & !ID_MASK) as u64));
-        ((s & ID_MASK) as u32).wrapping_sub(1).min(self.n as u32)
-    }
-
-    // The ids of the four hashes at h, misses as n.
-    unsafe fn find4(&self, h: *const u64, out: *mut u32) {
-        let hv = _mm256_loadu_si256(h.cast());
-        let mask = _mm256_set1_epi64x(self.slot.len() as i64 - 1);
-        let keep = _mm256_set1_epi64x(!ID_MASK as i64);
-        let base = self.slot.as_ptr() as *const i64;
-        let get = |i: __m256i| _mm256_i64gather_epi64::<8>(base, _mm256_and_si256(i, mask));
-        let (sa, sb) = (get(_mm256_srli_epi64::<18>(hv)), get(_mm256_srli_epi64::<40>(hv)));
-        let tag = _mm256_and_si256(hv, keep);
-        let hit = |s: __m256i| _mm256_and_si256(s, _mm256_cmpeq_epi64(_mm256_and_si256(s, keep), tag));
-        let s = _mm256_and_si256(_mm256_or_si256(hit(sa), hit(sb)), _mm256_set1_epi64x(ID_MASK as i64));
-        let id = _mm256_sub_epi64(s, _mm256_set1_epi64x(1));
-        let low = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(id, _mm256_setr_epi32(0, 2, 4, 6, 0, 0, 0, 0)));
-        _mm_storeu_si128(out.cast(), _mm_min_epu32(low, _mm_set1_epi32(self.n as i32)));
+        let mask = self.slot.len() - 1;
+        let mut i = h as usize & mask;
+        unsafe {
+            let tag = _mm256_set1_epi64x((h & !ID_MASK) as i64);
+            let keep = _mm256_set1_epi64x(!ID_MASK as i64);
+            loop {
+                let v = *self.slot.get_unchecked(i);
+                let eq = _mm256_cmpeq_epi64(_mm256_and_si256(v, keep), tag);
+                let free = _mm256_cmpeq_epi64(v, _mm256_setzero_si256());
+                let hit = _mm256_movemask_pd(_mm256_castsi256_pd(eq)) as u32;
+                if hit | _mm256_movemask_pd(_mm256_castsi256_pd(free)) as u32 != 0 {
+                    let w: [u64; 4] = std::mem::transmute(v);
+                    let id = (w[hit.trailing_zeros() as usize & 3] & ID_MASK) as u32;
+                    return std::hint::select_unpredictable(hit != 0, id.wrapping_sub(1), self.n as u32);
+                }
+                i = (i + 1) & mask;
+            }
+        }
     }
 
     fn renumber(&mut self, new: &[u32]) {
-        for s in self.slot.iter_mut().filter(|s| **s != 0) {
-            *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
+        for b in self.slot.iter_mut() {
+            let w: &mut [u64; 4] = unsafe { std::mem::transmute(b) };
+            for s in w.iter_mut().filter(|s| **s != 0) {
+                *s = (*s & !ID_MASK) | (new[(*s & ID_MASK) as usize - 1] + 1) as u64;
+            }
         }
     }
 
     fn insert(&mut self, h: u64) -> u32 {
-        let tag = h & !ID_MASK;
-        if let Some(&s) = self.at(h).iter().map(|&i| &self.slot[i]).find(|&&s| s & !ID_MASK == tag) {
-            return (s & ID_MASK) as u32 - 1;
-        }
-        self.n += 1;
-        let (mut v, mut i) = (tag | self.n as u64, self.at(h)[0]);
-        if self.slot[i] != 0 && self.slot[self.at(h)[1]] == 0 {
-            i = self.at(h)[1];
-        }
-        for _ in 0..1000 {
-            std::mem::swap(&mut self.slot[i], &mut v);
-            if v == 0 {
-                return self.n as u32 - 1;
+        let (mask, mut i) = (self.slot.len() - 1, h as usize & (self.slot.len() - 1));
+        loop {
+            let w: &mut [u64; 4] = unsafe { std::mem::transmute(&mut self.slot[i]) };
+            for s in w.iter_mut() {
+                if *s == 0 {
+                    self.n += 1;
+                    *s = (h & !ID_MASK) | self.n as u64;
+                    return self.n as u32 - 1;
+                }
+                if *s >> ID_BITS == h >> ID_BITS {
+                    return (*s & ID_MASK) as u32 - 1;
+                }
             }
-            let [a, b] = self.at(v);
-            i = if i == a { b } else { a };
+            i = (i + 1) & mask;
         }
-        panic!("term table full")
     }
 }
 
@@ -162,26 +154,23 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 }
 
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
-    // Hashes go into a ring of two groups of four; filling a group looks up the group before it, whose
-    // slots were prefetched four tokens earlier.
-    let mut ring = [0u64; 8];
-    let (mut n, mut out) = (0usize, ids.len());
+    const LAG: usize = 4;
+    let mut ring = [0u64; LAG];
+    let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     loop {
-        (ids.set_len(out), ids.reserve(32 + 8));
+        (ids.set_len(out), ids.reserve(32 + LAG));
         let buf = ids.as_mut_ptr();
+        let mut look = |&h: &u64| {
+            let id = t.find(h);
+            (*buf.add(out), out) = (id, out + 1);
+        };
         let mut push = |q: *const u8, len: u32| {
             let h = if len <= 32 { hash(q, len as usize) } else { 1 << 63 };
-            for i in t.at(h) {
-                _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(i).cast());
+            _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
+            if n >= LAG {
+                look(&ring[n % LAG]);
             }
-            (ring[n % 8], n) = (h, n + 1);
-            if n % 4 == 0 && n >= 8 {
-                t.find4(ring.as_ptr().add(n % 8), buf.add(out));
-                for k in 0..4 {
-                    _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(*buf.add(out + k) as usize).cast());
-                }
-                out += 4;
-            }
+            (ring[n % LAG], n) = (h, n + 1);
         };
         _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
         let (word, nl) = classes(p);
@@ -202,9 +191,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
             push(p, next as u32);
         }
         if nl != 0 {
-            for i in if n >= 8 { n / 4 * 4 - 4 } else { 0 }..n {
-                (*buf.add(out), out) = (t.find(ring[i % 8]), out + 1);
-            }
+            (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
             ids.set_len(out);
             return p.add(stop as usize + 1);
         }
@@ -381,7 +368,7 @@ fn main() {
         let p = raw.add(raw.align_offset(1 << 21));
         (madvise(p, len, 14), std::ptr::write_volatile(p, 0));
         prctl(41, 1u64, 0u64, 0u64, 0u64);
-        std::slice::from_raw_parts_mut(p.cast::<u64>(), n * 4)
+        std::slice::from_raw_parts_mut(p.cast::<__m256i>(), n)
     };
     let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops, mut hs) = (vec![], vec![], vec![], vec![]);
@@ -407,7 +394,7 @@ fn main() {
         spans.push((phrase, from, ids.len() as u32));
     }
     for (k, &h) in hs.iter().enumerate() {
-        let ahead = hs.get(k + 16).map_or(0, |&h| terms.at(h)[0]);
+        let ahead = hs.get(k + 16).map_or(0, |&h| h as usize & (terms.slot.len() - 1));
         unsafe { _mm_prefetch::<_MM_HINT_T0>(terms.slot.as_ptr().add(ahead).cast()) };
         ids[k] = terms.insert(h);
     }
@@ -547,7 +534,7 @@ fn main() {
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
-    unsafe { munmap(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 8) };
+    unsafe { munmap(terms.slot.as_mut_ptr().cast(), terms.slot.len() * 32) };
 
     let (mut seg, mut start, mut end) = (vec![0u16; lists * THREADS], vec![0u32; lists], 0);
     for i in (0..BUCKETS).flat_map(|b| (b..lists).step_by(BUCKETS)) {
