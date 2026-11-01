@@ -323,7 +323,8 @@ int main() {
         }
         sized.arrive_and_wait();
 
-        for (int h; (h = claim_text++) < HOURS;) {
+        for (int h; (h = claim_text++) < HOURS;)
+        for (int rep = 0; rep < 2; ++rep) {  // DIAGNOSTIC: the hour's text is written twice (same bytes)
             char label[24];
             int day = (h + 18) / 24;
             snprintf(label, sizeof label, "2026-%02d-%02dT%02d:00:00Z ", day < 2 ? 10 : 11, day < 2 ? 30 + day : day - 1, (h + 18) % 24);
@@ -337,7 +338,7 @@ int main() {
                 }
                 *o++ = '\n';
             }
-            std::vector<Line>().swap(lines[h]);
+            if (rep) std::vector<Line>().swap(lines[h]);
         }
     });
     for (auto& th : pool) th.join();
