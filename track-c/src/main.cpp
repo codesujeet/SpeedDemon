@@ -385,6 +385,7 @@ int main() {
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
     Phase flag{.pieces = nthreads}, fill{.pieces = nthreads}, parse{.pieces = pieces};
+    Phase flag2{.pieces = nthreads}, fill2{.pieces = nthreads};  // DIAGNOSTIC: the region phases run a second time
     std::vector<std::thread> pool;
     for (int t = 0; t < nthreads; ++t)
         pool.emplace_back([&, t] {
@@ -397,6 +398,16 @@ int main() {
             std::call_once(numbered, number_countries);
             fill.run([&](int k) {
                 populate_share(seen.bits, (codes.size() + 1) * NamesSeen::WORDS, k, nthreads);
+                for (const char* p = regions + rcut[k]; p < regions + rcut[k + 1];) {
+                    auto [id, c] = region_line(p);
+                    country_of[id] = index_of[c];
+                }
+            });
+            flag2.run([&](int k) {  // DIAGNOSTIC: the same stores again, no populate
+                for (const char* p = regions + rcut[k]; p < regions + rcut[k + 1];)
+                    present[region_line(p).second].store(1, std::memory_order_relaxed);
+            });
+            fill2.run([&](int k) {  // DIAGNOSTIC
                 for (const char* p = regions + rcut[k]; p < regions + rcut[k + 1];) {
                     auto [id, c] = region_line(p);
                     country_of[id] = index_of[c];
