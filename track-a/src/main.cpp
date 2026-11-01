@@ -24,23 +24,12 @@
 // hours straight into the file. No hour waits for another and no write call
 // queues on the file's lock, and the output's pages fill only after the
 // records have been released.
-#include <algorithm>
-#include <atomic>
-#include <barrier>
-#include <charconv>
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
+#include <bits/stdc++.h>
 #include <fcntl.h>
 #include <immintrin.h>
-#include <memory>
-#include <string_view>
 #include <sys/mman.h>
 #include <sys/prctl.h>
-#include <thread>
 #include <unistd.h>
-#include <utility>
-#include <vector>
 
 using u32 = uint32_t;
 using u64 = uint64_t;
