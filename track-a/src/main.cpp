@@ -201,50 +201,41 @@ struct Parser {
     std::vector<std::pair<u32, u32>> wide[HOURS];
 
     void run(const char* p, const char* end) {
-        // The line ends of the next 4 KB are listed first, so a line's start does not
-        // wait for the parse of the one before. A line is at least 40 bytes, so a
-        // 64-byte block holds at most two ends; both are stored (the second only
-        // counts if there is one), with no branch on how many lines the block has.
-        const char* ends[4096 / 40 + 8];
-        for (const char* scan = p; p < end;) {
-            u32 n = 0;
-            for (const char* stop = std::min(scan + 4096, end); scan < stop; scan += 64) {
-                u64 m = eq32(scan, '\n') | u64(eq32(scan + 32, '\n')) << 32;
-                ends[n] = scan + _tzcnt_u64(m), ends[n + 1] = scan + _tzcnt_u64(_blsr_u64(m));
-                n += __builtin_popcountll(m);
-            }
-            while (n && ends[n - 1] >= end) --n;  // the last block's may be the next piece's
-            for (u32 i = 0; i < n; ++i) {
-                const char* eol = ends[i];
-                // The file's pages are scattered in memory and the hardware
-                // prefetcher stops at each 4 KB page; this reaches into the next ones.
-                _mm_prefetch(p + 4096, _MM_HINT_T0);
-                // YYYY-MM-DDTHH: the month's last digit at 6 (bit 0) plus the day's at 9
-                // (two bits) count the days 0 to 3, the hour is at 11-12. One multiply
-                // gathers days * 24 + tens * 10 + units in the top byte.
-                u64 t;
-                memcpy(&t, p + 6, 8);
-                int h = int((t & 0x000F0F0003000001) * 0x18000018000A0100 >> 56) - 18;
+        while (p < end) {
+            // A line is at least 40 bytes, so its end is searched from byte 39, 64
+            // bytes at a time (a line is at most 177 bytes, so at most three steps).
+            const char* eol = p + 39;
+            u64 m;
+            while (!(m = eq32(eol, '\n') | u64(eq32(eol + 32, '\n')) << 32)) eol += 64;
+            eol += _tzcnt_u64(m);
+            // The file's pages are scattered in memory and the hardware
+            // prefetcher stops at each 4 KB page; this reaches into the next ones.
+            _mm_prefetch(p + 4096, _MM_HINT_T0);
+            // YYYY-MM-DDTHH: the month's last digit at 6 (bit 0) plus the day's at 9
+            // (two bits) count the days 0 to 3, the hour is at 11-12. One multiply
+            // gathers days * 24 + tens * 10 + units in the top byte.
+            u64 t;
+            memcpy(&t, p + 6, 8);
+            int h = int((t & 0x000F0F0003000001) * 0x18000018000A0100 >> 56) - 18;
 
-                // The method (3 to 7 bytes) ends within 16 bytes of the timestamp, and
-                // the 16 bytes before the line's end hold " SSS latency", at most 10 digits.
-                const char* name = p + 29 + __builtin_ctz(eq16(p + 28));
-                const char* sp = eol - 16 + (31 - __builtin_clz(eq16(eol - 16)));
-                u32 key = endpoints(std::string_view(name, sp - 4 - name)) | (sp[-3] == '5' ? ERR : 0);
-                u32 latency = decode(eol, eol - sp - 1);
-                p = eol + 1;
+            // The method (3 to 7 bytes) ends within 16 bytes of the timestamp, and
+            // the 16 bytes before the line's end hold " SSS latency", at most 10 digits.
+            const char* name = p + 29 + __builtin_ctz(eq16(p + 28));
+            const char* sp = eol - 16 + (31 - __builtin_clz(eq16(eol - 16)));
+            u32 key = endpoints(std::string_view(name, sp - 4 - name)) | (sp[-3] == '5' ? ERR : 0);
+            u32 latency = decode(eol, eol - sp - 1);
+            p = eol + 1;
 
-                if (__builtin_expect(latency >= PACKED_MAX, 0)) {
-                    wide[h].push_back({latency, key});
-                    continue;
-                }
-                u32*& w = to[h];
-                if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
-                    Chunk* c = chunks[h] + carved[h]++;
-                    c->prev = last[h], last[h] = c, w = c->rec;
-                }
-                *w++ = latency << KEY_BITS | key;
+            if (__builtin_expect(latency >= PACKED_MAX, 0)) {
+                wide[h].push_back({latency, key});
+                continue;
             }
+            u32*& w = to[h];
+            if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
+                Chunk* c = chunks[h] + carved[h]++;
+                c->prev = last[h], last[h] = c, w = c->rec;
+            }
+            *w++ = latency << KEY_BITS | key;
         }
     }
 
