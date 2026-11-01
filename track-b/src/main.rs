@@ -627,6 +627,16 @@ fn main() {
         }
         *chunk.lock().unwrap() = out;
     });
+    // The postings and bitmaps are not read again: each thread drops its twelfth now, rather than one thread
+    // freeing all of them at exit.
+    on_threads(|t| {
+        for (p, len) in [(post.as_ptr() as usize, post.len() * 2), (bits.as_ptr() as usize, bits.len() * 8)] {
+            let (a, b) = ((p + len * t / THREADS + 4095) & !4095, (p + len * (t + 1) / THREADS) & !4095);
+            if b > a {
+                unsafe { madvise(a as *mut u8, b - a, 4) };
+            }
+        }
+    });
     let file = std::fs::File::create("/out/results.txt").expect("/out/results.txt");
     let mut out = std::io::BufWriter::new(file);
     for c in chunks {
