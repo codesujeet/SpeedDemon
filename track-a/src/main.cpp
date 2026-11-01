@@ -73,13 +73,40 @@ inline u32 decode(const char* end, u32 len) {
     return u32(_mm_cvtsi128_si32(v)) * u64(100000000) + u32(_mm_extract_epi32(v, 1));
 }
 
+// Moves those of a[0, n) below the pivot to the front and returns how many, eight
+// values at a time and with no branch on them: each block's two sides are packed by
+// a shuffle made from its comparison mask, the low side stored in place (it never
+// overtakes the reading) and the high side in spare, which is copied back at the end.
+inline u32 split(u32* a, u32 n, u32 pivot, u32* spare) {
+    auto pack = [](__m256i v, u32 m) {
+        u64 order = _pext_u64(0x0706050403020100, _pdep_u64(m, 0x0101010101010101) * 255);
+        return _mm256_permutevar8x32_epi32(v, _mm256_cvtepu8_epi32(_mm_cvtsi64_si128(order)));
+    };
+    const __m256i sign = _mm256_set1_epi32(1 << 31), p = _mm256_xor_si256(_mm256_set1_epi32(pivot), sign);
+    u32 lt = 0, ge = 0, i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256i v = _mm256_loadu_si256((const __m256i*)(a + i));
+        u32 m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(p, _mm256_xor_si256(v, sign))));
+        _mm256_storeu_si256((__m256i*)(a + lt), pack(v, m));
+        _mm256_storeu_si256((__m256i*)(spare + ge), pack(v, ~m & 255));
+        u32 below = __builtin_popcount(m);
+        lt += below, ge += 8 - below;
+    }
+    for (; i < n; ++i) {
+        u32 x = a[i];
+        a[lt] = x, spare[ge] = x, lt += x < pivot, ge += x >= pivot;
+    }
+    memcpy(a + lt, spare, ge * sizeof(u32));
+    return lt;
+}
+
 // Puts the k-th smallest of a[0, n) at a[k], the smaller ones before it,
 // without a branch on the data: each step partitions around the median of
 // three by Lomuto's scheme with an unconditional swap, the boundary moving
 // by the comparison's result. (std::nth_element mispredicted at about every
 // other element.) Many equal values could make a round shrink the range by
 // only one, so after 40 rounds the library's selection finishes.
-inline void select(u32* a, u32 n, u32 k) {
+inline void select(u32* a, u32 n, u32 k, u32* spare) {
     for (int round = 0; n > 1; ++round) {
         if (round == 40) return std::nth_element(a, a + k, a + n);
         u32 m = n / 2;  // sort a[0], a[m], a[n - 1], then the median is the pivot
@@ -88,9 +115,13 @@ inline void select(u32* a, u32 n, u32 k) {
         if (a[m] < a[0]) std::swap(a[m], a[0]);
         std::swap(a[m], a[n - 1]);
         u32 pivot = a[n - 1], lt = 0;
-        for (u32 i = 0; i + 1 < n; ++i) {
-            u32 x = a[i];
-            a[i] = a[lt], a[lt] = x, lt += x < pivot;
+        if (n >= 16) {
+            lt = split(a, n - 1, pivot, spare);
+        } else {
+            for (u32 i = 0; i + 1 < n; ++i) {
+                u32 x = a[i];
+                a[i] = a[lt], a[lt] = x, lt += x < pivot;
+            }
         }
         std::swap(a[lt], a[n - 1]);
         if (k == lt) return;
@@ -310,6 +341,8 @@ int main() {
         {  // the scratch goes before the text phase, where the output counts
         const u32 ne = names.size();
         std::vector<u32> start(ne + 1), errors(ne), latency;
+        // As long as the largest group could be, and untouched beyond the largest one seen.
+        auto spare = std::make_unique_for_overwrite<u32[]>(size / 40 + 8);
         for (int h; (h = claim++) < HOURS;) {
             // Counting sort of the hour's latencies by endpoint rank: count into
             // start[e + 1], prefix, then place each latency at its group's cursor.
@@ -337,7 +370,7 @@ int main() {
                 u32* a = latency.data() + start[e];
                 u32 r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
                 for (u32 from = 0; u32 r : {r50, r95, r99})
-                    if (r >= from) select(a + from, n - from, r - from), from = r + 1;
+                    if (r >= from) select(a + from, n - from, r - from, spare.get()), from = r + 1;
                 const Line& l = lines[h].emplace_back(e, n, a[r50], a[r95], a[r99], errors[e]);
                 // Label, name, six numbers each after a space, newline.
                 size += 21 + names[e].size() + 7;
