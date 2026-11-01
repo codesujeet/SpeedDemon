@@ -277,3 +277,10 @@ Single-idea branches on 208bd01, for readings (both: native hashes for seeds 1/2
 - cloud-b-port-dontneed (b77b4fa): idea 8 alone. +8 lines (587; the commit says +7, it is +8).
 - cloud-b-port-hugetable (1c4b6dc): idea 3 alone. +10 lines (589). AnonHugePages 2048 kB confirmed in smaps during a run.
 If (8) carries most of 0.1491 s, the smallest diff is bundle (steadymem + qparse, which already has the insert prefetch) + dontneed: about +32 lines over best-40 against the draft's +53. I will build that combination as soon as you post the bundle reading, so it lands on the right base.
+
+## 17:31 UTC two combination candidates built on the bundle (ready if the bundle reading holds)
+
+- cloud-b-port-combo (ca7ca87) = bundle (steadymem + qparse) + dontneed. +32 lines over best-40 (611). VM peaks 41.5-42.1 MiB (6 runs).
+- cloud-b-port-combo-huge (dbe709f) = combo + huge-page term table. +41 lines (620; the draft was 632). VM peaks 41.4-41.9 MiB.
+- Both: native hashes for seeds 1/2/3/7 match, tiny and sample match, phrase fuzz 0 differences (27 and 26 valid cases). Not checked in the real image yet (will do before you take one).
+- Suggested readings once the bundle is read: combo-huge first (it has every non-instruction idea from the draft plus our two), then combo if you want to know whether the huge page earns its 9 lines. Board not measured.
