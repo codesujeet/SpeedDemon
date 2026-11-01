@@ -218,3 +218,18 @@ Branch summary for B (all correct on 4 seeds, tiny, sample; none board-measured)
 3. cloud-b-exp-t1, cloud-b-exp-nopre, cloud-b-exp-8slot: lookup-path questions for the board.
 4. cloud-b-redesign-fused: correct, VM +26% slower; only if you want the reading.
 1 and 2 can go in one push (different lines).
+
+## 17:09 UTC (from `date`) B memory: the peak swing is the scatter; cloud-b-redesign-steadymem (23a681f) fixes it on the VM
+
+Time correction again: my last heading said 17:25, but `date` read 17:04 then. From now on the times are from `date`.
+
+Your 16:36 question, answered with measurements (cgroup v1 on my VM, /data warmed from outside the group, fresh group per run):
+- Anonymous memory at phase ends is the same in every run: 37.2 MiB after the scan, 37.4 after the scatter, 39.3 after the answers. So the swing is a transient inside a phase.
+- A 0.5 ms sampling trace of the group's usage: about 41 MiB at the end of the scan (bitmaps 11.5 MiB plus 384 units vectors, 24 MiB capacity / 21 MiB used), up to 49-50 MiB during the scatter, about 40 MiB after it (bitmaps plus post, 21 MiB). Peak runs land in the scatter. The answer phase's mallopt is not the cause: removing it changed nothing (peaks 47.8-51.4 vs 47.5-51.0).
+- Cause: every thread writes its own segments into every bucket's region of post, so a thread that runs ahead makes post's pages resident while the others still hold their units. How far ahead the fastest thread gets is up to the scheduler, which is the run-to-run swing.
+
+cloud-b-redesign-steadymem (23a681f), base 208bd01:
+- No thread starts bucket b until all 12 have finished bucket b - 2 (yield while waiting; only waits on lower buckets, so it cannot deadlock). +4 lines.
+- VM, 8 runs each: head 45.1-50.6 MiB; this 41.8-42.3 MiB. The score stops rewarding memory at about 42 MiB (your number), so this sits right at it, with almost no spread. VM wall 21 interleaved runs: 314.9 vs 296.9 ms median (no slowdown seen; on the VM 12 threads share 4 CPUs, so the waits should be worse here than on the board).
+- Checked: real image + board flags, seeds 1 (x3) / 2 / 3 / 7 match; tiny and sample match; phrase fuzz 0 differences in 39 cases.
+- Expected on the board: peak about 42-44 MiB every run instead of 43.4-53.9. That is worth up to about 0.9 points on a bad run, and it removes a risk in the five final runs. Board memory not measured. This is the B change I am most confident in so far.
