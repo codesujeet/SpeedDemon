@@ -265,5 +265,11 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `8218980` | PERF: A -O2 note names its run ID | `run-7cf138e5bdf7` | 0.1716 | 65.8 | 518 | 68.69 |
 | `7f5e52c` | Track C: one #include <bits/stdc++.h> instead of twelve standard-library includes | `run-52a11b934009` | 0.1734 | 65.2 | 518 | 68.62 |
 | `79d68e7` | Track C: region_line also accepts a CRLF region file (fixes a crash in the previous commit | `run-9fb887a192a9` | 0.1733 | 65.7 | 518 | 68.58 |
+| `5338276` | Log board runs for the line cuts (A S 306, C S 368) | `run-1bddf49db0b0` | 0.1728 | 65.9 | 518 | 68.61 |
+| `2a7cc01` | Track C: DIAGNOSTIC, record parse disabled to measure the floor (output is wrong; reverted | `run-1e5e115c0722` | 0.1662 | 66.1 | 518 | 69.02 |
+| `4ba1710` | Track C: DIAGNOSTIC, the mark is a plain load instead of the atomic OR (output is wrong; r | `run-633d252c99d9` | 0.1786 | 65.3 | 518 | 68.29 |
+| `67464a6` | Track C: DIAGNOSTIC, no name-table lookup (id taken from the key bits); output wrong; reve | `run-a4b5a231d36b` | 0.1702 | 66.9 | 518 | 68.70 |
+| `7496859` | Track C: DIAGNOSTIC, the parse only streams the input (one byte per cache line); output wr | `run-31cbf9744db6` | 0.1729 | 66.5 | 518 | 68.56 |
+| `0df6a6f` | Track C: decode numbers with pmaddubsw/pmaddwd instead of the scalar multiply chain | `run-564046778615` | 0.1689 | 66.0 | 518 | 68.85 |
 
 <!-- board-runs:end -->
