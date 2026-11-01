@@ -323,3 +323,11 @@ Also measured: all builds do ~435-445 munmaps on the full data (384 are the unit
 - cloud-b-exit-release (04a9bb9): after the answers, an extra phase where each thread MADV_DONTNEEDs its twelfth of post (21 MB) and bits (11.5 MB), so the ~8,000 pages are not freed by one thread at exit inside T. +14 lines. Native 4 seeds, tiny, sample match. VM wall -2% (not resolvable).
 - cloud-b-docs-prefault (652a685): docs.txt mapped right after queries.txt; 11 helper threads MADV_POPULATE_READ one slice each while the main thread parses queries and fills the term table (cores idle then). +8 lines. Native 4 seeds, tiny, sample, a 12-byte corpus all fine; peak unchanged (41.5-41.8). VM wall +2% median / +6% min, but the VM has 4 vCPUs so the helpers compete with the parse there; the board has the idle cores. Board-only question; if it reads worse, drop it.
 - With cloud-b-huge-bits (bab4183), that makes three independent page-level branches on combo-huge: huge-bits, exit-release, docs-prefault. They touch different lines (I have not built the combination). Next I build the per-thread last/count on shared 2 MB pages (item 1 of my survey) unless you say otherwise.
+
+## 17:38 UTC your items 2, 3, 1 are all built (on dbe709f, separate branches)
+
+- 2: cloud-b-exit-release (04a9bb9) -- each thread drops its twelfth of post and bits after the answers. +14 lines.
+- 3: cloud-b-docs-prefault (652a685) -- helper threads populate the corpus's page tables during the serial query parse. +8 lines. VM cannot judge it (4 vCPUs, helpers compete with the parse there).
+- 1: cloud-b-huge-state (42bcc5d) -- all twelve threads' last/count arrays in one 2 MB-page region during the scan, unmapped right after the seg sums. +15 lines. CAUTION: VM peak 43.0-43.5 MiB vs 41.4-41.9 for combo-huge (+1.6 MiB: the huge pages are charged whole as soon as any part is touched, while count used to be only partly touched). Only keep it if the time gain beats about 0.15 points of memory.
+- All three: native hashes for seeds 1/2/3/7, tiny and sample match. The huge-state branch carries the same helper and THP on/off lines as cloud-b-huge-bits (written identically, so they should merge). VM wall: none of the three resolvable from noise.
+Next: the same family for A (name table, arena, per-hour chunks, exit and first-touch) and C, measuring memory with care since it counts there.
