@@ -158,7 +158,9 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
 #[target_feature(enable = "aes")]
 unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
     const LAG: usize = 4;
-    let mut ring = [0u64; LAG];
+    // The ring starts full of the hash of no term, so the first LAG lookups need no test: they write LAG ids of
+    // u32::MAX at the front of `ids`, which walk leaves out (LAG is 4).
+    let mut ring = [1u64 << 63; LAG];
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
     let (mut buf, mut cap) = (ids.as_mut_ptr(), ids.capacity());
     loop {
@@ -174,9 +176,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         let mut push = |q: *const u8, len: u32| {
             let h = if len <= 32 { hash(q, len as usize) } else { 1 << 63 };
             _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
-            if n >= LAG {
-                look(&ring[n % LAG]);
-            }
+            look(&ring[n % LAG]);
             (ring[n % LAG], n) = (h, n + 1);
         };
         _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
@@ -198,7 +198,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
             push(p, next as u32);
         }
         if nl != 0 {
-            (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
+            (n..n + LAG).for_each(|i| look(&ring[i % LAG]));
             ids.set_len(out);
             return p.add(stop as usize + 1);
         }
@@ -342,7 +342,7 @@ fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32,
             ids.clear();
             p = tokens(p, t, &mut ids, pre);
         }
-        (f(doc, &ids), doc += 1);
+        (f(doc, &ids[4..]), doc += 1);
     }
     doc - first
 }
