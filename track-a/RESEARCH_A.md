@@ -66,3 +66,19 @@ All with the pinned gcc 15 image, real data, hash `495ca096...`, output removed 
 - Tried from that: a 64-bit whole-name fingerprint in the slot (no arena read, no vector compare): code -4 lines (300 -> 296) and hash correct, but **22% slower** (1 CPU 97.4 -> 118.8 ms, instructions +18%): hashing every word serially costs more than the stall it removes. Rejected.
 - B, time profile (1 CPU): `tokens()` 63% of the time (43% of the instructions). Three instructions hold about 66% of it: the second half of the window load (25%), the key compare `vptest` in `Terms::find` (24%, waiting on a key from the 2.4 MB key array) and the token-bytes load for the key (16%). A third pipeline stage that prefetches the key line (ring 8 -> 16, prefetch of `keys[slot - 1]` at distance 8): hash correct, but **no gain** (4 CPUs wall 249.8 -> 252.4 ms, 1 CPU 777.4 -> 780.5 ms). The stall attribution is skid onto the consumer, not necessarily a miss on the key line.
 - C, time profile: 86% in `parse_records`, kernel about 6%.
+
+## Track A, round 3 (base `e1bd0df`): the parse is latency-bound on the line-to-line chain
+Tooling: perf time sampling + annotate on a tmpfs `/out` (see above), `hyperfine`, `llvm-mca` installed; no PMU in the VM.
+
+**Merge candidate: `cloud-a-linelist`.** `Parser::run` lists the LF positions of the next 4 KB first (branchless, up to two per 64-byte block, a line being at least 40 bytes) and then parses each line from its known start; the old loop took the next line's start from the previous line's own newline mask. 1 CPU wall 92.4 -> 87.2 ms (-5.6%), 4 CPUs 27.8 -> 26.6 ms (-4.3%), with 9.5% MORE instructions (734.9 M -> 804.9 M): the parse is limited by the dependency chain, not by work. Peak memory unchanged (15.5 MiB), formatted lines 300 -> 311 (+11). Hash on 3 real-image runs, the spec's worked example, empty/one-line/125-byte-endpoint files, a 70-file oracle fuzz (70/70) and thread counts 1-12. Risk checked: the `ends` array holds `4096/40 + 8` entries and a block cannot hold three ends because lines are at least 40 bytes.
+- + hour reuse on top (not pushed): another -1.2% (1 CPU) / -2.3% (4 CPUs) for +8 lines (319 total); marginal.
+- The earlier hour-reuse alone, on the old loop, did nothing (latency-bound); it only pays once the chain is broken.
+
+**Rejected, with numbers (1 CPU wall against the same base, interleaved):**
+- Finding the end of line from the end of the name with one 32-byte compare (so the big newline mask goes, and so does the `next_byte` fallback that 17.4% of real lines take): hash correct and one line shorter, but **+12% slower** (92.5 -> 103.5 ms): it puts the LF search behind the name-end computation, on the loop-carried chain. This is the experiment that showed the chain is what limits the parse.
+- Three-pass software pipeline inside a batch (names and hashes with slot prefetch, then slot read and arena prefetch, then the lines): **+22% slower** (87.7 -> 106.7 ms).
+- Arena entries aligned to 64 bytes so the `same()` loads never split a cache line: no effect (92.5 -> 92.0 ms; with the line list 87.9 -> 86.9 ms, noise).
+- A prefetch once per 64-byte block of the batch instead of once per line: gives back the whole line-list gain (92.2 ms), so the per-line prefetch stays.
+- Whole-name 64-bit fingerprint in the slots: +22% slower (see above). Key-line prefetch in B: no gain.
+
+**Left (not built):** the count and place loops of the hours phase are read-modify-writes to per-endpoint counters (`start[e+1]++`, `latency[cursor[e]++]`), so the hot endpoints that repeat back-to-back serialize through store-to-load forwarding; counters split by record parity would break the chain, an estimated 2% of A for +8 lines. `select` is still 14% of A's time.
