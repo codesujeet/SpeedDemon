@@ -30,3 +30,10 @@ Scan about 60% (endpoint intern lookup about 19% of the total, hour parse 5.5%),
 | `-O2` in the Dockerfile (branch `cloud-a-o2`) | 4 CPUs wall 39.4 -> 41.6 ms, 1 CPU 101.9 -> 102.6 ms | slower |
 | one `#include <bits/stdc++.h>` for 12 std includes (branch `cloud-a-includes`) | speed and memory identical (21 and 11 runs), 321 -> 310 formatted lines | pure line cut, about +0.11 pts |
 | scalar `decode` loop (-6 lines) with gcc 15 | CPU 117.8 -> 128.6 ms (+9%) | rejected (the gcc 13 test had said neutral) |
+
+## Methodology correction (important for reading every local number in these notes)
+My benchmark harness reused `/out`, so each run's `open(O_TRUNC)` of the previous 10 MB `summary.txt` cost 2-10 ms (0.05 ms when the file is absent, as on the board, where `/out` starts empty). That inflated noise and fixed overhead in every local run; the A/B direction of earlier comparisons is unaffected because both arms paid it, but absolute wall times and the apparent "serial setup" (4-8 ms) were artifacts. Fixed harness (delete the output before each run), A prefetch re-measured on the current source: 4 CPUs wall 38.9 -> 30.9 ms (-21%), CPU 141.5 -> 110.6 ms (-22%); 1 CPU 127.3 -> 96.9 ms. The board saw only about -3% wall for it. This VM's page-walk and memory stalls are far worse than the scoring box's, so memory-behaviour tricks (prefetch, populate, release) transfer poorly; only ideas that cut instructions or real work are likely to carry over.
+
+## Other measurements this round
+- A's serial pieces on this VM are small: ranking callback 0.28 ms, sizing callback 0.02 ms, thread spawn 0.05 ms per thread. After the prefetch, 4-CPU wall (30.9 ms) is within about 3 ms of CPU/4 (27.6 ms), so A scales almost perfectly here; the remaining lever is instruction count.
+- Radix selection for the percentiles would help only the few huge groups (about 3 groups per hour hold about 25% of the records) and loses on the 75% in small groups. Not built.
