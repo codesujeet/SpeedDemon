@@ -82,6 +82,7 @@ inline u32 decode(const char* end, u32 len) {
 inline void select(u32* a, u32 n, u32 k) {
     for (int round = 0; n > 1; ++round) {
         if (round == 40) return std::nth_element(a, a + k, a + n);
+        if (k + 1 == n) return std::iter_swap(std::max_element(a, a + n), a + k);
         u32 m = n / 2;  // sort a[0], a[m], a[n - 1], then the median is the pivot
         if (a[m] < a[0]) std::swap(a[m], a[0]);
         if (a[n - 1] < a[m]) std::swap(a[n - 1], a[m]);
