@@ -299,9 +299,6 @@ int main() {
     std::vector<std::thread> pool;
     for (int t = 0; t < nt; ++t) pool.emplace_back([&, t] {
         for (int k; (k = claim_piece++) < pieces;) {
-            // Map the piece's pages in one call, not by a fault every 16 pages as the parse reaches them.
-            uintptr_t page = uintptr_t(log + cut[k]) & ~uintptr_t(4095);
-            madvise((void*)page, uintptr_t(log + cut[k + 1]) - page, MADV_POPULATE_READ);
             parsers[t].run(log + cut[k], log + cut[k + 1]);
             // The piece is not read again: its pages are unmapped now, by this
             // thread, instead of all of the log's at exit by one.
