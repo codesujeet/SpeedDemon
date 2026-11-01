@@ -66,3 +66,18 @@ All on base f880347, one file pair each, no source line changes (A 295, C 368 cl
 
 ### Reading your 6-vs-12-thread result (hypothesis, not measured)
 12 threads only 11% faster than 6 means the second hyperthread has little to use. That is what a core-level shared resource looks like, but it is also what branch-misprediction-bound code looks like. Evidence for the latter: your table-size experiment (1 MB vs 2 MB, no change) and scanmin (-23% instructions, no change) argue against cache capacity and against instruction count. Callgrind's crude predictor counts 5.6 M conditional mispredicts on a 30 MB prefix with 4.3 M tokens, about 1.3 per token; real hardware will be far lower, but the unpredictable branches per token are: the find loop exit (about 16% of lookups probe a second slot), the hit-or-empty outcome (21% of tokens are not terms), and the per-window `while m != 0` exit. The loop-free single-line probe you are already trying removes the first two. If it helps, the next step is the same for the token loop (fixed-width processing of the 64-byte window with a popcount-sized inner trip). I cannot test this without a PMU; the board is the only judge.
+
+## 2026-11-01 16:45 UTC cloud-b-tokloop (45b5a50): token loop as two passes, measured SLOWER on the VM; do not spend a slot unless you want the negative on the board
+
+Base 4423afa. Hashes seeds 1, 2, 3, 7 match (native build, rustc 1.99.1); 16-slot version also matched all four.
+
+What it is: pass 1 per window writes 10 token words (address plus length above bit 56) with no branch on the token count (tzcnt and blsr on the start and end masks, count advanced by popcount; a loop only for the rare window with more than 10 tokens). The token touching the window's last byte is left for the next window using lzcnt instead of a branch. Pass 2 is one flat loop over the document's tokens (hash, prefetch, look up the token LAG places back). Lines 579 -> 601 (rustfmt count, +22).
+
+Measured on the 4-vCPU VM only (not the board), vs 4423afa, same toolchain:
+- callgrind, 30 MB corpus prefix: instructions 1024.6 M -> 1066.9 M (+4.1%); simulated conditional mispredicts 3.83 M -> 3.43 M (-10.6%).
+- wall, 15 interleaved runs, full file: median 311.5 -> 347.4 ms (+11.5% slower).
+- 16-slot variant: +8.9% instructions, -12.3% mispredicts, wall 320.9 -> 373.3 ms (+16% slower).
+
+Reading: the window-level branches (while-exit, straddle test) are not what limits the scan. The old loop interleaves extraction with hashing and lookups, so out-of-order execution overlaps them; staging the positions first adds stores and reloads and serializes that overlap, which costs more than the removed mispredicts save. The VM is a Skylake-class Xeon, not Raptor Lake, so the sign could differ on the board, but I would not bet on it. Everything points at the lookups, not the tokenizer, which fits your bucket test.
+
+Next, in your order: (1) A diagnostics, then C diagnostics, as correct-output branches, each commit marked DIAGNOSTIC; (2) B #2 (count and last in one u32 array) as its own branch on top of the current speed-demon.
