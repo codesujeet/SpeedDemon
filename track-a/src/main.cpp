@@ -82,16 +82,17 @@ inline u32 decode(const char* end, u32 len) {
 inline void select(u32* a, u32 n, u32 k) {
     for (int round = 0; n > 1; ++round) {
         if (round == 40) return std::nth_element(a, a + k, a + n);
-        if (n == 2) {
-            u32 x = a[0], y = a[1];
-            a[0] = std::min(x, y), a[1] = std::max(x, y);
+        // a[0], a[n / 2], a[n - 1] are sorted by minimum and maximum alone, as comparing and
+        // swapping mispredicted. That finishes a range of up to 3; otherwise their median
+        // goes last as the pivot.
+        u32 m = n / 2, lo = std::min(a[0], a[m]), hi = std::max(a[0], a[m]), z = a[n - 1];
+        u32 mid = std::min(hi, z), top = std::max(hi, z), med = std::max(lo, mid);
+        a[0] = std::min(lo, mid);
+        if (n <= 3) {
+            a[m] = med, a[n - 1] = top;
             return;
         }
-        // The median of a[0], a[n / 2], a[n - 1] goes last as the pivot, the others either
-        // side of it, by minimum and maximum alone: comparing and swapping mispredicted.
-        u32 m = n / 2, lo = std::min(a[0], a[m]), hi = std::max(a[0], a[m]), z = a[n - 1];
-        u32 mid = std::min(hi, z);
-        a[m] = std::max(hi, z), a[n - 1] = std::max(lo, mid), a[0] = std::min(lo, mid);
+        a[m] = top, a[n - 1] = med;
         u64 pivot = a[n - 1], lt = 0;
         for (u32 i = 0; i + 1 < n; ++i) {
             u32 x = a[i];
@@ -99,8 +100,8 @@ inline void select(u32* a, u32 n, u32 k) {
         }
         std::swap(a[lt], a[n - 1]);
         if (k == lt) return;
-        u32 skip = k < lt ? 0 : lt + 1;
-        n = k < lt ? lt : n - skip;
+        u32 right = -u32(k > lt), skip = (lt + 1) & right;  // all ones if k is above lt
+        n = ((n - skip) & right) | (lt & ~right);
         a += skip, k -= skip;
     }
 }
