@@ -535,7 +535,7 @@ fn main() {
             }
             for &i in &kept[..nk] {
                 buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
-                count[i as usize] += 1;
+                unsafe { *count.get_unchecked_mut(i as usize) += 1 };
             }
         });
         flush(&mut pending, block);
