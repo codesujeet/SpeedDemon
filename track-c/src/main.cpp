@@ -32,7 +32,7 @@ using i64 = int64_t;
 template <class T>
 T* zeroed(size_t n) {
     void* p = mmap(nullptr, n * sizeof(T), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) { perror("mmap"); _exit(1); }
+    if (p == MAP_FAILED) perror("mmap"), _exit(1);
     return static_cast<T*>(p);
 }
 
@@ -52,14 +52,11 @@ void populate_share(T* p, size_t n, int t, int nthreads) {
 // Map a file over a spare zero page, so 64-byte loads past its end are safe.
 const char* map_file(const char* path, size_t& size) {
     int fd = open(path, O_RDONLY);
-    if (fd < 0) { perror(path); _exit(1); }
+    if (fd < 0) perror(path), _exit(1);
     size = lseek(fd, 0, SEEK_END);
     auto* p = static_cast<char*>(
         mmap(nullptr, size + 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-    if (size && mmap(p, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) == MAP_FAILED) {
-        perror("mmap");
-        _exit(1);
-    }
+    if (size && mmap(p, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, 0) == MAP_FAILED) perror("mmap"), _exit(1);
     close(fd);
     return p;
 }
@@ -160,12 +157,13 @@ struct Text {
 // past, and eight slots share a cache line, so a probe rarely leaves it.
 class NameTable {
 public:
-    static constexpr u32 BITS = 17, SLOTS = 1 << BITS;  // the pool holds 100,000 names
+    // The pool holds 100,000 names.
+    static constexpr u32 BITS = 17, SLOTS = 1 << BITS;
 
     static u64 key(const char* s, u32 len) {
         static constexpr char KEEP[32] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
-        __m128i head = _mm_loadu_si128(reinterpret_cast<const __m128i*>(s));
-        head = _mm_and_si128(head, _mm_loadu_si128(reinterpret_cast<const __m128i*>(KEEP + 16 - std::min(len, 16u))));
+        __m128i head = _mm_loadu_si128((const __m128i*)s);
+        head = _mm_and_si128(head, _mm_loadu_si128((const __m128i*)(KEEP + 16 - std::min(len, 16u))));
         u64 h = (u64(_mm_cvtsi128_si64(head)) * 0x9E3779B97F4A7C15ull ^ len) + u64(_mm_extract_epi64(head, 1)) * 0xBF58476D1CE4E5B9ull;
         for (u32 i = 16; i < len; i += 8) {
             u64 w = load8(s + i);
@@ -177,14 +175,14 @@ public:
         return h + (h == 0);  // 0 marks a free slot
     }
 
-    void prefetch(u64 k) const { _mm_prefetch(reinterpret_cast<const char*>(&slots_[k >> (64 - BITS)]), _MM_HINT_T0); }
+    void prefetch(u64 k) const { _mm_prefetch((const char*)&slots_[k >> (64 - BITS)], _MM_HINT_T0); }
 
     // Slots are probed four at a time, from the aligned group of four the key
     // hashes to: one 32-byte compare finds the key, or the first free slot,
     // which is claimed (no key ever sits past a free slot, as none is freed).
     u32 id(u64 k) {
         for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
-            __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i*>(&slots_[i]));
+            __m256i v = _mm256_load_si256((const __m256i*)&slots_[i]);
             u32 hit = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(k))));
             u32 free = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
             if (hit) return i + __builtin_ctz(hit);
@@ -215,7 +213,7 @@ struct NamesSeen {
     static constexpr u32 WORDS = NameTable::SLOTS / 64;
     std::atomic<u64>* bits = zeroed<std::atomic<u64>>(256 * WORDS);
 
-    std::atomic<u64>& word(u32 c, u32 name) { return bits[c * WORDS + name / 64]; }
+    auto& word(u32 c, u32 name) { return bits[c * WORDS + name / 64]; }
 
     // For writing: the OR needs the line exclusive, and a plain prefetch would
     // fetch it shared first.
@@ -248,7 +246,8 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         u32 country, id;
     } marks[LAG];
     u64 n = 0, last = UINT64_MAX;  // records started; all of them once known
-    auto advance = [&]() __attribute__((always_inline)) {  // retire ring slot n % LAG
+    // Retires ring slot n % LAG.
+    auto advance = [&]() __attribute__((always_inline)) {
         u32 k = n % LAG;
         if (n >= 2 * LAG && n - 2 * LAG < last) totals[marks[k].country].distinct += seen.mark(marks[k].country, marks[k].id);
         if (n >= LAG && n - LAG < last) {
@@ -286,12 +285,11 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         const char* eol = lf ? p + __builtin_ctz(lf) : file_end;
         const char* amount_end = eol - (eol[-1] == '\r');
         bool negative = *amount == '-';
-        i64 cents = money(amount + negative, amount_end);
-        if (negative) cents = -cents;
+        i64 cents = (negative ? -1 : 1) * i64(money(amount + negative, amount_end));
 
         // Region ids are below 10^7 (fit u32); one past the table means none.
         u32 r = region < regions ? u32(region) : u32(regions);
-        _mm_prefetch(reinterpret_cast<const char*>(country_of + r), _MM_HINT_T0);
+        _mm_prefetch((const char*)(country_of + r), _MM_HINT_T0);
         advance();
         u64 key = NameTable::key(name.at, name.raw);
         pending[n++ % LAG] = {key, r, u32(id), name.length, note.length, cents};
@@ -308,10 +306,9 @@ u32 code(const char* p) { return (p[0] - 'A') << 10 | (p[1] - 'A') << 5 | (p[2] 
 // 7 digits, so the comma is the lowest zero byte of the line's first 8 bytes
 // XOR ','.
 std::pair<u64, u32> region_line(const char*& p) {
-    u64 x = load8(p) ^ 0x2C2C2C2C2C2C2C2C;
-    const char* comma = p + __builtin_ctzll((x - 0x0101010101010101) & ~x & 0x8080808080808080) / 8;
+    const char* comma = comma_after(p);
     std::pair<u64, u32> line{digits(p, comma), code(comma + 1)};
-    for (p = comma + 4; *p++ != '\n';) {}
+    p = comma + 5;  // the country is three letters, then the line feed
     return line;
 }
 
@@ -372,7 +369,7 @@ int main() {
     auto number_countries = [&] {
         for (u32 k = 0; k < present.size(); ++k)
             if (present[k]) codes.push_back(k), index_of[k] = codes.size();
-        if (codes.size() > 255) { fputs("too many countries\n", stderr); _exit(1); }
+        if (codes.size() > 255) fputs("too many countries\n", stderr), _exit(1);
     };
 
     // records.csv: skip the BOM and header, then split after CRLFs into eight
@@ -448,7 +445,7 @@ int main() {
         out += '\n';
     }
     FILE* f = fopen("/out/aggregates.txt", "wb");
-    if (!f) { perror("/out/aggregates.txt"); return 1; }
+    if (!f) return perror("/out/aggregates.txt"), 1;
     fwrite(out.data(), 1, out.size(), f);
     fclose(f);
     _exit(0);
