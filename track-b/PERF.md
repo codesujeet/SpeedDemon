@@ -263,5 +263,9 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `1a4d82e` | Track D: PAGE 256 -> 128 (experiment) | `run-b25f263a3bf3` | 0.2693 | 50.7 | 611 | 67.98 |
 | `a2fa18e` | Track B: persistent thread pool instead of 12 fresh threads per phase (experiment) | `run-ecdc074c9d6f` | 0.2347 | 50.9 | 632 | 69.35 |
 | `b573d30` | Track C: C++ (gcc 15, user-drafted design: pclmul quote mask, dense-id name table); Rust v | `run-da6a37a31458` | 0.2502 | 57.1 | 611 | 68.26 |
+| `17ce1b0` | Track C: static link and _exit(0) after the output (experiment) | `run-203a2a4c2b34` | 0.2355 | 48.9 | 611 | 69.59 |
+| `9e9667f` | Re-run board on static+_exit Track C (noise check) | `run-46b0cfef039b` | 0.2378 | 48.7 | 611 | 69.51 |
+| `308cbff` | Track A: C++ (gcc 15, static, _exit after the output); Rust version stays at tag best-19 | `run-3376333db36a` | 0.2675 | 53.2 | 611 | 67.85 |
+| `4d1d805` | Tracks B and D: exit right after the output so the big arrays are not freed one by one | `run-67cd42ebed11` | 0.2336 | 49.5 | 612 | 69.62 |
 
 <!-- board-runs:end -->

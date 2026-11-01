@@ -162,5 +162,13 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `1a4d82e` | Track D: PAGE 256 -> 128 (experiment) | `run-f1bf9309754d` | 0.0276 | 27.7 | 510 | 78.37 |
 | `a2fa18e` | Track B: persistent thread pool instead of 12 fresh threads per phase (experiment) | `run-60a438196df7` | 0.0284 | 26.5 | 510 | 78.28 |
 | `b573d30` | Track C: C++ (gcc 15, user-drafted design: pclmul quote mask, dense-id name table); Rust v | `run-2b86ebff8137` | 0.0279 | 22.3 | 510 | 79.20 |
+| `17ce1b0` | Track C: static link and _exit(0) after the output (experiment) | `run-9e8eecf0dcd9` | 0.0267 | 25.9 | 510 | 79.01 |
+| `9e9667f` | Re-run board on static+_exit Track C (noise check) | `run-a2dc253315df` | 0.0352 | 24.4 | 510 | 76.29 |
+| `308cbff` | Track A: C++ (gcc 15, static, _exit after the output); Rust version stays at tag best-19 | `run-ccae47851733` | 0.0277 | 18.4 | 310 | 81.71 |
+| `4d1d805` | Tracks B and D: exit right after the output so the big arrays are not freed one by one | `run-f676f02c28ef` | 0.0277 | 18.4 | 310 | 81.72 |
 
 <!-- board-runs:end -->
+
+## Language switch to C++
+
+The Rust version (0.026-0.029 s, 22-26 MiB, S 508-510) was replaced by a C++ build of the team's own ChatGPT-drafted design. Board run `run-ccae47851733` (commit `308cbff`): 0.0277 s, 19.3 MiB, S 310, 81.71 points; a second run `run-f676f02c28ef` (`4d1d805`) gave 0.0277 s, 19.3 MiB, S 310, 81.72. The gain is mostly the smaller source (S 310 against 508) and about 4 MiB less memory; time is about the same as the Rust version. A Rust port of this same design (commit `4c454fe`) had scored 78.62 and 78.14 and was reverted, so the C++ build, not only the design, matters. The static link and the `_exit(0)` after the output were added in the same change and were not measured separately on A.
