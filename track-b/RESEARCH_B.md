@@ -52,3 +52,17 @@ The 9.4 ms single-thread parse is 4.8 ms of byte-at-a-time slice splitting (`spl
 
 ## B serial prefix after the sample, timed (4 CPUs, ms)
 From `sampled` (about 20.6 ms after main starts): building the `packed` keys +1.7, `sort_unstable` +0.9, `order` +0.2, `terms.renumber` +2.35, `anchored` sort +0.55, bitmap allocation +0.4: about 6 ms of single-thread work, about 3.6% of a 167 ms run if the board's single-thread speed matched, and at best half of it is recoverable (a counting sort in place of the sort, renumbering without cloning the 2.4 MB key array). Worth at most about +0.25 pts on B; not attempted.
+
+## B campaign (goal: highest B score), branches and results
+All against `origin/speed-demon` 79d68e7, real data, hash `f86973c2...`, output removed before each run, 3 real-image runs per branch.
+
+| Branch | Change | Result | Lines | Verdict |
+|---|---|---|---|---|
+| `cloud-b-diet` | `kept`/`anchors` grow-only | CPU -1% (instructions -3%, memset-inflated) | +0 | tiny |
+| `cloud-b-queryparse` | queries tokenized with the SIMD class masks | parse step 9.19 -> 6.70 ms (-2.5 ms); equal to the old parse on the real queries and on a 60-file fuzz (empty lines, double LF, no final LF, 1- and 32-byte terms, 8-term phrases across windows) | +20 | net +0.06 pts alone |
+| **`cloud-b-combo`** | queryparse + grow-only + sample 1/64 | wall -1.2% (4 CPUs), -2.5% (2 CPUs), -1.8% (1 CPU); first round -3.4%; peak memory 54.5 -> 52.5 MiB | +20 | **best B candidate: about +0.3 pts for time and memory against -0.1 for lines; merge as one slot** |
+| (not pushed) per-line batch in `tokens()` instead of the lag ring | prefetch every token as it is made, look all up after the line | **slower**: 4 CPUs wall +4.6%, CPU +8%; 1 CPU +9% | -1 | rejected: the continuous ring hides latency better |
+
+Notes from the work:
+- A pre-existing sharp edge, not changed: the term table is sized from the query file's byte length (`len / 8` slots). A small query file with many distinct short terms can fill it and `Terms::insert` then loops forever (my first fuzz file hung this way). The real data has a 29% load; the spec's tiny scale has the same ratio. Not a risk for the board.
+- The parse change is serial CPU work (9.2 -> 6.7 ms), so unlike the prefetch it should carry over to the board nearly 1:1. Together the branch is worth about 2% of B, below B's +-5% run-to-run board noise.
