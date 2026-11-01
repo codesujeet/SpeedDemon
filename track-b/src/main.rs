@@ -13,6 +13,7 @@ use std::sync::{Barrier, Mutex, OnceLock};
 
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
     fn _exit(status: i32) -> !;
@@ -513,6 +514,12 @@ fn main() {
             }
         });
         flush(&mut pending, block);
+        // The share is not read again: its pages are dropped now, on every thread, rather than all of the
+        // file's by one thread at exit.
+        let (from, to) = ((share.as_ptr() as usize + 4095) & !4095, (share.as_ptr() as usize + share.len()) & !4095);
+        if to > from {
+            unsafe { madvise(from as *mut u8, to - from, 4) };
+        }
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
