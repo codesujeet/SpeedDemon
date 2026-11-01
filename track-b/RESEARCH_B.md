@@ -82,3 +82,13 @@ Method note: timing the answers with all 12 threads on one CPU is wrong (each th
 | phrase sets | 5 | 1.5% |
 
 `apply` by arm: list OR list 39.1 (12,595 calls), bitmap AND list 38.9 (10,477), list to bitmap build 30.2 (10,091), list merge 26.6 (14,971), bitmap set from list 20.2 (6,180), binary-search AND/NOT 10.8 (7,755), list NOT bitmap 9.4 (3,029), bitmap-bitmap 4.8 (762). Flat: no arm above 21% of `apply`, and the whole phase is 16% of B, so a 25% speed-up of everything in it is about 4% of B (+0.4 pts). Not attempted.
+
+## Position and the arithmetic of 80 (board, 2026-11-01 ~10:00 UTC)
+Microsecond is #8 overall (79.44): A 84.6, B 73.5 (166.8 ms, 47.1 MiB, S 607, K 29.55), C 80.7. Best B entries: 81.05 (74.4 ms, 44.4 MiB, S 960), 80.54 (77.9 ms, 27.2 MiB, S 1039), 78.55 (100.4 ms, 40.6 MiB, S 823), 77.65 (113.7 ms, 36.9 MiB, S 716).
+80 points means K = 39.8, i.e. x1.35 over ours. Through time alone that is T x0.55 (167 -> 92 ms); with memory at 40 MiB it is 98 ms, at 30 MiB it is 110 ms (K ~ T^-0.5 M^-0.2 S^-0.15). The two entries at 80.5-81 are 2.2x faster than ours and pay 960-1039 lines; one of them also holds 27 MiB, 20 MiB less than ours.
+Where a 45% cut would have to come from, with every measured lever for this design:
+- serial prefix (query parse about 9 ms, renumber about 6 ms, spawn): about 12 ms recoverable at most (7%), +0.7 pts, about 20-40 lines
+- per-token instructions: `tokens()` 85 + scan closure 44 + answers 39 of 197 instructions per token; the cheap trims are gone (closure `look` already in a register: 0 change; removing the state prefetch: -1.6% instructions but +2.3% to +3.3% time; ring depth, key prefetch, batch lookups: no gain or slower)
+- answers phase (25 ms on the board): flat, no arm above 21% of `apply`
+- memory: anonymous peak is Units about 22 + bitmaps 11.8 + `count`/`last` 3.3 + tables; the bitmap cutoff sweep gave nothing
+Sum of the measured levers: about 10-15% of T, about +1.5 to +2 pts, i.e. B to about 75. Reaching 80 needs a different architecture (the 27 MiB entry stores far less than 2 bytes per posting plus bitmaps), and nothing in the profiles shows a path to it from this one.
