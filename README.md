@@ -19,7 +19,7 @@ The first Rust versions of all four tracks were written and tuned by the team wi
 
 - `track-a/` to `track-d/`: each folder is its own build context: `Dockerfile`, `.speed-demon.toml`, the source, and two write-ups, `README.md` (approach, assumptions) and `PERF.md` (optimisation log, with a "Board runs" table of real run IDs copied from the public board feed).
 - `docs/EXPERIMENTS.md`: the rehearsal-era experiment log (history; see the note at its top).
-- `real-spec/` local tooling: the board reader (`board.py`), the table writer (`perf_runs.py`), the local Docker runner (`dock.ps1`) and the organisers' harness copy used for reference.
+- `real-spec/`: our local tooling: the board reader (`board.py`), the table writer (`perf_runs.py`), `board-runs.jsonl` (every scored board run we read from the public feed, the source of the run IDs in the PERF tables), and the local Docker runners (`dock.ps1`, `ab.ps1`, `peak.ps1`). Only these files are in the repo.
 - `check.py`: the starter's local build-and-run check.
 
 ## Check a track locally
