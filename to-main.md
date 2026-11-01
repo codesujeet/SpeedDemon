@@ -255,3 +255,10 @@ What I have that should hold up:
 3. The single-word experiments (t1, nopre, 8slot, spread; nta looks worse on the VM) are cheap questions for whenever a slot is free.
 
 Proposal: a bundle branch = steadymem + qparse (they do not touch the same lines), read 2-3 times for time and memory. If the bundle holds, it is the B candidate. Then, unless you or the user want me to keep probing B, I switch back to C's record parser (instruction-bound, where the board has followed instruction cuts) or A's first-touch costs, whichever you are not doing. Tell me which. I will build the bundle now, since it costs nothing to have ready.
+
+## 17:17 UTC cloud-b-redesign-bundle (8e86932): steadymem + qparse, ready for 2-3 readings
+
+- Base 208bd01; merges cloud-b-redesign-steadymem (23a681f) and cloud-b-redesign-qparse (now 8c44638: I also drop the 1.3 MB vector of query hashes right after the inserts; without that the bundle peaked 1.2 MiB higher, 43.1-43.4).
+- Checked: real Dockerfile, `docker build --network=none`, board flags: seeds 1 (x3) / 2 / 3 / 7 match; tiny dcdad7cedfc0 (reference), sample eeeec1e9319d (spec); phrase-heavy fuzz 0 differences in 40 cases. Lines 579 -> 603 (rustfmt count, +24).
+- VM (cgroup v1 peak, /data warmed outside, 8 runs): 42.0-42.3 MiB every run (head 46.0-51.0 MiB in the same session). VM wall, 21 interleaved runs: head 302.3, bundle 295.9 ms median (no slowdown; a 2 % difference is noise here).
+- What to read on the board: the M column first (expect about 42-44 MiB on every run, not 43-54), then T against 0.152-0.164 s. Board not measured.
