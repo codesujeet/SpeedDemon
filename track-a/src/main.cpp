@@ -256,13 +256,7 @@ int main() {
     std::vector<Parser> parsers(nt);
     std::vector<std::string_view> names;
     std::vector<u32> rank(Names::SLOTS);  // endpoint id -> rank
-    u32 most = 0;  // records in the largest hour
     std::barrier ranked(nt, [&]() noexcept {
-        for (int h = 0; h < HOURS; ++h) {
-            u32 n = 0;
-            for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32, u32, u32) { ++n; });
-            most = std::max(most, n);
-        }
         std::vector<std::pair<std::string_view, u32>> by_name;
         for (u32 id = 0; id < Names::SLOTS; ++id)
             if (u64 v = endpoints.slot[id]) by_name.push_back({endpoints.name(v), id});
@@ -303,10 +297,7 @@ int main() {
 
         {  // the scratch goes before the text phase, where the output counts
         const u32 ne = names.size();
-        // Sized once: a buffer that grows is remapped, which stalls every
-        // thread's page faults.
-        std::vector<u32> start(ne + 1), errors(ne);
-        std::unique_ptr<u32[]> latency(new u32[most]);  // not zeroed: only pages used count
+        std::vector<u32> start(ne + 1), errors(ne), latency;
         for (int h; (h = claim++) < HOURS;) {
             // Counting sort of the hour's latencies by endpoint rank: count into
             // start[e + 1], prefix, then place each latency at its group's cursor.
@@ -314,6 +305,7 @@ int main() {
             std::fill(errors.begin(), errors.end(), 0);
             for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32 e, u32 err, u32) { ++start[e + 1], errors[e] += err != 0; });
             for (u32 e = 0; e < ne; ++e) start[e + 1] += start[e];
+            latency.resize(start[ne]);
             std::vector<u32> cursor(start.begin(), start.end() - 1);
             for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32 e, u32, u32 l) { latency[cursor[e]++] = l; });
             finished[h] = true;
@@ -330,7 +322,7 @@ int main() {
                 // leaves only larger values after its rank, so each higher rank
                 // is selected among those: half the group for p95, a twentieth
                 // for p99. (An equal rank is already in place.)
-                u32* a = latency.get() + start[e];
+                u32* a = latency.data() + start[e];
                 u32 r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
                 for (u32 from = 0; u32 r : {r50, r95, r99})
                     if (r >= from) select(a + from, n - from, r - from), from = r + 1;
