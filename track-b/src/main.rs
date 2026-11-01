@@ -253,7 +253,7 @@ fn has(bits: &[u64], d: u32) -> bool {
 
 /// Above this many documents, a list meets another list as a bitmap: setting
 /// and testing bits in 31 KB beats a merge's unpredictable steps.
-const BIG: usize = 768;
+const BIG: usize = 1536;
 
 /// cur op term, strictly left to right; a list OR a bitmap becomes a bitmap.
 /// A bitmap has words words.
