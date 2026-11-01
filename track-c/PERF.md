@@ -181,6 +181,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `e1bd0df` | Track C: quoted fields that close within 31 bytes on a lone quote skip the 64-byte loop | `run-468287e49bef` | 0.0293 | 9.3 | 376 | 79.02 |
 | `b34456e` | Log board run for C's quoted-field fast path (first reading 79.02) | `run-579c42f13df3` | 0.0271 | 9.2 | 376 | 79.89 |
 | `351b645` | Track C: parse the two halves of each piece in turn, so two dependent chains overlap | `run-e0a398446908` | 0.0282 | 8.8 | 387 | 79.59 |
+| `800e1ce` | Revert "Track C: quoted fields that close within 31 bytes on a lone quote skip the 64-byte | `run-93446999afd8` | 0.0266 | 8.4 | 373 | 80.54 |
 
 <!-- board-runs:end -->
 
@@ -213,3 +214,7 @@ Reading the table: set-up and teardown are about 5.5 ms; streaming 202 MB throug
 ### Two cursors per piece (tried, reverted)
 
 `llvm-mca` (alderlake model) on the record loop gave 99 simulated cycles per record against a 55.5-cycle throughput bound, with the critical path a pointer chain through each record's field ends (load, compare, move-mask, count-trailing-zeros, add, repeated per field). The piece was cut in two at a CRLF and both halves were parsed in turn so two chains could overlap in one thread. Callgrind: +1.2% instructions, hash unchanged, edge suite as before. On the board (`351b645`): 0.0282 s, 8.8 MiB, S 387, 79.59, against 0.0271-0.0293 s for the code without it, and 11 more formatted lines. No gain beyond noise (the two hyperthreads on each core already overlap two chains), so it was reverted. The chain length itself, not the instruction count, is what a block-mask pass for the field boundaries would shorten.
+
+### Quoted-field fast path (tried, reverted)
+
+A branch that finished a quoted field with one compare when the closing quote sat within 31 bytes (commit `e1bd0df`) looked shorter on paper. Hardware counters on a 13th-gen Intel laptop (`perf stat`, all 12 threads of the P-cores, full seed-1 data) showed it caused about 57% of the branch mispredicts: without it cycles fell 4.3% (689 M against 720 M) and mispredicts fell from 3.02 M to 2.07 M, while instructions rose 4%. Reverted (`800e1ce`); the board then read 0.0266 s, 8.4 MiB, S 373, 80.54, the best C run so far. The remaining mispredicts are the pair check and the name-table hit test (about 0.24 per record each); a branchless version of either costs about as many instructions as it saves. Sweeps of the lag, the input prefetch distance and the piece count were all within 1% of cycles on the laptop.

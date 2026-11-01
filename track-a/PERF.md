@@ -199,6 +199,9 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `37fae72` | Log board run for C's 16-byte comma find (79.90) | `run-70db95397ed0` | 0.0217 | 18.4 | 306 | 84.42 |
 | `ba0e248` | README: next-steps paragraph matches the current board times and the C diagnostics | `run-827a059063ef` | 0.0226 | 18.6 | 306 | 83.95 |
 | `e1bd0df` | Track C: quoted fields that close within 31 bytes on a lone quote skip the 64-byte loop | `run-cf370e5467d2` | 0.0214 | 18.7 | 306 | 84.48 |
+| `b34456e` | Log board run for C's quoted-field fast path (first reading 79.02) | `run-41bcaf0bf43c` | 0.0217 | 18.9 | 306 | 84.31 |
+| `351b645` | Track C: parse the two halves of each piece in turn, so two dependent chains overlap | `run-2819192f0f69` | 0.0219 | 18.7 | 306 | 84.28 |
+| `800e1ce` | Revert "Track C: quoted fields that close within 31 bytes on a lone quote skip the 64-byte | `run-ab299b25c407` | 0.0263 | 19.6 | 306 | 82.08 |
 
 <!-- board-runs:end -->
 
