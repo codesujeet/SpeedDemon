@@ -483,11 +483,15 @@ fn main() {
         let new: Vec<u32> = (0..nterms).map(|i| (at[key(i)] += 1, at[key(i)] - 1).1).collect();
         terms.renumber(&new);
         ids.iter_mut().for_each(|id| *id = new[*id as usize]);
-        anchored.iter_mut().for_each(|a| a.0 = new[a.0 as usize]);
-        anchored.sort_unstable();
-        let first_of = |i: usize| anchored.partition_point(|a| (a.0 as usize) < i);
-        let astart: Vec<usize> = (a0..=nkeep).map(first_of).collect();
-        (nbits, a0, lists, nkeep, anchored, astart)
+        // Grouped by anchor with a counting sort (the order inside a group does not matter). An anchor's new id
+        // is in [a0, nkeep), so its slot k + 1 below is at most nkeep - a0 and astart has nkeep - a0 + 1 entries.
+        let slot = |a: &(u32, u32, u32)| new[a.0 as usize] as usize - a0;
+        let mut astart = vec![0usize; nkeep - a0 + 1];
+        anchored.iter().for_each(|a| astart[slot(a) + 1] += 1);
+        (0..nkeep - a0).for_each(|k| astart[k + 1] += astart[k]);
+        let (mut put, mut grouped) = (astart.clone(), vec![(0, 0, 0); anchored.len()]);
+        anchored.iter().for_each(|a| (grouped[put[slot(a)]], put[slot(a)]) = (*a, put[slot(a)] + 1));
+        (nbits, a0, lists, nkeep, grouped, astart)
     };
 
     let words = ndocs.div_ceil(256) * 4;
