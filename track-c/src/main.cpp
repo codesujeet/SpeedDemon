@@ -28,9 +28,30 @@ using u32 = uint32_t;
 using u64 = uint64_t;
 using i64 = int64_t;
 
+// Three 2 MB pages hold the three tables that every record reads at random (name
+// slots, regions, bitsets), one TLB entry each instead of about 1,500 small pages,
+// in about the same memory. They are faulted in before huge pages are turned off.
+char* huge_next;
+size_t huge_left;
+
+void map_huge_tables() {
+    constexpr size_t PAGE = 1 << 21, SIZE = 3 * PAGE;
+    auto at = (uintptr_t)mmap(nullptr, SIZE + PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (at == uintptr_t(MAP_FAILED)) perror("mmap"), _exit(1);
+    huge_next = (char*)((at + PAGE - 1) & -PAGE), huge_left = SIZE;
+    madvise(huge_next, SIZE, MADV_HUGEPAGE);
+    for (size_t i = 0; i < SIZE; i += PAGE) *(volatile char*)(huge_next + i) = 0;
+}
+
 // Zero-filled anonymous memory; pages are charged only once touched.
 template <class T>
 T* zeroed(size_t n) {
+    size_t bytes = (n * sizeof(T) + 63) & ~size_t(63);
+    if (bytes <= huge_left) {
+        char* at = huge_next;
+        huge_next += bytes, huge_left -= bytes;
+        return reinterpret_cast<T*>(at);
+    }
     void* p = mmap(nullptr, n * sizeof(T), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) perror("mmap"), _exit(1);
     return static_cast<T*>(p);
@@ -349,6 +370,7 @@ void put_money(std::string& out, i64 cents) {
 int main() {
     // With transparent huge pages, a block written only in part can be backed
     // by a whole 2 MB page; plain pages keep memory to what is written.
+    map_huge_tables();
     prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
     const int nthreads = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
     size_t rsize, size;
