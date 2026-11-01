@@ -21,7 +21,6 @@ extern "C" {
 }
 
 const THREADS: usize = 12;
-const NONE: u32 = u32::MAX;
 const BUCKETS: usize = 32;
 const GAP: u32 = 15;
 const ID_BITS: u32 = 18;
@@ -573,20 +572,19 @@ fn main() {
                 let before: u32 = seg[i * THREADS..][..t].iter().map(|&n| n as u32).sum();
                 *c = start[i] + before;
             }
-            let (mut doc, mut term) = (0u32, NONE);
-            units.v.into_iter().for_each(|x| {
-                if term == NONE {
-                    term = (x >> 4) as u32;
-                    if x as u32 & GAP == GAP {
-                        return;
-                    }
-                    doc += x as u32 & GAP;
+            // A unit is the term and a document gap below GAP, or else the gap follows as a unit of its own.
+            let (mut doc, mut k, v) = (0u32, 0, &units.v);
+            while k < v.len() {
+                let (x, g) = (v[k], v[k] as u32 & GAP);
+                k += 1;
+                if g == GAP {
+                    (doc, k) = (doc + v[k] as u32, k + 1);
                 } else {
-                    doc += x as u32;
+                    doc += g;
                 }
-                let c = &mut cursor[std::mem::replace(&mut term, NONE) as usize];
+                let c = &mut cursor[(x >> 4) as usize];
                 (post[*c as usize].store(doc as u16, Relaxed), *c += 1);
-            });
+            }
             done[b].fetch_add(1, Relaxed);
         }
     });
