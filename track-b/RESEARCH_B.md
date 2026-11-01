@@ -99,3 +99,6 @@ Sum of the measured levers: about 10-15% of T, about +1.5 to +2 pts, i.e. B to a
 - Phrase checks: 1,032,600 candidates, 987,267 (96%) fail on a single id compare, 19,427 match.
 - SIMD 8-slot bucket probe (tag[8]+id[8], movemask): hash correct after fixes, mispredicts -16% in callgrind branch-sim, but +11% instructions and ~10% slower wall. Abandoned.
 - Phrase first-id reject before the slice compare (+3 formatted lines): 1 CPU 746.3 -> 737.6 ms wall (-1.2%), 4 CPU 241.9 -> 242.0 ms (0%), hash f86973c2 unchanged. Below the 0.2-pt bar after the line cost; not pushed. Board timing not measured.
+
+- Straddle-branch removal (edge = lzcnt of !word, window mask cut to the token start, per-token test reduced to `len == 64`; also a BMI2 `_bzhi_u64` variant), on ca9b733: hash f86973c2 unchanged, -1 formatted line, but slower: 4 CPU wall 245.7 -> 260.9 ms (shift/min version) and 239.7 -> 245.8 ms (bzhi version); 1 CPU 777.5 -> 800.9 ms. Not pushed. Board timing not measured (VM has no SMT; mispredict counts not checked).
+- Bucket-add (`Units::add`/`put`) is already one store, one compare; no cut found. Closure reads as branch-free already; no restructure candidate with a measured gain.
