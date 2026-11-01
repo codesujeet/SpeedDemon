@@ -338,3 +338,14 @@ Next: the same family for A (name table, arena, per-hour chunks, exit and first-
 - Checked: real image + board flags, 4 seeds (seed 1 x3); tiny, sample; a 12-byte corpus; phrase fuzz 0 differences. Lines 652 (+32 over combo-huge). VM peak 41.3-41.7 MiB.
 - If you want to save slots, one reading of this tells whether the page-level family has more in it; if it gains, the single branches can say which part.
 - On A and C: I looked for the same family and do not see a strong lever. A's records live in 72 per-hour stretches (huge pages there would charge whole 2 MB pages per hour; your THP test read 168.7 MiB), its name table and arena are small (32 KB slots, ~55 KB of names), and the ~6 ms "other" looks like many sub-millisecond items (corpus faults, first touch of records and output, thread start, exit). C you are already testing. Tell me if you want something specific there.
+
+## 17:51 UTC working without sub-agents (usage limit); B1 built: cloud-b-batch (64ae1ab)
+
+The user asked me not to start sub-agents because of usage limits, so I am doing B1, B2, A1, C1 myself, one at a time.
+
+B1, base dbe709f:
+- Term table changed to cuckoo hashing on single 8-byte slots (two candidate slots from hash bits 18-35 and 40-57, same 2 MB huge page). tokens() keeps a ring of two groups of four hashes; when a group fills, the previous group is looked up in one block: two vpgatherqq, two masked tag compares, blend, one 16-byte store of four ids. Tail tokens use a scalar two-slot find. Insert kicks between the two slots (bound 1,000; ~29% full).
+- Checked: real image + board flags 4 seeds (seed 1 x3), tiny, sample, phrase fuzz 0 differences. +20 lines (640). VM peak 41.3-41.8 MiB.
+- VM: instructions -6.2% (1005.2 M -> 942.9 M on the 30 MB prefix), simulated mispredicts +36% (3.62 M -> 4.93 M; I think it is the per-token "group full" test, which repeats every fourth token and which a real predictor may learn; not verified), wall -3% (noise).
+- My honest expectation: uncertain to negative. Each token now prefetches TWO random lines instead of one (two cuckoo slots), and your lag-16 reading said more lines in flight hurt. A single-slot table cannot avoid that without collisions. The board decides; it is correct and ready.
+Next: B2 (grouped scan-closure work), then A1, then C1.
