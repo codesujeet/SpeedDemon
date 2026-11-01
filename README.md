@@ -32,4 +32,4 @@ Expected hashes (full seed-1 datasets from speeddemon.dev): A `495ca096...`, B `
 
 ## Next 24 hours
 
-Track A is within about 9 ms of the leaders and is limited by the parse and the per-hour selection; the next step would be overlapping the hour phase with the parse. Tracks B and D are the weakest; the next step is a C++ draft of each, since the C++ builds of A and C gained points mostly from a shorter source.
+Track A is within about 3 ms of the leaders (0.0217 s against 0.0186 s) and is limited by the parse and the per-hour selection; the next step would be overlapping the hour phase with the parse. Track C's board time is mostly the record parse itself (diagnostic builds in `track-c/PERF.md` put set-up at about 5.5 ms, streaming the input at about 6 ms, the name table at about 4 ms and the field parse at about 14 ms of 29 ms), so the next step there is fewer instructions per record, for example a block-mask pass for the field boundaries. Tracks B and D are the weakest; the next step is a C++ draft of each, since the C++ builds of A and C gained points mostly from a shorter source.
