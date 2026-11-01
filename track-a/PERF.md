@@ -183,6 +183,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `bb07ac5` | Track A: 16 pieces per thread, now that pieces are released as they finish (experiment) | `run-9e02e3230cc7` | 0.0228 | 19.2 | 326 | 83.52 |
 | `3cbb939` | Track A: prefetch the input 4 KB ahead in the scan loop | `run-9edb429d5aae` | 0.0214 | 18.4 | 327 | 84.34 |
 | `fff546f` | Track B: prefetch the input 2 KB ahead in the token scan | `run-10d571793035` | 0.0215 | 18.7 | 327 | 84.23 |
+| `ff9de8e` | PERF: B prefetch experiment (reverted) with its board run ID | `run-d15d1ee1519b` | 0.0218 | 18.9 | 327 | 84.03 |
+| `c27bda3` | Track A: build with -O2 instead of -O3 (experiment, same source) | `run-dbba4c78aeb2` | 0.0234 | 18.7 | 327 | 83.34 |
 
 <!-- board-runs:end -->
 
@@ -201,3 +203,7 @@ Each thread now drops a piece's input pages (`MADV_DONTNEED` on the page-aligned
 ### Prefetch the input 4 KB ahead
 
 One line in the scan loop: `_mm_prefetch(p + 4096, _MM_HINT_T0)`. The hardware prefetcher stops at each 4 KB page boundary and the file's pages are scattered, so this reaches into the next page early. Idea from a separate research session that measured about 17% less CPU on its own 4-vCPU machine; on the board `run-9edb429d5aae` (`3cbb939`) gave 0.0214 s, 18.4 MiB, S 327, 84.34, against 0.0228 s for the same code without it (`run-9e02e3230cc7`). Single runs, so the gain is real but its size is uncertain. Hash matched on every local run.
+
+### `-O2` instead of `-O3` (tried, reverted)
+
+Same source, one build flag. Board `run` on `c27bda3`: 0.0234 s, 18.7 MiB, 83.34, against 0.0214–0.0218 s with `-O3`. That board run was slow for every track (C on unchanged code went from 0.0296 s to 0.0382 s), so the size of the loss is not reliable; there was no sign of a gain, so `-O3` stays.

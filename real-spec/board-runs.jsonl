@@ -202,3 +202,11 @@
 {"track": "b", "run_id": "run-dff88ce2292a", "commit": "fff546f", "T_s": 0.19215, "M_bytes": 56475648, "S": 618, "points": 71.347732, "ended_at": "2026-11-01T06:21:13Z"}
 {"track": "c", "run_id": "run-d998ad118360", "commit": "fff546f", "T_s": 0.030078, "M_bytes": 9523200, "S": 400, "points": 78.635221, "ended_at": "2026-11-01T06:21:16Z"}
 {"track": "d", "run_id": "run-aa9d166ff114", "commit": "fff546f", "T_s": 0.178855, "M_bytes": 69128192, "S": 518, "points": 68.229829, "ended_at": "2026-11-01T06:21:20Z"}
+{"track": "a", "run_id": "run-d15d1ee1519b", "commit": "ff9de8e", "T_s": 0.021802, "M_bytes": 19857408, "S": 327, "points": 84.034478, "ended_at": "2026-11-01T06:25:36Z"}
+{"track": "b", "run_id": "run-c074fc74a66b", "commit": "ff9de8e", "T_s": 0.170369, "M_bytes": 49496064, "S": 617, "points": 73.232158, "ended_at": "2026-11-01T06:25:38Z"}
+{"track": "c", "run_id": "run-37b480128765", "commit": "ff9de8e", "T_s": 0.029597, "M_bytes": 8871936, "S": 400, "points": 79.117898, "ended_at": "2026-11-01T06:25:41Z"}
+{"track": "d", "run_id": "run-792013a1dc83", "commit": "ff9de8e", "T_s": 0.169078, "M_bytes": 69271552, "S": 518, "points": 68.831181, "ended_at": "2026-11-01T06:25:44Z"}
+{"track": "a", "run_id": "run-dbba4c78aeb2", "commit": "c27bda3", "T_s": 0.023391, "M_bytes": 19562496, "S": 327, "points": 83.335649, "ended_at": "2026-11-01T06:31:58Z"}
+{"track": "b", "run_id": "run-eefd4ed9ec73", "commit": "c27bda3", "T_s": 0.193589, "M_bytes": 48918528, "S": 617, "points": 71.895878, "ended_at": "2026-11-01T06:32:01Z"}
+{"track": "c", "run_id": "run-037b46ffd847", "commit": "c27bda3", "T_s": 0.038189, "M_bytes": 9281536, "S": 400, "points": 76.154618, "ended_at": "2026-11-01T06:32:04Z"}
+{"track": "d", "run_id": "run-6586416f183c", "commit": "c27bda3", "T_s": 0.188157, "M_bytes": 68931584, "S": 518, "points": 67.691716, "ended_at": "2026-11-01T06:32:07Z"}

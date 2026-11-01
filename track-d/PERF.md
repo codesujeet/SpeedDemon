@@ -260,5 +260,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `bb07ac5` | Track A: 16 pieces per thread, now that pieces are released as they finish (experiment) | `run-a0e386f5be6e` | 0.1866 | 65.7 | 518 | 67.78 |
 | `3cbb939` | Track A: prefetch the input 4 KB ahead in the scan loop | `run-8df98b71c736` | 0.1949 | 65.9 | 518 | 67.30 |
 | `fff546f` | Track B: prefetch the input 2 KB ahead in the token scan | `run-aa9d166ff114` | 0.1789 | 65.9 | 518 | 68.23 |
+| `ff9de8e` | PERF: B prefetch experiment (reverted) with its board run ID | `run-792013a1dc83` | 0.1691 | 66.1 | 518 | 68.83 |
+| `c27bda3` | Track A: build with -O2 instead of -O3 (experiment, same source) | `run-6586416f183c` | 0.1882 | 65.7 | 518 | 67.69 |
 
 <!-- board-runs:end -->
