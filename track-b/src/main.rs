@@ -371,6 +371,14 @@ impl Units {
 fn main() {
     unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
+    // The corpus's pages are in the page cache but not yet in this process's page tables. While this thread
+    // parses the queries, helper threads map them in, so the sample and the scan do not fault on them.
+    let text = map("/data/docs.txt");
+    let base = text.as_ptr() as usize;
+    for t in 0..THREADS - 1 {
+        let (a, b) = ((base + text.len() * t / (THREADS - 1)) & !4095, base + text.len() * (t + 1) / (THREADS - 1));
+        std::thread::spawn(move || unsafe { madvise(a as *mut u8, b - a, 22) });
+    }
     // Every token's lookup lands on a random line of the term table; it is handed back after the scan.
     let slot = unsafe { huge((qtext.len() / 32).next_power_of_two(), true) };
     let mut terms = Terms { slot, n: 0 };
@@ -403,7 +411,6 @@ fn main() {
     }
     drop(hs);
     let nterms = terms.n;
-    let text = map("/data/docs.txt");
     let mut cut: Vec<usize> = (0..=THREADS).map(|t| text.len() * t / THREADS).collect();
     for c in &mut cut[1..THREADS] {
         while *c < text.len() && text[*c - 1] != b'\n' {
