@@ -73,6 +73,9 @@ u32 match32(const char* p, char c) {
     return _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c)));
 }
 
+// The same for the 64 at p.
+u64 match64(const char* p, char c) { return match32(p, c) | u64(match32(p + 32, c)) << 32; }
+
 
 // Two numbers, each from the eight bytes that end where it does (the first
 // byte is the lowest), reduced to digit values with the bytes before it masked
@@ -122,25 +125,27 @@ struct Text {
         p = find(s, ',') + 1;
         return {s, u32(p - 1 - s), u32(p - 1 - s)};
     }
-    // The quotes after the opening one, 64 bytes at a time, are stepped
-    // through on their bit mask: a quote followed by another is a "" pair,
-    // the first one that is not closes the field.
+    // After the opening quote, the field closes on the last quote of the first run of
+    // quotes of odd length, since a "" pair is an escape. Adding a run's first bit to
+    // the mask carries to the byte after the run, and that byte's parity against the
+    // start's gives the run's length. So the close comes with no branch per quote,
+    // which mispredicted on about a third of records.
     u32 pairs = 0;
     const char* q = s + 1;
-    for (u64 m = match32(q, '"') | u64(match32(q + 32, '"')) << 32;;) {
-        u32 i = _tzcnt_u64(m);
-        if (i >= 63) {  // none, or the byte after it is out of view: move on
-            q += i;
-            m = match32(q, '"') | u64(match32(q + 32, '"')) << 32;
-            continue;
-        }
-        if (!(m >> (i + 1) & 1)) {
-            q += i;
+    for (;;) {
+        constexpr u64 EVEN = 0x5555555555555555;
+        u64 m = match64(q, '"'), first = m & ~(m << 1);
+        u64 after = ((m + (first & EVEN)) & ~m & ~EVEN) | ((m + (first & ~EVEN)) & ~m & EVEN);
+        if (after) {
+            u32 close = _tzcnt_u64(after) - 1;
+            pairs += __builtin_popcountll(_bzhi_u64(m, close)) / 2;
+            q += close;
             break;
         }
-        ++pairs;
-        m &= m - 1;
-        m &= m - 1;
+        // All whole runs here are pairs; a run reaching the end is read again from its start.
+        u32 step = std::max(64 - u32(_lzcnt_u64(~m)), 2u);
+        pairs += __builtin_popcountll(_bzhi_u64(m, step)) / 2;
+        q += step;
     }
     p = q + 2;
     return {s + 1, u32(q - s - 1), u32(q - s - 1 - pairs)};
@@ -164,7 +169,9 @@ public:
         __m128i head = _mm_loadu_si128((const __m128i*)s);
         head = _mm_and_si128(head, _mm_loadu_si128((const __m128i*)(KEEP + 16 - std::min(len, 16u))));
         u64 h = (u64(_mm_cvtsi128_si64(head)) * 0x9E3779B97F4A7C15ull ^ len) + u64(_mm_extract_epi64(head, 1)) * 0xBF58476D1CE4E5B9ull;
-        for (u32 i = 16; i < len; i += 8) {
+        // A name is over 16 bytes one time in ten, so its next eight go in with no branch.
+        h = (h ^ _bzhi_u64(load8(s + 16), 8 * (std::clamp(len, 16u, 24u) - 16))) * 0x94D049BB133111EBull;
+        for (u32 i = 24; i < len; i += 8) {
             u64 w = load8(s + i);
             if (len - i < 8) w &= (u64(1) << 8 * (len - i)) - 1;
             h = (h ^ w) * 0x94D049BB133111EBull;
@@ -174,16 +181,21 @@ public:
 
     void prefetch(u64 k) const { _mm_prefetch((const char*)&slots_[k >> (64 - BITS)], _MM_HINT_T0); }
 
-    // Slots are probed four at a time, from the aligned group of four the key
-    // hashes to: one 32-byte compare finds the key, or the first free slot,
-    // which is claimed (no key ever sits past a free slot, as none is freed).
+    // Slots are probed eight at a time, a whole cache line, from the aligned group the
+    // key hashes to: the table is 76% full, and groups of four overflowed on about one
+    // lookup in five, each a mispredict. Two compares find the key, or the first free
+    // slot, which is claimed (no key ever sits past a free slot, as none is freed).
     u32 id(u64 k) {
-        for (u32 i = k >> (64 - BITS) & ~3u;; i = (i + 4) % SLOTS) {
-            __m256i v = _mm256_load_si256((const __m256i*)&slots_[i]);
-            u32 hit = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(k))));
-            if (hit) return i + __builtin_ctz(hit);
-            u32 free = _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_setzero_si256())));
-            for (; free; free &= free - 1) {
+        auto bits = [&](u32 i, u64 x) {
+            auto eq = [&](u32 j) {
+                __m256i v = _mm256_load_si256((const __m256i*)&slots_[j]);
+                return _mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(v, _mm256_set1_epi64x(x))));
+            };
+            return u32(eq(i) | eq(i + 4) << 4);
+        };
+        for (u32 i = k >> (64 - BITS) & ~7u;; i = (i + 8) % SLOTS) {
+            if (u32 hit = bits(i, k)) return i + __builtin_ctz(hit);
+            for (u32 free = bits(i, 0); free; free &= free - 1) {
                 u32 j = i + __builtin_ctz(free);
                 u64 s = 0;
                 if (slots_[j].compare_exchange_strong(s, k) || s == k) return j;
