@@ -179,6 +179,9 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `576267e` | Tracks A and C: each thread releases a consumed input piece's pages at once (from the new  | `run-442bba74c314` | 0.0220 | 18.5 | 326 | 84.02 |
 | `a94d376` | Track B: each thread releases its share of docs.txt after the scan | `run-9934a3ba4185` | 0.0229 | 18.8 | 326 | 83.54 |
 | `4dde5ce` | Track B: DIAGNOSTIC (answers computed twice) to measure the answer phase on the board; wil | `run-6b8564b1b12d` | 0.0229 | 18.9 | 326 | 83.51 |
+| `ab00e1a` | Write-ups for the page-release changes and the answer-phase measurement; board run IDs | `run-1332852988a0` | 0.0235 | 22.0 | 326 | 82.56 |
+| `bb07ac5` | Track A: 16 pieces per thread, now that pieces are released as they finish (experiment) | `run-9e02e3230cc7` | 0.0228 | 19.2 | 326 | 83.52 |
+| `3cbb939` | Track A: prefetch the input 4 KB ahead in the scan loop | `run-9edb429d5aae` | 0.0214 | 18.4 | 327 | 84.34 |
 
 <!-- board-runs:end -->
 
@@ -193,3 +196,7 @@ Locally the new draft was 6-8% faster in interleaved runs (median 74-75 ms again
 ## Releasing consumed input pages in the parse threads (`576267e`)
 
 Each thread now drops a piece's input pages (`MADV_DONTNEED` on the page-aligned part of the piece) as soon as it has parsed it, instead of one thread unmapping all of the log's pages at process exit. On a private, unmodified file mapping this only drops pages, so a later read would fault them in again and cannot change the output. Idea taken from the team's newer draft (which also carried the record-counting pass I had already dropped). Locally there was no measurable difference (the laptop does not show the exit cost), but on the board: `run-442bba74c314` (`576267e`) 0.0220 s, 19.4 MiB, S 326, 84.02, against 0.0267 s before; the re-run `run-9934a3ba4185` (`a94d376`, unchanged A code) gave 0.0229 s, 83.54. 120 local runs matched the hash and outputs matched the Rust build on seeds 1, 2, 3 and 7.
+
+### Prefetch the input 4 KB ahead
+
+One line in the scan loop: `_mm_prefetch(p + 4096, _MM_HINT_T0)`. The hardware prefetcher stops at each 4 KB page boundary and the file's pages are scattered, so this reaches into the next page early. Idea from a separate research session that measured about 17% less CPU on its own 4-vCPU machine; on the board `run-9edb429d5aae` (`3cbb939`) gave 0.0214 s, 18.4 MiB, S 327, 84.34, against 0.0228 s for the same code without it (`run-9e02e3230cc7`). Single runs, so the gain is real but its size is uncertain. Hash matched on every local run.

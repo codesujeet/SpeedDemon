@@ -280,6 +280,9 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `576267e` | Tracks A and C: each thread releases a consumed input piece's pages at once (from the new  | `run-a6aebb16d412` | 0.1737 | 47.2 | 609 | 73.07 |
 | `a94d376` | Track B: each thread releases its share of docs.txt after the scan | `run-d58c749305c7` | 0.1674 | 47.2 | 617 | 73.42 |
 | `4dde5ce` | Track B: DIAGNOSTIC (answers computed twice) to measure the answer phase on the board; wil | `run-1401c9180e0e` | 0.1919 | 47.2 | 619 | 71.93 |
+| `ab00e1a` | Write-ups for the page-release changes and the answer-phase measurement; board run IDs | `run-34580d586e8f` | 0.1756 | 47.6 | 617 | 72.87 |
+| `bb07ac5` | Track A: 16 pieces per thread, now that pieces are released as they finish (experiment) | `run-1d25a19ab139` | 0.1734 | 47.2 | 617 | 73.04 |
+| `3cbb939` | Track A: prefetch the input 4 KB ahead in the scan loop | `run-4ed70e00b26d` | 0.1708 | 47.5 | 617 | 73.18 |
 
 <!-- board-runs:end -->
 
