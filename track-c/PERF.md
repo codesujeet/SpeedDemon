@@ -174,6 +174,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `79d68e7` | Track C: region_line also accepts a CRLF region file (fixes a crash in the previous commit | `run-6ab6489737df` | 0.0299 | 8.3 | 368 | 79.37 |
 | `5338276` | Log board runs for the line cuts (A S 306, C S 368) | `run-c2895ce03cd0` | 0.0297 | 8.7 | 368 | 79.21 |
 | `0df6a6f` | Track C: decode numbers with pmaddubsw/pmaddwd instead of the scalar multiply chain | `run-ad820388f2ec` | 0.0278 | 9.5 | 375 | 79.49 |
+| `a39d4f6` | Track B: two exact line cuts (610 -> 600 formatted lines) | `run-49602b15f5ad` | 0.0281 | 8.5 | 375 | 79.83 |
 
 <!-- board-runs:end -->
 

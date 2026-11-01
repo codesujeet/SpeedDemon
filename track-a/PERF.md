@@ -194,6 +194,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `67464a6` | Track C: DIAGNOSTIC, no name-table lookup (id taken from the key bits); output wrong; reve | `run-63ba78fa6b18` | 0.0214 | 18.7 | 306 | 84.52 |
 | `7496859` | Track C: DIAGNOSTIC, the parse only streams the input (one byte per cache line); output wr | `run-9718ba47d387` | 0.0216 | 19.2 | 306 | 84.32 |
 | `0df6a6f` | Track C: decode numbers with pmaddubsw/pmaddwd instead of the scalar multiply chain | `run-1ea57f17feb5` | 0.0232 | 18.8 | 306 | 83.58 |
+| `a39d4f6` | Track B: two exact line cuts (610 -> 600 formatted lines) | `run-40f714fa9d43` | 0.0243 | 18.3 | 306 | 83.21 |
 
 <!-- board-runs:end -->
 
