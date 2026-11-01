@@ -349,6 +349,9 @@ int main() {
             int day = (h + 18) / 24;
             snprintf(label, sizeof label, "2026-%02d-%02dT%02d:00:00Z ", day < 2 ? 10 : 11, day < 2 ? 30 + day : day - 1, (h + 18) % 24);
             char* o = text + at[h];
+            // This hour's pages of the output in one call, not one fault at a time from every thread.
+            uintptr_t page = uintptr_t(o) & ~uintptr_t(4095);
+            madvise((void*)page, uintptr_t(text + at[h + 1]) - page, MADV_POPULATE_WRITE);
             for (const Line& l : lines[h]) {
                 o = std::copy_n(label, 21, o);
                 o = std::copy(names[l.e].begin(), names[l.e].end(), o);

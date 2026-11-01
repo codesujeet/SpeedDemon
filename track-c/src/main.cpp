@@ -406,6 +406,7 @@ int main() {
                 // Map the piece's pages in one call rather than by a fault
                 // every 16 pages as the parse reaches them.
                 uintptr_t from = uintptr_t(records + cut[k]) & ~uintptr_t(4095);
+                madvise(reinterpret_cast<void*>(from), uintptr_t(records + cut[k + 1]) - from, MADV_POPULATE_READ);
                 parse_records(records + cut[k], records + cut[k + 1], records + size, country_of, nregions, names,
                               seen, totals[t].data());
                 // The piece is not read again: its pages are unmapped now, by
