@@ -231,11 +231,13 @@ struct NamesSeen {
     }
 };
 
-// Parse every record that starts in [p, end). A record's sums go to its country
-// at once; its name slot is prefetched, LAG records later the name is looked up
-// and its bitset word prefetched, and LAG records after that it is marked. The
-// rings start and end full of a dummy name in the unused country SPARE, so no
-// step has to test whether its slot holds a record yet.
+// Parse every record that starts in [p, end). A record's region row and name
+// slot are prefetched when it is parsed; LAG records later its country is
+// read, its sums go to totals, its name is looked up and that name's bitset
+// word prefetched; LAG records after that the name is marked. So each of the
+// three random reads (region table, name table, bitsets) has a steady lead. The
+// rings start and end full of a dummy record in the unused country SPARE (the
+// table's row past the last region), so no step tests whether its slot is real.
 constexpr u32 SPARE = 255;
 
 void parse_records(const char* p, const char* end, const char* file_end, const u8* country_of,
@@ -243,21 +245,32 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
     constexpr u32 LAG = 16;
     struct Pending {
         u64 name;
-        u32 country;
+        u32 region, id, name_bytes, note_bytes;
+        i64 cents;
     } pending[LAG];
     struct Mark {
         u32 country, id;
     } marks[LAG];
-    std::fill_n(pending, LAG, Pending{1, SPARE});
+    const Pending dummy{1, u32(regions) + 1, 0, 0, 0, 0};
+    std::fill_n(pending, LAG, dummy);
     std::fill_n(marks, LAG, Mark{SPARE, 0});
     u32 n = 0;
-    auto advance = [&](u64 key, u32 country) __attribute__((always_inline)) {
+    auto advance = [&](const Pending& next) __attribute__((always_inline)) {
         u32 k = n++ % LAG;
         totals[marks[k].country].distinct += seen.mark(marks[k].country, marks[k].id);
-        marks[k] = {pending[k].country, names.id(pending[k].name)};
-        seen.prefetch(marks[k].country, marks[k].id);
-        pending[k] = {key, country};
-        names.prefetch(key);
+        const Pending& old = pending[k];
+        u32 c = country_of[old.region];
+        Totals& t = totals[c];
+        ++t.count;
+        t.id_sum += old.id;
+        t.amount_sum += old.cents;
+        t.amount_min = std::min(t.amount_min, old.cents);
+        t.amount_max = std::max(t.amount_max, old.cents);
+        t.name_bytes += old.name_bytes;
+        t.note_bytes += old.note_bytes;
+        marks[k] = {c, names.id(old.name)};
+        seen.prefetch(c, marks[k].id);
+        pending[k] = next;
     };
 
     while (p < end) {
@@ -281,20 +294,15 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         i64 negative = *amount == '-';
         i64 cents = (i64(money(amount + negative, amount_end)) ^ -negative) + negative;
 
-        // Region ids are below 10^7; the table's spare row (no country) is past the last.
-        u32 c = country_of[std::min(region, u64(regions))];
-        Totals& t = totals[c];
-        ++t.count;
-        t.id_sum += id;
-        t.amount_sum += cents;
-        t.amount_min = std::min(t.amount_min, cents);
-        t.amount_max = std::max(t.amount_max, cents);
-        t.name_bytes += name.length;
-        t.note_bytes += note.length;
-        advance(NameTable::key(name.at, name.raw), c);
+        // Region ids are below 10^7 (fit u32); the table's spare row is past the last.
+        u32 r = std::min(region, u64(regions));
+        _mm_prefetch((const char*)(country_of + r), _MM_HINT_T0);
+        u64 key = NameTable::key(name.at, name.raw);
+        advance({key, r, u32(id), name.length, note.length, cents});
+        names.prefetch(key);
         p = eol + 1;
     }
-    for (u32 i = 0; i < 2 * LAG; ++i) advance(1, SPARE);
+    for (u32 i = 0; i < 2 * LAG; ++i) advance(dummy);
 }
 
 // 15-bit code of a three-letter country; numeric order is alphabetical order.
@@ -358,7 +366,8 @@ int main() {
     // the last line holds the largest id.
     const char* last = static_cast<const char*>(memrchr(regions, '\n', rsize - 1)) + 1;
     const size_t nregions = atoll(last) + 1;
-    u8* country_of = zeroed<u8>(nregions + 1);  // 0 = no such region
+    u8* country_of = zeroed<u8>(nregions + 2);  // 0 = no such region; the last row is SPARE
+    country_of[nregions + 1] = SPARE;
     std::vector<size_t> rcut = split(regions, strchr(regions, '\n') - regions + 1, rsize, nthreads, "\n");
     std::vector<std::atomic<u8>> present(1 << 15);
     std::array<u8, 1 << 15> index_of{};
