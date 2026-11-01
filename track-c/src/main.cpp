@@ -308,7 +308,7 @@ u32 code(const char* p) { return (p[0] - 'A') << 10 | (p[1] - 'A') << 5 | (p[2] 
 std::pair<u64, u32> region_line(const char*& p) {
     const char* comma = comma_after(p);
     std::pair<u64, u32> line{digits(p, comma), code(comma + 1)};
-    p = comma + 5;  // the country is three letters, then the line feed
+    p = comma + 5 + (comma[4] == '\r');  // past the country and the line end (LF or CRLF)
     return line;
 }
 
