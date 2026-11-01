@@ -186,3 +186,10 @@ Order: D1 now. I will post as soon as it is correct, then D2 and D3.
 ### Next
 - D2: the serial query parse with the corpus's 64-byte masks (VM: about 10 ms on one thread, about 28 instructions per byte of queries.txt in byte-wise split closures). This is single-thread work, where instruction cuts should show.
 - Then the docs() segment loop (1.67 M mispredicts): build each term's list without a loop per thread segment.
+
+## 2026-11-01 18:40 UTC D2 part 1: cloud-b-redesign-qparse (c1bf425), base 208bd01
+
+- The serial query parse no longer splits bytes one at a time: each word's length is one trailing-zero count of the classes() letter-or-digit mask after it; the byte after the word (space, quote or LF) says whether the line goes on. Operator vs term by the first byte's case (spec 2.3 grammar), not by position.
+- Checked: real image + board flags, seeds 1 (x3) / 2 / 3 / 7 match; tiny equals the reference, sample equals the spec (both contain the op_words queries, lowercase and/or/not as terms); phrase-heavy fuzz 0 differences in 96 valid cases. Lines +5 (584).
+- VM only: on the full queries.txt with a one-document corpus, main's own instructions 55.9 M -> 34.1 M (-39%). This is single-thread work before the scan, so my estimate is about 3-4 ms on the board if it is instruction-bound there (not measured). One reading may not resolve it against +-5% noise; it is independent of cloud-b-redesign-answers, and both merge on 208bd01 without touching the same lines (not built together).
+- Next: the rest of the serial prefix (sorts, renumber, seg loop), then the docs() per-segment loop.
