@@ -302,3 +302,18 @@ If (8) carries most of 0.1491 s, the smallest diff is bundle (steadymem + qparse
 - cloud-b-exp-t1-on-combo, cloud-b-exp-nopre-on-combo, cloud-b-exp-spread-on-combo: clean cherry-picks of the earlier single-idea experiments onto cloud-b-port-combo-huge (dbe709f). cloud-b-exp-8slot-on-combo: the 8-slot table ported by hand onto the huge-page table (+5 lines). All four: native hashes for seeds 1/2/3/7 match, tiny and sample match; 8slot also phrase fuzz 0 differences in 28 cases.
 - Two things I tried and dropped (VM): a radix sort for the class order (slower than sort_unstable here, 2.0 vs 1.5 ms) and exact A line cuts (only 1 formatted line to gain without golfing).
 - Waiting for your combo-huge reading.
+
+## 17:35 UTC B, page-level family: cloud-b-huge-bits (on combo-huge), plus a survey of the rest
+
+cloud-b-huge-bits, base dbe709f:
+- The bitmap rows (11.5 MB) on 2 MB pages. Each flush (every 64 docs per thread) ORs one word into each of ~369 rows that are 31 KB apart: ~369 distinct 4 KB pages per flush, ~2,800 pages in all, more than the shared TLB. Now 6 huge pages.
+- How: a helper maps 2 MB-aligned memory with MADV_HUGEPAGE. The term table is faulted at once as before. The bitmap rows are faulted lazily by the scanning threads, with huge pages switched on for the scan only (prctl 41 back to 1 after it; nothing else allocated during the scan is 2 MB or larger). Faulting the 12 MB up front on the main thread cost 10-58 ms on the VM (compaction and zeroing), so I did not keep that.
+- Checked: real image + board flags (4 seeds), tiny, sample, phrase fuzz; AnonHugePages 12288 kB in smaps during a run. +10 lines (630).
+- VM: peak 42.2-42.6 MiB (+0.5 for 2 MB rounding); wall no difference resolvable. Board not measured.
+
+What else in the family, from the code (not built yet; tell me which you want first):
+1. Per-thread last and count (2 x 150 KB per thread, read-modify-write per token at random): all twelve threads' arrays fit in two 2 MB pages (3.6 MB -> 4 MB, +0.4 MB). Same lazy-fault trick.
+2. Exit teardown: post (21 MB) and bits stay mapped until _exit, so one thread frees ~33 MB inside T. An extra phase after the answers where each thread MADV_DONTNEEDs its twelfth of post and bits (while main writes the 1.4 MB output) moves that to all threads. With bits on huge pages, only post's ~5,200 small pages are left to free.
+3. The corpus's page faults: each thread faults its 21 MB share during the scan (fault-around maps 16 pages per fault). During the serial query parse (~7 ms on the VM) the other 11 threads are idle; helper threads could MADV_POPULATE_READ their shares then, off the critical path. (Populate inside the scan was tried and lost; this is different because it runs in idle time.)
+4. post on 2 MB pages: the scatter's writes and the answers' reads; 21 MB -> 22 MB rounded, but with steadymem the huge pages would be charged as soon as any thread writes one, so the peak shape changes. Riskiest of the four for memory.
+Also measured: all builds do ~435-445 munmaps on the full data (384 are the units vectors, each a TLB shootdown across the process's threads). Not obviously worth changing.
