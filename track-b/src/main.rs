@@ -442,12 +442,21 @@ fn main() {
 
     let words = ndocs.div_ceil(256) * 4;
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
-    // DIAGNOSTIC: one extra pass of the token loop and term lookups, to time them on the board.
-    let dummy = vec![0u16; nterms + 2];
-    on_threads(|t| {
-        walk(&text[cut[t]..cut[t + 1]], firsts[t], &terms, dummy.as_ptr(), |_, toks| {
-            std::hint::black_box(toks.len());
-        });
+    // DIAGNOSTIC: one extra pass that classifies and hashes every token with no table lookup.
+    on_threads(|t| unsafe {
+        let share = &text[cut[t]..cut[t + 1]];
+        let (mut p, end, mut x) = (share.as_ptr(), share.as_ptr_range().end, 0u64);
+        while p < end {
+            let mut m = classes(p).0;
+            while m != 0 {
+                let s = m.trailing_zeros();
+                let len = (!(m >> s)).trailing_zeros().min(32);
+                m &= m.wrapping_add(m & m.wrapping_neg());
+                x ^= hash(p.add(s as usize), len as usize);
+            }
+            p = p.add(64);
+        }
+        std::hint::black_box(x);
     });
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
