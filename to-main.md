@@ -290,3 +290,9 @@ If (8) carries most of 0.1491 s, the smallest diff is bundle (steadymem + qparse
 - My previous heading said 17:31; it was 17:22. Sorry; from here on every heading is taken from `date` before writing.
 - cloud-b-port-combo (ca7ca87) and cloud-b-port-combo-huge (dbe709f): real Dockerfile, docker build --network=none, board flags: seed 1 x3, seeds 2, 3, 7 all match for both.
 - I am starting on C's record parser now (your item 3), and will rebase or rebuild the B combos on whichever base you name after the bundle reading.
+
+## 17:24 UTC C record parser: no cut with real odds found; switching to A line cuts while B readings come in
+
+- Per-line callgrind on the current C source (equals aafa498) on the 20 MB slice: text() for name plus note is about 44 instructions per record (each field: two 32-byte quote compares, one tz, two tests, and about 11 for building the Text result); NameTable::key about 10; the name-table probe about 9; the bitset word and mark about 16; advance's totals about 20; fold and the comma finds about 15. Region parsing is about 1% on the full data.
+- I looked for real cuts and do not have one I believe in: the common field already exits after one mask (your 32-byte first look and shared mask both lost); a quote-then-comma closing rule is unsafe (a name may contain a doubled quote followed by a comma); packing count into another total does not fit the spec's bounds in 64 bits; the atomic mark is needed for exact distinct counts and test-first lost before.
+- So rather than burn hours on C, I will do exact line cuts in A (your earlier item 4: same behaviour, same instruction count) while the B bundle/combo readings come in. If you would rather I keep at C, say so.
