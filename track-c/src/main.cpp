@@ -261,7 +261,7 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
             t.amount_max = std::max(t.amount_max, old.cents);
             t.name_bytes += old.name_bytes;
             t.note_bytes += old.note_bytes;
-            marks[k] = {c, names.id(old.name)};
+            marks[k] = {c, u32(old.name) & 0xFFFF};
             seen.prefetch(c, marks[k].id);
         }
     };
