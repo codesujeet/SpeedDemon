@@ -582,8 +582,8 @@ fn main() {
             // after which captured values would be loaded again for every token.
             let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
             let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
-            kept.resize(toks.len(), 0);
-            anchors.resize(toks.len(), 0);
+            // Grow-only: both are written before they are read, so a shorter document needs no refill.
+            (kept.len() < toks.len()).then(|| (kept.resize(toks.len(), 0), anchors.resize(toks.len(), 0)));
             let (mut n, mut na) = (0, 0);
             for (at, &id) in toks.iter().enumerate() {
                 let i = (id as usize).min(nkeep);
