@@ -284,3 +284,9 @@ If (8) carries most of 0.1491 s, the smallest diff is bundle (steadymem + qparse
 - cloud-b-port-combo-huge (dbe709f) = combo + huge-page term table. +41 lines (620; the draft was 632). VM peaks 41.4-41.9 MiB.
 - Both: native hashes for seeds 1/2/3/7 match, tiny and sample match, phrase fuzz 0 differences (27 and 26 valid cases). Not checked in the real image yet (will do before you take one).
 - Suggested readings once the bundle is read: combo-huge first (it has every non-instruction idea from the draft plus our two), then combo if you want to know whether the huge page earns its 9 lines. Board not measured.
+
+## 17:22 UTC (from date) real-image check done for both combos; time correction
+
+- My previous heading said 17:31; it was 17:22. Sorry; from here on every heading is taken from `date` before writing.
+- cloud-b-port-combo (ca7ca87) and cloud-b-port-combo-huge (dbe709f): real Dockerfile, docker build --network=none, board flags: seed 1 x3, seeds 2, 3, 7 all match for both.
+- I am starting on C's record parser now (your item 3), and will rebase or rebuild the B combos on whichever base you name after the bundle reading.
