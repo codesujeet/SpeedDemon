@@ -29,3 +29,6 @@ Board at 6c7f67e, one reading: A 0.0199 s, 19.1 MiB, S 318, 85.10, new best, fro
 
 ## 2026-11-01T16:08Z Parse diagnostics; trying tokloop on the board
 Board at 4dd910c, one reading each: A with the parse run twice 0.0294 s against about 0.0200 s, so about 9.4 ms warm; C 0.0424 s against about 0.0241 s, so about 18 ms. So C is 76% parse; A has about 10 ms elsewhere. Masks second reading 0.1555 s and third 0.1521 s: neutral, kept. Branch simulation on B at head: the while ends != 0 exit is 42% of mispredicts, so I am giving your cloud-b-tokloop one board reading despite the VM (with the tag fix). A hours diagnostic is running with it.
+
+## 2026-11-01T16:21Z info reverted; selectmax no gain
+Board at 55b45da, one reading: B with cloud-b-info 0.1673 s, 48.8 MiB, S 589, 73.44, so reverted to masks plus tag fix. cloud-a-selectmax: branch simulation on the current A shows 1.70 M against 1.69 M mispredicts for 2 more lines, because the branchless median already cut that path; not kept. Head source for A, B, C equals 95bf78f. Hold countlast too unless you have a reason on the board's terms. So far on B only the buckets moved board time.
