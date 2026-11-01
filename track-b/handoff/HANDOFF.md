@@ -83,3 +83,25 @@ Not yet implemented:
   cloud-a-hourchunks 9ca493d: +0.3% instructions, -14 lines, peak about the same. Its commit message wrongly says a one-line log
   at 12 threads "still crashes as on the base". Not corrected yet.
   cloud-a-droplist bb0136d (stacked): -12.9% instructions vs base, -19 lines overall. Needs a board A/B; the line-chain risk is back.
+
+## Final state (Nov 1, end of session)
+All remote branches are up to date. Local-only branches hold no unpushed commits. Everything from the scratchpad
+worth keeping is on this branch:
+- track-*/plan/*.md: the four agents' findings. A_context_cloud-a-parsecuts.md is the A agent's state file.
+- track-a/plan/files/: main_armL.cpp, main_armP.cpp, armL.patch, armP.patch (A agent phase-1 sources; superseded by
+  the cloud-a-* branches).
+- track-b/plan/files/: B_scan_core.rs, B_scan_min.rs, B_scan_fused.rs (scan agent; the paths are patched to /tmp/bscan,
+  so use the pushed branches instead); bundle_main.rs, the B_post_bundle.diff source, fuzz.py, fuzz_one.py and post_an*.py
+  (post-scan agent: bundle source written against 8eb3624, fuzzer, analysis scripts); stash_key16_wip.patch (dead
+  16-byte-key experiment, kept for reference only).
+
+Branches to test on the board, best first (seed-1 hash checked in the real image; seeds 2/3/7 NOT checked):
+1. cloud-b-scanmin (or cloud-b-scancore). 2. cloud-c-parsecut. 3. cloud-a-parsecuts. 4. cloud-a-hourchunks.
+5. cloud-a-droplist (A/B test). 6. cloud-c-minmaxbranch (marginal).
+Not yet a branch: the B post-scan bundle (track-b/plan/B_post_bundle.diff). It needs rebasing onto scanmin.
+Open items: cloud-a-hourchunks 9ca493d has a wrong sentence in its commit message (the user decides: correction
+commit or leave it). The empty dirs /w and /w/out in the old container (irrelevant in a new one).
+
+Estimated gains (from callgrind and VM timings, assuming 50-80% carries over to the board; NOT board-measured):
+B +1.1..+1.9 (to about 75-76), C +0.35..+0.7 (about 81.0-81.4), A +0.3..+0.6 (about 85.1-85.4);
+overall about 79.7 -> 80.2-80.8. Reaching 81+ needs a larger B redesign after the scan (serial setup, scatter, answers).

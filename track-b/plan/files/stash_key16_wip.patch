@@ -1,0 +1,106 @@
+diff --git a/track-b/src/main.rs b/track-b/src/main.rs
+index 2b1c86a..f89aaaf 100644
+--- a/track-b/src/main.rs
++++ b/track-b/src/main.rs
+@@ -83,28 +83,41 @@ fn number(text: &[u8], i: usize) -> u32 {
+ 
+ /// The key of the token of len (at most 32) bytes at p: its bytes lowercased
+ /// (OR-ing 0x20 lowercases letters and keeps digits) and zero padded.
+-unsafe fn key(p: *const u8, len: usize) -> __m256i {
+-    static KEEP: [u8; 64] = {
+-        let (mut k, mut i) = ([0; 64], 0);
+-        while i < 32 {
++unsafe fn key(p: *const u8, len: usize) -> __m128i {
++    static KEEP: [u8; 32] = {
++        let (mut k, mut i) = ([0; 32], 0);
++        while i < 16 {
+             (k[i], i) = (0xFF, i + 1);
+         }
+         k
+     };
+-    let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
+-    _mm256_and_si256(v, _mm256_loadu_si256(KEEP.as_ptr().add(32 - len).cast()))
++    let v = _mm_or_si128(_mm_loadu_si128(p.cast()), _mm_set1_epi8(0x20));
++    _mm_and_si128(v, _mm_loadu_si128(KEEP.as_ptr().add(16 - len).cast()))
++}
++
++/// The key of a token over 16 bytes: two 64-bit mixes of its lowercased bytes
++/// and length, every byte above 0x7F so that no short token's key can equal it
++/// (112 bits that two different long tokens would have to share).
++fn fingerprint(token: &[u8]) -> __m128i {
++    let (mut a, mut b) = (token.len() as u64, 0u64);
++    for c in token.chunks(8) {
++        let v = c.iter().rev().fold(0, |v, &x| v << 8 | (x | 0x20) as u64);
++        a = (a ^ v).wrapping_mul(0x9E3779B97F4A7C15).rotate_left(29);
++        b = (b.rotate_left(17) ^ v).wrapping_mul(0xC2B2AE3D27D4EB4F);
++    }
++    unsafe { _mm_set_epi64x((b | 0x8080808080808080) as i64, (a | 0x8080808080808080) as i64) }
+ }
+ 
+ /// From the key's first 16 bytes only: longer tokens are rare, and the key
+ /// comparison tells apart any that collide.
+-fn hash(k: __m256i) -> usize {
+-    let w: [u64; 4] = unsafe { std::mem::transmute(k) };
++fn hash(k: __m128i) -> usize {
++    let w: [u64; 2] = unsafe { std::mem::transmute(k) };
+     let c = unsafe { _mm_crc32_u64(_mm_crc32_u64(0, w[0]), w[1]) };
+     c.wrapping_mul(0x9E3779B97F4A7C15) as usize
+ }
+ 
+-fn same(a: __m256i, b: __m256i) -> bool {
+-    unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
++fn same(a: __m128i, b: __m128i) -> bool {
++    unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(a, b)) == 0xFFFF }
+ }
+ 
+ /// Query terms to dense ids: open addressing, each slot the top 32 hash bits
+@@ -112,11 +125,11 @@ fn same(a: __m256i, b: __m256i) -> bool {
+ /// is no term gets the id one past the last term, so callers need no branch.
+ struct Terms {
+     slot: Vec<u64>,
+-    keys: Vec<__m256i>,
++    keys: Vec<__m128i>,
+ }
+ 
+ impl Terms {
+-    fn find(&self, k: __m256i, h: usize) -> u32 {
++    fn find(&self, k: __m128i, h: usize) -> u32 {
+         let mask = self.slot.len() - 1;
+         let key = |s: u64| unsafe { *self.keys.get_unchecked(s as u32 as usize - 1) };
+         let mut i = h & mask;
+@@ -143,7 +156,7 @@ impl Terms {
+     }
+ 
+     fn insert(&mut self, term: &[u8]) -> u32 {
+-        let k = unsafe { key(term.as_ptr(), term.len()) };
++        let k = unsafe { if term.len() > 16 { fingerprint(term) } else { key(term.as_ptr(), term.len()) } };
+         let (h, mask) = (hash(k), self.slot.len() - 1);
+         let mut i = h & mask;
+         while self.slot[i] != 0 {
+@@ -182,13 +195,13 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
+ /// later, so the misses overlap.
+ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
+     const LAG: usize = 8;
+-    let mut ring = [(_mm256_setzero_si256(), 0); LAG];
++    let mut ring = [(_mm_setzero_si128(), 0); LAG];
+     let (mut n, mut out) = (0usize, ids.len());
+     loop {
+         // A window adds at most 32 ids, and the document's end LAG more.
+         (ids.set_len(out), ids.reserve(32 + LAG));
+         let buf = ids.as_mut_ptr();
+-        let mut look = |r: &(__m256i, usize)| {
++        let mut look = |r: &(__m128i, usize)| {
+             let id = t.find(r.0, r.1);
+             _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast()); // its state, for the caller
+             (*buf.add(out), out) = (id, out + 1);
+@@ -212,8 +225,8 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
+             }
+             m &= m.wrapping_add(m & m.wrapping_neg()); // clears this token's run of bits
+             let k = match len {
+-                ..=32 => key(p.add(s as usize), len as usize),
+-                _ => _mm256_setzero_si256(), // no term, but it still parts its neighbours
++                ..=16 => key(p.add(s as usize), len as usize),
++                _ => fingerprint(std::slice::from_raw_parts(p.add(s as usize), len as usize)),
+             };
+             let h = hash(k);
+             _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h & (t.slot.len() - 1)).cast());
