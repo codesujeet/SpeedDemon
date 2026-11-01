@@ -160,9 +160,12 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
     const LAG: usize = 4;
     let mut ring = [0u64; LAG];
     let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
+    let (mut buf, mut cap) = (ids.as_mut_ptr(), ids.capacity());
     loop {
-        (ids.set_len(out), ids.reserve(32 + LAG));
-        let buf = ids.as_mut_ptr();
+        // out <= cap always, so the subtraction cannot wrap; a window writes at most 32 + LAG ids past out.
+        if cap - out < 32 + LAG {
+            (ids.set_len(out), ids.reserve(1 << 12), buf = ids.as_mut_ptr(), cap = ids.capacity());
+        }
         let mut look = |&h: &u64| {
             let id = t.find(h);
             _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
