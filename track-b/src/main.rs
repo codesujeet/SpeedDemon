@@ -716,6 +716,16 @@ fn main() {
         }
         *chunk.lock().unwrap() = out;
     });
+    // The postings and bitmaps are not read again: every thread hands back its
+    // share of their pages now, instead of one thread taking them all at exit.
+    on_threads(|t| {
+        for (p, n) in [(post.as_ptr() as usize, post.len() * 2), (bits.as_ptr() as usize, bits.len() * 8)] {
+            let (from, to) = ((p + n * t / THREADS + 4095) & !4095, (p + n * (t + 1) / THREADS) & !4095);
+            if to > from {
+                unsafe { madvise(from as *mut u8, to - from, 4) };
+            }
+        }
+    });
     // Chunk by chunk, so the answers are never held twice.
     let file = std::fs::File::create("/out/results.txt").expect("/out/results.txt");
     let mut out = std::io::BufWriter::new(file);
