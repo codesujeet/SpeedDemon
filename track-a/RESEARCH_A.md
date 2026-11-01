@@ -1,5 +1,30 @@
 # RESEARCH_A: cloud research on Track A (C++ build, `308cbff`)
 
+## Result (second pass): one commit, input prefetch
+
+`Parser::run` now prefetches `p + 4096` once per line. The mapped file's pages are scattered in memory and the hardware prefetcher stops at each 4 KB page (Track C already did this at +2048). Real full dataset, 4-vCPU cloud VM, interleaved runs, output hash `495ca096...81cd3` (the published one):
+
+| | base | with prefetch |
+|---|---|---|
+| 1 CPU, wall med / min (9 runs) | 139.7 / 133.5 ms | 110.4 / 107.0 ms |
+| 1 CPU, CPU time med | 134.9 ms | 106.6 ms (-21%) |
+| 4 CPUs, wall med / min (15 runs) | 52.2 / 43.2 ms | 46.2 / 41.7 ms |
+| 4 CPUs, CPU time med | 154.2 ms | 127.1 ms (-18%) |
+| cgroup peak memory | 15.7 MiB | 15.5-15.9 MiB (same) |
+| formatted code lines (clang-format LLVM, as the harness counts) | 304 | 305 |
+
+Distance sweep (CPU, 1 CPU): 256: 110, 512: 107, 2048: 106, 4096: 105, 8192: 105, 16384: 109 ms vs 126 base; 2-8 KiB is flat. The effect on the scoring box is unmeasured (Track C's own log saw about 10% from the same trick on the author's laptop; here it is larger because this VM has costly page walks). It cannot cost more than the one line.
+
+## Corrections to the first pass (below)
+
+- S is counted after `clang-format --style=LLVM` (`harness/static_axes.py`), so the board's 310 is 304 formatted + 7 Dockerfile lines, not the raw count. Marginal values at the current board numbers: 1 ms = 0.39 pts, 1 MiB = 0.24 pts, 10 lines = 0.105 pts.
+- Idea 9 (replace `select` by `nth_element`, -25 lines) is **measured and rejected**: CPU +13%, about -1 pt of time for +0.26 pts of lines.
+- Dropping `release()` costs +11.8 MiB (about -2.8 pts); dropping the `wide` list (8-byte records) costs +10.6 MiB. Both rejected.
+- A scalar digit loop instead of the SIMD `decode` is no slower here (-6 lines, about +0.06 pts); not applied (within noise).
+- `MADV_POPULATE_READ` per piece: no change on A.
+- The first pass said speeddemon.dev data could not be downloaded; the files are on `s3.amazonaws.com/raptors.dev/speeddemon.dev/2026/data/`, and all results here use the real files.
+
+
 Scope: this session was asked to implement the 3 best ideas as separate commits. **No code change was committed**: none of the three candidates I could test beat the noise on this machine, and a source-line cost with no measured gain is a net loss on the score. Only this file is added. Track C was not touched (see the end).
 
 ## Setup and limits
