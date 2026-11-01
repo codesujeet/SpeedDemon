@@ -9,6 +9,10 @@ Scope: this session was asked to implement the 3 best ideas as separate commits.
 - Machine: 4 vCPUs (Xeon, AVX2 and AVX-512 present), a shared cloud VM, not the i5-13500. No `perf`; only `valgrind` exists, and I did not use it for counts, so **there are no instruction counts here**. Numbers are medians of 9-11 interleaved runs pinned with `taskset` (1 CPU: `0`, 4 CPUs: `0-3`). Run-to-run spread is about +-3 ms at 4 CPUs and +-5 ms at 1 CPU, so anything under that is noise.
 - Time split of the current build (one instrumented run each, ms from start): 1 CPU: scan+rank about 110, hours about 30, text about 0.2. 4 CPUs: scan about 30, hours about 10, text about 4.
 
+## Update: real dataset
+
+After the first draft, the official `requests.log` was fetched from `s3.amazonaws.com/raptors.dev/...` (sha256 `7ec80ba4...` matches). The unmodified build outputs `495ca096...81cd3`, the published hash. On the real data: baseline 131.2 ms (1 CPU) and 47.6 ms (4 CPUs); `-O2` 131.9 and 52.2 ms; `pwrite` output 49.6 ms on 4 CPUs. So `-O2` is slightly worse and `pwrite` no better; the conclusions below stand (the tables use my synthetic data).
+
 ## Experiments run (all reverted)
 
 | # | Change | 1 CPU wall, base -> variant | 4 CPU wall, base -> variant | Lines | Verdict |
