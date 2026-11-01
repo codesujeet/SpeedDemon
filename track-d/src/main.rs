@@ -558,4 +558,5 @@ fn main() {
     // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write("/out/distances.txt", out).unwrap();
+    std::process::exit(0); // skip freeing the big arrays
 }
