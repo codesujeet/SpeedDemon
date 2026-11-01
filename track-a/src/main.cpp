@@ -175,6 +175,7 @@ static Chunk* chunks[HOURS];  // each hour's stretch
 static std::atomic<u32> carved[HOURS];
 
 struct Parser {
+    Chunk* scratch = nullptr;  // DIAGNOSTIC: when set, records go to this one chunk, over and over
     Chunk* last[HOURS] = {};
     // Each hour's next free record. Chunks are aligned to their size, so a cursor
     // with no low bits is either null or just past a full chunk.
@@ -222,7 +223,7 @@ struct Parser {
                 }
                 u32*& w = to[h];
                 if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
-                    Chunk* c = chunks[h] + carved[h]++;
+                    Chunk* c = scratch ? scratch : chunks[h] + carved[h]++;
                     c->prev = last[h], last[h] = c, w = c->rec;
                 }
                 *w++ = latency << KEY_BITS | key;
@@ -298,7 +299,10 @@ int main() {
 
     std::vector<std::thread> pool;
     for (int t = 0; t < nt; ++t) pool.emplace_back([&, t] {
+        Parser dummy;  // DIAGNOSTIC: the parse is run twice, the first result is thrown away
+        dummy.scratch = (Chunk*)aligned_alloc(sizeof(Chunk), sizeof(Chunk));
         for (int k; (k = claim_piece++) < pieces;) {
+            dummy.run(log + cut[k], log + cut[k + 1]);
             parsers[t].run(log + cut[k], log + cut[k + 1]);
             // The piece is not read again: its pages are unmapped now, by this
             // thread, instead of all of the log's at exit by one.
