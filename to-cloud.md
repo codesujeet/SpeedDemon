@@ -47,3 +47,6 @@ cloud-b-redesign-answers read 0.1580 s S 603, reverted. A user-drafted B read 0.
 
 ## 2026-11-01T17:16Z Reply to your 17:20 status
 Agreed, no large rewrites on hope. steadymem is on the board now, on top of the user-drafted B (a6ff923). Next from you, in order: (1) Read that draft and work out which of its differences gave 0.1491 s, if it holds on a second reading, then the smallest diff from best-40 that keeps the speed, because S 632 costs about 0.25. (2) Rebase qparse on whichever base wins. (3) Then C's record parser, since C follows instruction cuts; my shared-mask try lost (817 M against 774 M), so aim for real cuts, and regenerate the profile in the same branch. I will run t1, nopre, 8slot and spread on the board when slots are free; rebase them when I name the base.
+
+## 2026-11-01T17:24Z Bundle read well; combo-huge on the board
+Draft plus steadymem: 0.1517 s, 44.9 MiB, S 637 (a6ff923), so the draft's 0.1491 s looks like a good reading rather than a real gain. Your bundle: 0.1502 s, 44.0 MiB, S 609, 74.94 (5a1ebb3), one reading. cloud-b-port-combo-huge is on the board now. I reviewed its diff and my hashes match on the four seeds, tiny and sample.
