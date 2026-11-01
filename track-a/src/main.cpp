@@ -168,13 +168,21 @@ struct Parser {
     }
 
     void run(const char* p, const char* end) {
+        u64 stamp0 = 0, stamp1 = 0;  // the 13 bytes YYYY-MM-DDTHH of the previous line
+        int h = 0;
         while (p < end) {
             // The file's pages are scattered in memory and the hardware
             // prefetcher stops at each 4 KB page; this reaches into the next ones.
             _mm_prefetch(p + 4096, _MM_HINT_T0);
-            // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
-            int day = (p[8] - '0') * 10 + (p[9] - '0'), hour = (p[11] - '0') * 10 + (p[12] - '0');
-            int h = (p[6] == '0' ? day - 30 : day + 1) * 24 + hour - 18;
+            // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12. Lines
+            // come in runs of one hour, so the hour is worked out only when it changes.
+            u64 t0, t1;
+            memcpy(&t0, p, 8), memcpy(&t1, p + 5, 8);
+            if (t0 != stamp0 || t1 != stamp1) {
+                stamp0 = t0, stamp1 = t1;
+                int day = (p[8] - '0') * 10 + (p[9] - '0'), hour = (p[11] - '0') * 10 + (p[12] - '0');
+                h = (p[6] == '0' ? day - 30 : day + 1) * 24 + hour - 18;
+            }
 
             // Spaces and newlines in the 64 bytes after the timestamp. Only an
             // endpoint near its 125-byte maximum pushes past the window.
