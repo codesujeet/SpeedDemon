@@ -173,8 +173,6 @@ struct Parser {
         // 64-byte block holds at most two ends; both are stored (the second only
         // counts if there is one), with no branch on how many lines the block has.
         const char* ends[4096 / 40 + 8];
-        u64 stamp0 = 0, stamp1 = 0;  // the 13 bytes YYYY-MM-DDTHH of the previous line
-        int h = 0;
         for (const char* scan = p; p < end;) {
             u32 n = 0;
             for (const char* stop = std::min(scan + 4096, end); scan < stop; scan += 64) {
@@ -188,15 +186,9 @@ struct Parser {
                 // The file's pages are scattered in memory and the hardware
                 // prefetcher stops at each 4 KB page; this reaches into the next ones.
                 _mm_prefetch(p + 4096, _MM_HINT_T0);
-                // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12. Lines
-                // come in runs of one hour, so the hour is worked out only when it changes.
-                u64 t0, t1;
-                memcpy(&t0, p, 8), memcpy(&t1, p + 5, 8);
-                if (t0 != stamp0 || t1 != stamp1) {
-                    stamp0 = t0, stamp1 = t1;
-                    int day = (p[8] - '0') * 10 + (p[9] - '0'), hour = (p[11] - '0') * 10 + (p[12] - '0');
-                    h = (p[6] == '0' ? day - 30 : day + 1) * 24 + hour - 18;
-                }
+                // YYYY-MM-DDTHH: month's last digit at 6, day at 8-9, hour at 11-12.
+                int day = (p[8] - '0') * 10 + (p[9] - '0'), hour = (p[11] - '0') * 10 + (p[12] - '0');
+                int h = (p[6] == '0' ? day - 30 : day + 1) * 24 + hour - 18;
 
                 // Spaces in the 64 bytes after the timestamp. Only an endpoint of about
                 // 60 bytes or more pushes the name's end past the window.
