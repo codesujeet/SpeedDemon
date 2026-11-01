@@ -418,5 +418,6 @@ int main() {
     if (!f) { perror("/out/aggregates.txt"); return 1; }
     fwrite(out.data(), 1, out.size(), f);
     fclose(f);
+    _exit(0);
     return 0;
 }
