@@ -1,5 +1,43 @@
 # Track B: performance log
 
+## Summary
+
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-47` (commit `748922e`), the last tagged commit with stored board runs. The later tag `best-49` (`218638a`) has no stored board run yet: see the Board runs table below. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-4 is listed from the text of this file.
+
+| Stage | Run ID | Commit | T (s) | M | S | Points |
+|---|---|---|---|---|---|---|
+| Reference (naive) | none (local) |  | 56.35 | 2,200 MB | - | 0 |
+| Steps 1-4 (Rust), earliest board run cited in this file | `run-c4d559ad6869` (not in the log) | `db4cc76` | 0.426 | 362 MiB | 905 | 53.19 |
+| First run in the log | `run-67ca8f767f8d` | `32f54ce` | 0.3209 | 61.0 MiB | 869 | 64.13 |
+| Best row in the log (also final, `best-47`) | `run-09ecd8747b3e` | `748922e` | 0.1203 | 43.4 MiB | 642 | 77.25 |
+
+What moved the score:
+
+1. Read the queries first and intern only their terms; tokenize the corpus once in parallel (steps 1-4): 56 s to 0.426 s on the board (53.19 points).
+2. Probes of the term table in their own loop so cache misses overlap (step 4): 0.97 to 0.84 s locally.
+3. `mmap` of the corpus and queries (step 3): 593 to 349 MB.
+4. Rebuild around 1 MB pieces with bitmaps for frequent terms (steps 6-7): 1,479 to 901 ms locally; memory 274 to 70 MB.
+5. One SIMD pass over the query file (step 9): 734 to 647 ms locally.
+6. Replacement by the ChatGPT-drafted design: 17% faster locally; board 0.1767 s, 72.87 (`run-42bec5c66bdc`) against 0.23-0.34 s on earlier board rows.
+7. Each thread releasing its share of the file after the scan: 0.1737 s to 0.1674 s (`run-d58c749305c7`), small.
+8. Four-slot SIMD buckets and a branch-free `find`: 0.168-0.176 s to 0.152-0.155 s, 75.00 points (`run-1dc829833835`, `run-231e85babe46`), the first real time gain on this track.
+9. Rows `best-40` to `best-47` take B from 0.1549 s to 0.1203 s; the changes are named in the Board runs table below, not separately timed.
+10. B follows its branch mispredicts more than its instruction count (see "What moved B" at the end of this file).
+
+What did not help:
+
+1. Larger term table (8x): 15% slower; 1.5x: no change. Half-size table (below L2): 0.1745 s, no gain.
+2. Branchless merges and AVX2 set operations: answer phase 255 vs 236 ms, slightly worse.
+3. 2 MB pieces: time -17 ms but memory +12 MiB, 65.82 against 65.94 points; reverted.
+4. Prefetch 2 KB ahead in the token scan: 0.1921 s against 0.1708 s (`run-dff88ce2292a`).
+5. A 23% cut in instructions (`cloud-b-scanmin`): 0.1828 s and 0.1725 s, no faster (`run-3beb6ac01111`).
+6. A 128 KB table of hot terms in front of the main table: 0.1988 s, worse (`run-508baa669fca`).
+7. Longer prefetch lag (16): 0.2136 s; lags 2, 4 and 8 equal. Huge pages: no change.
+8. Six threads instead of twelve: 0.1866 s against 0.1678 s.
+9. Staging token positions first (0.1629 s, S 607) and a read-only info row per term (0.1673 s): no gain.
+10. Dropping the id array to save memory: re-tokenizing candidates would cost more than keeping it.
+
+
 Every step from the reference to the current version.
 
 **How to read the numbers.** The T and M columns are local measurements: a

@@ -1,5 +1,44 @@
 # Track A: performance log
 
+## Summary
+
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-47` (commit `748922e`), the last tagged commit with stored board runs. The later tag `best-49` (`218638a`) has no stored board run yet: see the Board runs table below. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The first version of the Rust implementation was scored before the log starts; it is listed from the text of this file.
+
+| Stage | Run ID | Commit | T (s) | M | S | Points |
+|---|---|---|---|---|---|---|
+| Reference (naive) | none (local) |  | 32.05 | 228 MB | 56 code lines | 0 |
+| First version on the board (Rust, steps 1-5) | not recorded (commit `0bbd5d0`; not in the log) | `0bbd5d0` | 0.122 | 79 MB | 537 | 57.68 |
+| First run in the log (Rust) | `run-39a9b4e1b49e` | `32f54ce` | 0.0259 | 23.1 MiB | 508 | 79.88 |
+| Best row in the log (`best-43`, C++) | `run-8f79d074469a` | `8f987f5` | 0.0195 | 19.0 MiB | 318 | 85.32 |
+| Final (`best-47`, C++) | `run-20d4a9f79d87` | `748922e` | 0.0199 | 19.0 MiB | 318 | 85.12 |
+
+What moved the score:
+
+1. Parallel scan of the mapped log with hour-keyed grouping instead of one map per worker (Rust steps 1-5): reference 32 s locally to 0.122 s on the board.
+2. The spec's fixed layout and one 64-byte AVX2 window per line (steps 9-10): 0.155 to 0.130 s and 0.155 to 0.134 s locally.
+3. Each worker appends 4-byte records to its own per-hour lists, no merge across workers (steps 11, 13): 1-CPU run 0.42-0.57 s to 0.28 s; peak 45 to 39 MB.
+4. A lock-free endpoint table instead of `Mutex<HashMap>` (step 18): lock wait had been about a third of the scan.
+5. Giving input pages back from the parse threads (step 19, and in C++ per piece): board 0.0267 s to 0.0220 s (`run-442bba74c314`).
+6. Rewrite as the C++ draft with static link and `_exit(0)`: S 508 to 310 and about 4 MiB less memory at about the same time (`run-ccae47851733`, 81.71).
+7. Prefetch 4 KB ahead in the scan: 0.0228 s to 0.0214 s, single runs (`run-9edb429d5aae`).
+8. Instruction cuts (805 M to 738 M): 0.0267 s to 0.0207-0.0209 s (`run-b20f497b4193`, `run-6fbe7156e8a3`).
+9. Fewer mispredicts (median of three with no branches, tagged four-slot name buckets): simulated 2.89 M to 1.69 M; 0.0199 s, 85.10 (`best-40`, `run-f5770f0edb3d`).
+10. One stretch of chunks per hour, released by one `madvise`: same time, 14 fewer source lines (S 301).
+
+What did not help:
+
+1. A Rust port of the C++ design scored 78.62 and 78.14; the C++ build of the same design 81.7, so the language and build mattered.
+2. `pread` into per-worker buffers instead of the mapping: no gain; 256 KiB, 2 MiB and 4 MiB chunk sizes: no trend.
+3. `MAP_POPULATE` or touching all input pages first: page faults only move, no CPU gain.
+4. Cascading selection for the percentiles: 463 vs 501 ms, noise; an approximate histogram is ruled out by the exact hash.
+5. `-O2` instead of `-O3`: 0.0234 s against 0.0214-0.0218 s (`run-dbba4c78aeb2`).
+6. `-mtune=raptorlake`: 0.0223 s on one reading, no gain.
+7. SIMD partition in `select` (`pdep`/`pext`): 738 M to 701 M instructions but 0.0217 s and 0.0214 s, not faster.
+8. Line ends found per line again (610 M instructions): 0.0213 s and 0.0227 s, not faster.
+9. Branch-free output formatting (fewer instructions and mispredicts): board 0.0314 s against 0.0307 s, so formatting is not on the critical path.
+10. Dropping the input's page table entries after the barrier or after every chunk: more TLB shootdowns, no better total.
+
+
 Every step from the reference to the current version.
 
 **How to read the numbers.** The T and M columns are local measurements: a

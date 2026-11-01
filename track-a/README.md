@@ -1,25 +1,33 @@
 # Track A: Ingest (C++)
 
-The task, the input file and the exact output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/a-ingest.md).
+Reads `/data/requests.log` (one line per request: timestamp, method, endpoint, status, latency) and writes `/out/summary.txt`: for every hour and endpoint, the count, the 50th, 95th and 99th percentile latency and the 5xx rate. The exact task and output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/a-ingest.md). Percentiles are exact (nearest rank), because the output is checked by hash.
 
 ## Approach
 
-One C++20 file, `src/main.cpp`, built with g++ 15 (`-O3 -march=x86-64-v3 -static`) on the allowlisted gcc image. No dependencies. The design was drafted with ChatGPT by the team and then reviewed and measured by us. The earlier Rust version (0.026-0.029 s, S 508-510, about 79 points) is kept at git tag `best-19`.
+One C++20 file, `src/main.cpp`, built with g++ 15 (`-O3 -march=x86-64-v3 -static`) on the allowlisted gcc image. One pool of at most 12 threads (`hardware_concurrency`, capped) does everything in three phases:
 
-One pool of threads does everything in three phases:
+1. **Parse.** The log is memory-mapped over a spare zero page and cut at line ends into 8 pieces per thread, which threads claim in order. A line's hour index comes from the fixed 27-byte timestamp (day and hour digits only, 72 hours). The line ends of each 4 KB are listed first, then the method, endpoint and latency are read with 16- and 32-byte compares. Endpoints are interned in one lock-free 4,096-slot table (CRC32 hash, four slots per bucket compared by 16-bit tag, then the name). Each line files a 4-byte record (13-bit key: 12-bit endpoint id plus the 5xx flag; latency above it) in a 16 KB chunk of its hour. A thread unmaps a piece's input pages as soon as it is parsed.
+2. **Hours.** The last thread to arrive at a barrier ranks the endpoint names in byte order. Threads then claim hours: an hour's latencies are counting-sorted by endpoint rank into scratch and three selections per group give p50, p95 and p99. Each group's numbers are kept together with the exact size its text line will take, since a number's width is known without formatting it. The hour's chunks go back to the system in one `madvise`.
+3. **Text.** The last thread into the next barrier turns the sizes into offsets, sizes the output file and maps it; then every thread formats its hours straight into the file. The process ends with `_exit(0)`.
 
-1. **Parse.** The log is memory-mapped and cut into line-aligned ranges, one per thread. The timestamp is always 27 bytes and the span is fixed at 72 hours, so a line's hour index comes from its day and hour digits alone. One 64-byte scan after the timestamp finds the method's end, the endpoint's end and the line's end. Endpoints are interned in one lock-free table shared by all threads, and each line files a 4-byte record (latency, endpoint id, 5xx flag) under its hour. Between the phases the last thread to arrive sorts the names, so each endpoint id gets its rank in output order.
-2. **Hours.** Threads claim hours in order. An hour's latencies are counting-sorted by endpoint rank into per-thread scratch and three selections per group give the percentiles. Each group's numbers are kept along with the exact size the hour's text will take, since a number's width is known without formatting it.
-3. **Text.** The last thread into the barrier turns the sizes into offsets, sizes the output file and maps it; then every thread formats its hours straight into the file. No write call queues on the file's lock, and the output's pages fill only after the records have been released. The process ends with `_exit(0)` right after the output is complete.
+## Assumptions and known limits
 
-## Assumptions
+Guaranteed by the spec, and relied on:
 
-Facts the spec guarantees: 27-byte timestamps inside a fixed 72-hour span, well-formed lines, and fewer endpoints than the table's slots. The input mapping relies on a zero page after the file for the 64-byte scans.
+- Timestamps are 27 bytes inside a fixed 72-hour span (`2026-10-30T18:00Z` to `2026-11-02T17:59:59Z`); lines are well formed and at least 40 bytes.
+- The method is at most 7 bytes and `" SSS latency"` at most 15 bytes (16-byte compares).
+
+Limits of this implementation, none reachable with the published data (a seed has 1,842 endpoints):
+
+- **Endpoint table: 4,096 slots**, ids are 12 bits. More than 4,096 distinct endpoints would not fit, and the names arena (512 KiB) overflows with `_exit(2)`.
+- Latencies of 2^19 us or more (about 3% of lines) do not fit in a record and go on a per-hour side list with their key.
+- The scans read up to 64 bytes past a line; this relies on the zero page mapped after the file.
+- Behaviour on malformed input is not defined (no checks, to save source lines).
+
+## Dependencies
+
+None.
 
 ## Checks
 
-100 back-to-back full-size runs with the harness flags, all matching the published hash. The first Rust-to-C++ board run (`308cbff`) measured 0.0277 s, 19.3 MiB, S 310.
-
-## Latest version
-
-The current `src/main.cpp` is a second team draft: a branch-free number-width helper, a name compare that checks 64 bytes in two AVX2 steps (94% of lines), and 64 spare bytes after the name arena for the over-read. `_exit(0)` after the output and the static link stay from the first C++ version. 80 back-to-back full-size runs of the draft matched the published hash.
+The first C++ version ran 100 back-to-back full-size runs with the harness flags, all matching the published hash, and the later drafts 80 or more. Each change was also compared against the Rust build on seeds 1, 2, 3 and 7. The earlier Rust version (0.026-0.029 s, S 508-510) is kept at git tag `best-19`. The optimisation history, with run IDs, is in [`PERF.md`](PERF.md).

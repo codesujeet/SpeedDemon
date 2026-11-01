@@ -1,61 +1,36 @@
-# Track B: Index
+# Track B: Index (Rust)
 
-The task, the input files and the exact output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/b-index.md).
+Reads `/data/docs.txt` (one document per line, starting with its numeric id and a tab) and `/data/queries.txt` (boolean and phrase queries) and writes `/out/results.txt`, one answer line per query. The exact task and output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/b-index.md).
 
 ## Approach
 
-**Provenance.** This `src/main.rs` replaced the earlier piece-based version.
-It was drafted with ChatGPT by the project owner and then reviewed and
-tested here (hash checks on four generated full-size datasets, repeated
-runs, the edge-case suite, `cargo clippy -D warnings`); two lines were
-changed to satisfy clippy. The earlier implementation, its unit tests
-(`tests/track_b.rs`, which target that implementation and are no longer
-compiled) and its PERF history are in git history.
+One Rust file, `src/main.rs`, std only (no crates). Built for x86-64-v3 (AVX2) through `.cargo/config.toml`; the term hash also needs the AES instructions. Twelve threads are started once and reused for every parallel phase. The corpus is never indexed in full: only the terms that occur in the queries are looked for.
 
-The queries are read first and only their terms are looked for. Each term
-(at most 32 bytes) is a 32-byte lowercase, zero-padded key in an
-open-addressing table. `docs.txt` is mapped over a spare zero page so a
-32-byte load past any byte of it stays inside the mapping, and it is cut at
-line boundaries into 12 shares, one per thread.
+1. **Read the queries first.** `queries.txt` is tokenized with AVX2 class masks. Upper-case words are operators, lower-case words are terms. Each term (a token of at most 32 bytes, lower-cased) is hashed with three AES rounds and interned in an open-addressing table of 4-slot buckets that live in 32 bytes; one compare settles a hit or a miss with no branch.
+2. **Sample.** `docs.txt` is mapped over a spare zero page and cut at line ends into 12 equal shares. Each thread counts, per query term, the documents holding it in the first 1/64 of its share. A term used in a BOOL query that is in more than 1/32 of the sampled documents becomes a bitmap; each phrase's rarest term (by the sample) becomes its anchor. Terms are then renumbered by role (bitmaps, lists, anchors, terms only phrases read), so a token's role is read off its id.
+3. **Scan.** Each thread tokenizes its share window by window (64 bytes), looks up each token's id with the table slot prefetched four tokens ahead, and per document: sets bits for bitmap terms, files a 16-bit unit (term, document gap) into one of 32 buckets for list terms, and checks every phrase whose anchor is in the document by comparing the neighbouring token ids. Each thread then drops its share of the file from memory. The buckets are scattered into one run of 16-bit document offsets per term and thread.
+4. **Answer.** BOOL queries run strictly left to right on sorted lists and bitmaps (merge, bitmap word operations; lists above 768 documents meet other lists as bitmaps). Phrase answers come from the matches found in the scan. Threads take 64 queries at a time and the output is joined in input order. The process ends with `_exit(0)`.
 
-1. **Sample.** Each thread counts, for every query term, the documents that
-   hold it in the first 1/32 of its share. A BOOL term in more than 1/32 of
-   the documents is kept as a bitmap; each phrase's rarest term (by that
-   sample) becomes its anchor.
-2. **Scan.** Terms are renumbered by role (bitmaps, lists, anchors, terms
-   only phrases read) so a token's role is read off its id. Tokens are found
-   from AVX2 class masks of 64-byte windows, with the hash-table slot of each
-   token prefetched eight tokens ahead. Every phrase is checked wherever its
-   anchor occurs, while the text is in cache, by comparing the neighbouring
-   tokens. A BOOL term in a document sets a bit in a bitmap or files a 16-bit
-   unit under a bucket of its term; a thread's buckets are then scattered
-   into one run of 16-bit document offsets per term.
-3. **Answer.** BOOL queries run strictly left to right on sorted lists and
-   bitmaps (merge, binary search when one list is much longer, word
-   operations for bitmaps); phrase answers come from the matches found in the
-   scan. 64 queries at a time go to each thread, and the output is joined in
-   input order.
+## Assumptions and known limits
 
-Assumptions: a document id is at the start of each line and ids are dense
-and ascending; terms are at most 32 bytes (a longer corpus token never
-matches); at most 32,767 documents per thread share (the full corpus of
-250,000 documents gives about 20,800) and at most 131,072 distinct query
-terms (the public data has about 76,000); both are asserted. The build
-targets x86-64-v3 (AVX2), as `.cargo/config.toml` sets. The thread count is
-fixed at 12. Inputs outside the spec (an empty query file, a corpus of a few
-bytes, more than 393,000 documents) abort instead of answering.
+Within the published data and the spec; these are not checked at run time (nothing asserts, to save source lines), so inputs outside them give wrong output rather than an error.
 
-There are no unit tests for this implementation; it is checked against the
-published hash, generated datasets and the edge-case suite (see `PERF.md`).
+- **Terms are identified by a hash alone.** A term is the 45 bits of its hash that the table keeps (46 bits above the 18 id bits, with the top bit forced to 1), with no comparison of the string. A corpus token whose kept hash bits equal a query term's would be counted as that term, and two query terms with equal bits would be merged. The odds are small (a 45-bit identity against a vocabulary of the order of 10^5 terms) but not zero, and we did not compute them exactly; the output matched the published hash on every full-size run. Tokens longer than 32 bytes never match.
+- **Term ids are 18 bits** (id + 1 below 262,144): at most 262,143 distinct query terms (the public data has about 76,000).
+- **Document offsets are `u16` per thread.** Each thread's share must hold fewer than 65,536 documents (the full corpus of 250,000 documents gives about 20,800 per share), and no term may occur in 65,536 or more documents of one share.
+- **At most 131,072 list terms** (the unit packs the term index divided by 32 into 12 bits).
+- Document ids at the start of each line are dense and ascending, so the id of a line is also its position.
+- The thread count is fixed at 12 and the build assumes AVX2 and AES-NI (the scoring CPU has both).
+- Inputs outside the spec (an empty query file, a corpus of a few bytes) are not handled.
 
 ## Dependencies
 
 None.
 
-## Dependencies
+## Checks
 
-None.
+Output was compared with the previous version on seeds 1, 2, 3 and 7, 40 back-to-back full-size runs matched the published hash for the second draft; the first draft also passed the edge-case suite and `cargo clippy -D warnings`. There are no unit tests for this implementation (`tests/track_b.rs` targets the earlier one and is not compiled). The optimisation history, with run IDs, is in [`PERF.md`](PERF.md).
 
-## Latest version
+## Provenance
 
-The current `src/main.rs` is a second team draft (ChatGPT, reviewed and measured by us): tokens go into an id stream first and phrases are matched from it, lists over 768 documents meet other lists as bitmaps, terms are hashed from the first 16 bytes with the CRC32 instruction (the key comparison tells apart any that collide), and the threads are started once and reused. The process ends with `exit(0)` after the output. Output matched the previous version on seeds 1, 2, 3 and 7, and 40 back-to-back full-size runs matched the published hash.
+This source started as a draft written with ChatGPT by the team, then reviewed, tested and tuned here with Claude Code. The earlier piece-based implementation and its history are in git history.

@@ -1,5 +1,44 @@
 # Track C: performance log
 
+## Summary
+
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-47` (commit `748922e`), the last tagged commit with stored board runs. The later tag `best-49` (`218638a`) has no stored board run yet: see the Board runs table below. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-4 is listed from the text of this file.
+
+| Stage | Run ID | Commit | T (s) | M | S | Points |
+|---|---|---|---|---|---|---|
+| Reference (naive) | none (local) |  | 14.44 | 367 MB | - | 0 |
+| Steps 1-4 (Rust), earliest board run cited in this file | `run-cf24ab5675f5` (not in the log) | `db4cc76` | 0.135 | 141 MiB | 543 | 49.44 |
+| First run in the log (Rust) | `run-6e20c9b0c201` | `32f54ce` | 0.0482 | 9.6 MiB | 542 | 72.30 |
+| Best row in the log (`best-45`, C++) | `run-ce287149e4e9` | `2c4de9a` | 0.0239 | 8.4 MiB | 374 | 81.66 |
+| Final (`best-47`, C++) | `run-c636f7b1f0f0` | `748922e` | 0.0243 | 8.5 MiB | 374 | 81.44 |
+
+What moved the score:
+
+1. Parse straight off the mapped file with per-country ownership and a dense region table (steps 1-4): 14 s to 0.135 s on the board (49.44 points).
+2. One `u64` per record instead of a 36-byte pair (step 5): memory 140 to 47 MB, 0.265 to 0.208 s locally.
+3. A shared lock-free name table and one bit per (country, name) (step 8): memory 49 to 11 MB, about 0.15 to 0.105 s locally.
+4. Batched, prefetched name lookups (step 9): median 0.194 to 0.157 s locally.
+5. Dropping finished pages per chunk and exiting without teardown (steps 13-14): about 85 to 74 ms locally.
+6. C++ draft, static link, `_exit(0)`: S 542 to about 388-400; the second C++ draft 0.0344 s (`run-dbdb4a8194b4`, 76.95) against 0.0426 s for the first.
+7. Releasing consumed input pages in the parse threads: 0.0333 s to 0.0299 s (`run-cdf91eefd7e7`, 78.68).
+8. Removing the quoted-field fast path (57% of the branch mispredicts): 0.0266 s, 80.54, the best at that time.
+9. Instruction cuts (950 M to 784 M): 0.0260 s, then 0.0251 s and 0.0247 s (`run-a29d9f3b42d0`, `run-c0b5c2e66081`, 81.26).
+10. A committed gcc profile (`track-c/pgo/`): about 0.0250 s to 0.0243 s (81.43 at `b774a66`).
+
+What did not help:
+
+1. Two cursors per piece to overlap dependency chains: 0.0282 s, 79.59, inside noise, 11 more lines.
+2. A block-mask pass for the field ends: mispredicts -25% but instructions +33%, cycles unchanged.
+3. Three-stage batches of 16-64 records: cycles +6% to +10%.
+4. Chunked `pread` instead of the mapping: instructions -4% but cycles +9%.
+5. Reading the country at parse time without prefetch: 0.0280 s (`9358419`); the prefetched ring stayed.
+6. Carry-trick quote handling, eight-slot name groups: mispredicts 2.54 M to 0.53 M but instructions 774 M to 920 M; 0.0256 s.
+7. `-mtune=raptorlake`: 0.0246 s, no gain.
+8. A 111-bit name fingerprint: 3-5 ms slower on the board; reverted.
+9. gcc PGO on the first C++ version: no gain then; ring lag 32 instead of 16: 75.61 against 75.7.
+10. A Rust port of the C++ design: 3-5 ms slower than the older Rust code on two board runs.
+
+
 Every step from the reference to the current version.
 
 **How to read the numbers.** The T and M columns are local measurements: a

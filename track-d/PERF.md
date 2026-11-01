@@ -1,5 +1,44 @@
 # Track D: performance log
 
+## Summary
+
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-47` (commit `748922e`), the last tagged commit with stored board runs. The later tag `best-49` (`218638a`) has no stored board run yet: see the Board runs table below. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-8 is listed from the text of this file. Source size S is 518 on every D row from the replacement draft on (0.166-0.198 s across 98 rows), so that spread is mostly board noise rather than D code changes.
+
+| Stage | Run ID | Commit | T (s) | M | S | Points |
+|---|---|---|---|---|---|---|
+| Reference (naive) | none (local) |  | 72.69 | 893 MB | 43 lines | 0 |
+| Steps 1-8 (Rust), earliest board run cited in this file | `run-890f67017a83` (not in the log) | `db4cc76` | 0.475 | 382 MiB | 736 | 48.85 |
+| First run in the log | `run-0a5e5f081b09` | `32f54ce` | 0.2308 | 94.3 MiB | 680 | 63.02 |
+| Best row in the log | `run-1e5e115c0722` | `2a7cc01` | 0.1662 | 66.1 MiB | 518 | 69.02 |
+| Final (`best-47`) | `run-cd014768facf` | `748922e` | 0.1725 | 65.8 MiB | 518 | 68.63 |
+
+What moved the score:
+
+1. Bidirectional Dijkstra over forward and reverse CSR with a 4-ary heap (step 1), the base of everything else.
+2. Relabelling nodes in BFS order (step 2): query phase 2.4 to 0.83 s locally.
+3. Expanding the side with the smaller queue (step 3): 3.93 to 2.58 s, three times fewer heap pops.
+4. Parallel line-aligned parse (step 4): 2.35 to 1.49 s locally.
+5. Filing edges under their owner worker before building the CSR (steps 8, 13): forward CSR 153 to 74 ms; no atomics in the build.
+6. `u32` labels instead of `u64` (step 9): 384 to 261 MB and 1.04 to 0.89 s.
+7. Radix heap (step 12): single-worker query phase 2,100 to about 1,100 ms (the current source uses 4-ary heaps again).
+8. Paged distance labels (step 14): 12 query workers instead of 6, 829 to 595 ms locally.
+9. Replacement by the ChatGPT-drafted design: 321 against 455 ms and 67.2 against 93.7 MiB locally; board from about 0.23 s and S 680 to about 0.17 s and S 518.
+10. Word-at-a-time digit reader and prefetching in the ordering (step 18): the original-id CSR phase 112 to 82 ms; ordering 85 to 72 ms.
+
+What did not help:
+
+1. Queries in source order with chained regions: no change in the query phase.
+2. Each worker scanning the whole edge stream: 150-165 ms against 100-170 ms for filing, worse.
+3. Hash labels instead of arrays: 300-370 ms against 245-285 ms for the query phase.
+4. Atomic row cursors for the original-id CSR: 60-75 ms for placement because locked instructions serialise cache misses.
+5. Packing the heap entry into one `u64`: 430 against 436 ms, about 2-3%, for 8 lines and an assert.
+6. Dropping the sweep-clear of labels: peak memory unchanged and slightly slower.
+7. Label page size 8, 16, 32 or 64: no difference within noise.
+8. The first version of interleaved labels: 14% slower (about 7% after the sweep-clear).
+9. A deeper prefetch variant in the ordering (12 rows ahead): equal minimum, not kept for its extra lines.
+10. Twelve query workers with array labels: about 20% faster queries but 84 MB more, so 6 stayed until paged labels.
+
+
 Every step from the reference to the current version.
 
 **How to read the numbers.** The T and M columns are local measurements: a
