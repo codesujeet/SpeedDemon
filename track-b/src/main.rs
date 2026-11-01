@@ -152,17 +152,17 @@ unsafe fn classes(p: *const u8) -> (u64, u64) {
     (w0 | w1 << 32, n0 | n1 << 32)
 }
 
-unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u16) -> *const u8 {
+// The tokens of one document, from its TAB: each is hashed and its bucket prefetched, and LAG tokens later its id
+// is looked up and handed to `act` with the token's first byte.
+unsafe fn tokens(mut p: *const u8, t: &Terms, pre: *const u16, mut act: impl FnMut(u32, *const u8)) -> *const u8 {
     const LAG: usize = 4;
-    let mut ring = [0u64; LAG];
-    let (mut n, mut out, mask) = (0usize, ids.len(), t.slot.len() - 1);
+    let mut ring = [(0u64, p); LAG];
+    let (mut n, mask) = (0usize, t.slot.len() - 1);
     loop {
-        (ids.set_len(out), ids.reserve(32 + LAG));
-        let buf = ids.as_mut_ptr();
-        let mut look = |&h: &u64| {
+        let mut look = |&(h, q): &(u64, *const u8)| {
             let id = t.find(h);
             _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
-            (*buf.add(out), out) = (id, out + 1);
+            act(id, q);
         };
         let mut push = |q: *const u8, len: u32| {
             let h = if len <= 32 { hash(q, len as usize) } else { 1 << 63 };
@@ -170,7 +170,7 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
             if n >= LAG {
                 look(&ring[n % LAG]);
             }
-            (ring[n % LAG], n) = (h, n + 1);
+            (ring[n % LAG], n) = ((h, q), n + 1);
         };
         _mm_prefetch::<_MM_HINT_T0>(p.wrapping_add(2048).cast());
         let (word, nl) = classes(p);
@@ -192,7 +192,6 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         }
         if nl != 0 {
             (n.saturating_sub(LAG)..n).for_each(|i| look(&ring[i % LAG]));
-            ids.set_len(out);
             return p.add(stop as usize + 1);
         }
         p = p.add(next);
@@ -324,20 +323,53 @@ fn line(out: &mut String, docs: &Docs) {
     out.push('\n');
 }
 
-fn walk(s: &[u8], first: u32, t: &Terms, pre: *const u16, mut f: impl FnMut(u32, &[u32])) -> u32 {
+fn walk(s: &[u8], first: u32, mut f: impl FnMut(u32, *const u8) -> *const u8) -> u32 {
     let (mut p, end) = (s.as_ptr(), s.as_ptr_range().end);
-    let (mut doc, mut ids) = (first, Vec::with_capacity(1 << 12));
+    let mut doc = first;
     while p < end {
         unsafe {
             while *p != b'\t' {
                 p = p.add(1);
             }
-            ids.clear();
-            p = tokens(p, t, &mut ids, pre);
         }
-        (f(doc, &ids), doc += 1);
+        (p, doc) = (f(doc, p), doc + 1);
     }
     doc - first
+}
+
+// Whether the phrase whose term hashes are `hs` starts j tokens before the token at q, in the document whose
+// text starts at lo: the tokens are found again in the text, so no list of a document's ids is kept.
+unsafe fn phrase_at(q: *const u8, lo: *const u8, j: usize, hs: &[u64]) -> bool {
+    let word = |p: *const u8| (*p).is_ascii_alphanumeric();
+    let mut s = q;
+    for _ in 0..j {
+        while s > lo && !word(s.sub(1)) {
+            s = s.sub(1);
+        }
+        if s == lo {
+            return false;
+        }
+        while s > lo && word(s.sub(1)) {
+            s = s.sub(1);
+        }
+    }
+    for &h in hs {
+        while !word(s) {
+            if *s == b'\n' {
+                return false;
+            }
+            s = s.add(1);
+        }
+        let start = s;
+        while word(s) {
+            s = s.add(1);
+        }
+        let len = s.offset_from(start) as usize;
+        if (if len <= 32 { hash(start, len) } else { 1 << 63 }) != h {
+            return false;
+        }
+    }
+    true
 }
 
 struct Units {
@@ -360,14 +392,14 @@ fn main() {
     let qtext = map("/data/queries.txt");
     let slot = vec![unsafe { _mm256_setzero_si256() }; (qtext.len() / 32).next_power_of_two()];
     let mut terms = Terms { slot, n: 0 };
-    let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
+    let (mut spans, mut ids, mut ops, mut hashes) = (vec![], vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
         let (phrase, from) = (q[0] == b'P', ids.len() as u32);
         let start = if phrase { 8 } else { 5 };
         for (k, word) in q[start..q.len() - phrase as usize].split(|&b| b == b' ').enumerate() {
             match !phrase && k % 2 == 1 {
                 true => *ops.last_mut().unwrap() = word[0],
-                false => (ids.push(terms.insert(word)), ops.push(0)).1,
+                false => (ids.push(terms.insert(word)), hashes.push(unsafe { hash(word.as_ptr(), word.len()) }), ops.push(0)).2,
             }
         }
         spans.push((phrase, from, ids.len() as u32));
@@ -396,13 +428,14 @@ fn main() {
         let samples = on_threads(|t| {
             let (mut df, mut last) = (vec![0u32; nterms + 1], vec![0u16; nterms + 1]);
             let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 64];
-            let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
+            let pre = last.as_ptr();
+            let n = walk(sample, 0, |doc, p| unsafe {
                 let mark = (doc + 1) as u16;
-                for &id in toks {
+                tokens(p, &terms, pre, |id, _| {
                     if std::mem::replace(&mut last[id as usize], mark) != mark {
                         df[id as usize] += 1;
                     }
-                }
+                })
             });
             (n as usize, df)
         });
@@ -446,9 +479,11 @@ fn main() {
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
-        let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
-        let (mut mine, mut kept, mut anchors) = (vec![], vec![0; 1 << 12], vec![0; 1 << 12]);
-        let mut buckets: Vec<Units> = (0..BUCKETS).map(|_| Units { v: Vec::with_capacity(1 << 15), prev: 0 }).collect();
+        // Dedup marks and counts cover the list terms; ids past them share eight scratch slots.
+        let (mut count, mut last) = (vec![0u16; lists + 8], vec![0u16; lists + 8]);
+        let mut mine = vec![];
+        // The bucket past the last takes the units of tokens that are not new list terms; it is emptied per document.
+        let mut buckets: Vec<Units> = (0..=BUCKETS).map(|_| Units { v: Vec::with_capacity(1 << 15), prev: 0 }).collect();
         let first = firsts[t];
         let (mut pending, mut block) = (vec![0u64; nbits + 1], first as usize / 64);
         let flush = |pending: &mut [u64], w: usize| {
@@ -458,47 +493,39 @@ fn main() {
                 }
             }
         };
-        let (share, pre) = (&text[cut[t]..cut[t + 1]], last.as_ptr());
-        walk(share, first, &terms, pre, |doc, toks| {
+        let pre = last.as_ptr();
+        walk(&text[cut[t]..cut[t + 1]], first, |doc, p| unsafe {
             if doc as usize / 64 != block {
                 let w = std::mem::replace(&mut block, doc as usize / 64);
                 flush(&mut pending, w);
             }
-            let (mark, bit) = ((doc - first + 1) as u16, 1u64 << (doc % 64));
-            let (nkeep, a0, nbits, lists, off) = (nkeep, a0, nbits, lists, doc - first);
-            let (last, pending) = (&mut last[..=nkeep], &mut pending[..=nbits]);
-            kept.resize(kept.len().max(toks.len()), 0);
-            anchors.resize(anchors.len().max(toks.len()), 0);
-            let (mut n, mut na) = (0, 0);
-            for (at, &id) in toks.iter().enumerate() {
-                let i = (id as usize).min(nkeep);
-                unsafe {
-                    *anchors.get_unchecked_mut(na) = at;
-                    na += (i.wrapping_sub(a0) < nkeep - a0) as usize;
-                    let new = std::mem::replace(last.get_unchecked_mut(i), mark) != mark;
-                    *pending.get_unchecked_mut(i.min(nbits)) |= (i < nbits) as u64 * bit;
-                    *kept.get_unchecked_mut(n) = i as u32;
-                    n += (new & (i.wrapping_sub(nbits) < lists - nbits)) as usize;
-                }
-            }
-            for &at in &anchors[..na] {
-                let k = (toks[at] as usize).min(nkeep) - a0;
-                for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
-                    let span = spans[q as usize];
-                    let phrase = &ids[span.1 as usize..span.2 as usize];
-                    let s = at.wrapping_sub(j as usize);
-                    if toks.get(s..s.wrapping_add(phrase.len())) == Some(phrase) {
-                        mine.push((q, doc));
+            let (mark, bit, off, lo) = ((doc - first + 1) as u16, 1u64 << (doc % 64), doc - first, p.add(1));
+            buckets[BUCKETS].v.clear();
+            tokens(p, &terms, pre, |id, q| {
+                let i = id as usize;
+                // A bitmap term ORs its bit; any other token ORs nothing into the spare word.
+                *pending.get_unchecked_mut(i.min(nbits)) |= (i < nbits) as u64 * bit;
+                // A list term's first time in the document adds a unit; other tokens write to scratch.
+                let list = i.wrapping_sub(nbits) < lists - nbits;
+                let at = std::hint::select_unpredictable(list, i, lists + (i & 7));
+                let new = std::mem::replace(last.get_unchecked_mut(at), mark) != mark;
+                *count.get_unchecked_mut(at) += new as u16;
+                let b = std::hint::select_unpredictable(list & new, i % BUCKETS, BUCKETS);
+                buckets.get_unchecked_mut(b).add((i / BUCKETS) as u32, off);
+                // An anchor checks its phrases on the text around it.
+                if i.wrapping_sub(a0) < nkeep - a0 {
+                    for &(_, qy, j) in &anchored[astart[i - a0]..astart[i - a0 + 1]] {
+                        let span = spans[qy as usize];
+                        if phrase_at(q, lo, j as usize, &hashes[span.1 as usize..span.2 as usize]) {
+                            mine.push((qy, doc));
+                        }
                     }
                 }
-            }
-            for &i in &kept[..n] {
-                buckets[i as usize % BUCKETS].add(i / BUCKETS as u32, off);
-                count[i as usize] += 1;
-            }
+            })
         });
         flush(&mut pending, block);
         found.lock().unwrap().extend(mine);
+        buckets.pop();
         (count, Mutex::new(buckets))
     });
     drop(terms);
