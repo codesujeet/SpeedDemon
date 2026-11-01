@@ -279,5 +279,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `b34456e` | Log board run for C's quoted-field fast path (first reading 79.02) | `run-244eaf532b0a` | 0.1812 | 66.1 | 518 | 68.08 |
 | `351b645` | Track C: parse the two halves of each piece in turn, so two dependent chains overlap | `run-be717613a0c2` | 0.1724 | 65.8 | 518 | 68.63 |
 | `800e1ce` | Revert "Track C: quoted fields that close within 31 bytes on a lone quote skip the 64-byte | `run-e82b33fd3b81` | 0.1773 | 65.9 | 518 | 68.33 |
+| `09cbdd1` | Track A: list a batch's line ends first, then parse each line from its known start (from c | `run-b249542c6d59` | 0.1705 | 65.8 | 518 | 68.76 |
+| `c9da3b2` | PERF: C block-mask field-end pass (tried, not kept), with laptop counters | `run-12e0181dc9f9` | 0.1680 | 66.2 | 518 | 68.89 |
+| `eee525f` | Track B: user-drafted lookup that identifies a term by its 64-bit hash (46-bit tag), no ke | `run-1231a3a2bc8d` | 0.1729 | 65.8 | 518 | 68.61 |
 
 <!-- board-runs:end -->
