@@ -6,7 +6,6 @@
 //! per-term lists; the BOOL queries then run on sorted lists or bitmaps.
 use std::arch::x86_64::*;
 use std::borrow::Cow;
-use std::fmt::Write;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Barrier, Mutex, OnceLock};
@@ -208,6 +207,18 @@ fn has(bits: &[u64], d: u32) -> bool {
     bits[d as usize / 64] >> (d % 64) & 1 != 0
 }
 
+// The ids of v for which f holds, in order. Every id is written and the end moves by f's result, so
+// keeping or dropping one is not a branch (Vec::retain's was, and it mispredicted on mixed results).
+fn keep<'a>(mut v: Vec<u32>, mut f: impl FnMut(u32) -> bool) -> Docs<'a> {
+    let mut k = 0;
+    for i in 0..v.len() {
+        let d = v[i];
+        (v[k], k) = (d, k + f(d) as usize);
+    }
+    v.truncate(k);
+    Docs::List(v)
+}
+
 fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
     use Docs::*;
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
@@ -222,9 +233,7 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
             }
             Bits(a)
         }
-        (Bits(b), b'A', List(mut v)) | (List(mut v), b'A' | b'N', Bits(b)) => {
-            (v.retain(|&d| has(&b, d) == (op == b'A')), List(v)).1
-        }
+        (Bits(b), b'A', List(v)) | (List(v), b'A' | b'N', Bits(b)) => keep(v, |d| has(&b, d) == (op == b'A')),
         (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
             let x = a.to_mut();
             for (w, m) in b.into_iter().map(bit) {
@@ -232,13 +241,12 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
             }
             Bits(a)
         }
-        (List(mut a), b'A' | b'N', List(b)) if a.len() * 16 < b.len() => {
+        (List(a), b'A' | b'N', List(b)) if a.len() * 16 < b.len() => {
             let mut j = 0;
-            a.retain(|&d| {
+            keep(a, |d| {
                 j += b[j..].partition_point(|&x| x < d);
                 (j < b.len() && b[j] == d) == (op == b'A')
-            });
-            List(a)
+            })
         }
         (List(a), _, List(b)) if a.len() + b.len() > if op == b'O' { 2048 } else { BIG } => {
             let mut bits = vec![0u64; words];
@@ -298,21 +306,34 @@ unsafe fn bit_sums(b: &[u64]) -> (u64, u64) {
     (total(0), sum)
 }
 
+// Appends x in decimal, after a space unless it starts the line (core::fmt costs indirect calls per number).
+fn put(out: &mut String, mut x: u64, space: bool) {
+    let (mut b, mut i) = ([b' '; 21], 21);
+    loop {
+        i -= 1;
+        (b[i], x) = (b'0' + (x % 10) as u8, x / 10);
+        if x == 0 {
+            break;
+        }
+    }
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&b[i - space as usize..]) });
+}
+
 fn line(out: &mut String, docs: &Docs) {
     match docs {
         Docs::List(v) => {
             let sum: u64 = v.iter().map(|&d| d as u64).sum();
-            write!(out, "{} {sum}", v.len()).unwrap();
-            v.iter().take(10).for_each(|d| write!(out, " {d}").unwrap());
+            (put(out, v.len() as u64, false), put(out, sum, true));
+            v.iter().take(10).for_each(|&d| put(out, d as u64, true));
         }
         Docs::Bits(b) => {
             let (count, sum) = unsafe { bit_sums(b) };
-            write!(out, "{count} {sum}").unwrap();
+            (put(out, count, false), put(out, sum, true));
             let mut rem = 10;
             for (w, &x) in b.iter().enumerate() {
                 let mut m = x;
                 while m != 0 && rem > 0 {
-                    write!(out, " {}", w as u32 * 64 + m.trailing_zeros()).unwrap();
+                    put(out, w as u64 * 64 + m.trailing_zeros() as u64, true);
                     (m, rem) = (m & (m - 1), rem - 1);
                 }
                 if rem == 0 {
