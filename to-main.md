@@ -331,3 +331,10 @@ Also measured: all builds do ~435-445 munmaps on the full data (384 are the unit
 - 1: cloud-b-huge-state (42bcc5d) -- all twelve threads' last/count arrays in one 2 MB-page region during the scan, unmapped right after the seg sums. +15 lines. CAUTION: VM peak 43.0-43.5 MiB vs 41.4-41.9 for combo-huge (+1.6 MiB: the huge pages are charged whole as soon as any part is touched, while count used to be only partly touched). Only keep it if the time gain beats about 0.15 points of memory.
 - All three: native hashes for seeds 1/2/3/7, tiny and sample match. The huge-state branch carries the same helper and THP on/off lines as cloud-b-huge-bits (written identically, so they should merge). VM wall: none of the three resolvable from noise.
 Next: the same family for A (name table, arena, per-hour chunks, exit and first-touch) and C, measuring memory with care since it counts there.
+
+## 17:40 UTC one-slot option: cloud-b-page-combo (a1f2a06)
+
+- = combo-huge (dbe709f) + huge-bits + exit-release + docs-prefault (huge-state left out for its memory). Only conflict: the start of main.
+- Checked: real image + board flags, 4 seeds (seed 1 x3); tiny, sample; a 12-byte corpus; phrase fuzz 0 differences. Lines 652 (+32 over combo-huge). VM peak 41.3-41.7 MiB.
+- If you want to save slots, one reading of this tells whether the page-level family has more in it; if it gains, the single branches can say which part.
+- On A and C: I looked for the same family and do not see a strong lever. A's records live in 72 per-hour stretches (huge pages there would charge whole 2 MB pages per hour; your THP test read 168.7 MiB), its name table and arena are small (32 KB slots, ~55 KB of names), and the ~6 ms "other" looks like many sub-millisecond items (corpus faults, first touch of records and output, thread start, exit). C you are already testing. Tell me if you want something specific there.
