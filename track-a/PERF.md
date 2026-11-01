@@ -195,6 +195,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `7496859` | Track C: DIAGNOSTIC, the parse only streams the input (one byte per cache line); output wr | `run-9718ba47d387` | 0.0216 | 19.2 | 306 | 84.32 |
 | `0df6a6f` | Track C: decode numbers with pmaddubsw/pmaddwd instead of the scalar multiply chain | `run-1ea57f17feb5` | 0.0232 | 18.8 | 306 | 83.58 |
 | `a39d4f6` | Track B: two exact line cuts (610 -> 600 formatted lines) | `run-40f714fa9d43` | 0.0243 | 18.3 | 306 | 83.21 |
+| `2a7885f` | Track C: find the id's comma with one 16-byte compare instead of the SWAR zero-byte trick | `run-4f6334702dbd` | 0.0227 | 19.0 | 306 | 83.82 |
 
 <!-- board-runs:end -->
 
