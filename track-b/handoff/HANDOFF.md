@@ -78,3 +78,8 @@ Not yet implemented:
 - Track A: track-a/plan/A.md, A_armL.patch and A_armP.patch. The A agent was implementing cloud-a-parsecuts,
   cloud-a-hourchunks and cloud-a-droplist against the new A base (86570b0 + 68912bc). Check origin for those branches;
   any half-finished state is in scratchpad plan/A_context_*.md, which may be lost.
+- Track A pushed (callgrind on the gcc 15 image, hash 495ca096 on 3 Docker runs; seeds 2/3/7 not checked; base 41d7902 = 699.97 M, 340 lines):
+  cloud-a-parsecuts d5df850: -4.5% instructions, +4 lines. Also fixes a base crash: the piece cut reads log[-1] on tiny logs at 8+ threads.
+  cloud-a-hourchunks 9ca493d: +0.3% instructions, -14 lines, peak about the same. Its commit message wrongly says a one-line log
+  at 12 threads "still crashes as on the base". Not corrected yet.
+  cloud-a-droplist bb0136d (stacked): -12.9% instructions vs base, -19 lines overall. Needs a board A/B; the line-chain risk is back.
