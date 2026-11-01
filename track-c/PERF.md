@@ -132,5 +132,23 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `2ca5698` | Track C: back to the 36f4296 source and profile (the wider fingerprint cost 3-5 ms on the  | `run-5a68bdb4e25e` | 0.0456 | 10.3 | 542 | 72.58 |
 | `b1497a5` | Track B: 2 MB pieces (agent-b c51c3b0) | `run-60441c945919` | 0.0475 | 10.3 | 542 | 72.15 |
 | `f00df83` | Revert Track B 2 MB pieces: T -17 ms but M +12 MiB, 65.82 vs 65.94 on the board | `run-9e0e1b6e7e0d` | 0.0412 | 9.9 | 542 | 73.85 |
+| `b18c263` | PERF: board run IDs through f00df83 (16 scored runs per track) | `run-e43c88ad604a` | 0.0441 | 10.2 | 542 | 73.01 |
+| `44a450f` | Track A: mallopt M_MMAP_THRESHOLD 32 KiB, memory.peak 23.0 -> 20.4 MiB locally (agent-a4 c | `run-2a4dc94fe230` | 0.0441 | 9.6 | 542 | 73.24 |
+| `b7bb4d3` | Track A: PGO profile regenerated for the mallopt source (agent-a4 90f380c) | `run-7b8524f7d03b` | 0.0496 | 10.7 | 542 | 71.50 |
+| `4c454fe` | Track A: three-phase port with exact output sizes, every thread formats into the mapped ou | `run-7f58a28208fd` | 0.0466 | 9.8 | 542 | 72.57 |
+| `5476630` | Re-run board on the Track A port (noise check) | `run-ec0db9e60380` | 0.0467 | 10.1 | 542 | 72.40 |
+| `6c9bc1e` | Tracks B and D: user-drafted Rust solutions, reviewed (alt-bd c90b4a8): B 603 lines, D 509 | `run-5c2863a259b0` | 0.0466 | 10.0 | 542 | 72.49 |
+| `f47d313` | Track C: user-drafted C++ design ported to Rust, CRLF chunk cut, 440 lines (agent-c3 7827d | `run-106ee1a91ed4` | 0.0496 | 10.5 | 450 | 72.21 |
+| `c4832fa` | Re-run board on the Track C port (noise check) | `run-a60a1eb28170` | 0.0490 | 10.5 | 450 | 72.33 |
+| `4f9e4bd` | Track D: PAGE 512 -> 256 (experiment) | `run-75bba5fbcfd2` | 0.0439 | 9.7 | 542 | 73.24 |
+| `7a3ceb9` | Track D: BLOB 512 -> 1024 (experiment) | `run-aca9f8ea97a4` | 0.0432 | 9.9 | 542 | 73.32 |
+| `0b9abd0` | Track D: BLOB back to 512, CHUNK 1024 -> 4096 (experiment) | `run-8a75e21840d3` | 0.0470 | 10.3 | 542 | 72.22 |
+| `1a4d82e` | Track D: PAGE 256 -> 128 (experiment) | `run-6883394a1804` | 0.0461 | 10.5 | 542 | 72.37 |
+| `a2fa18e` | Track B: persistent thread pool instead of 12 fresh threads per phase (experiment) | `run-3ab736b0b449` | 0.0460 | 10.6 | 542 | 72.34 |
+| `b573d30` | Track C: C++ (gcc 15, user-drafted design: pclmul quote mask, dense-id name table); Rust v | `run-e44b534c42b7` | 0.0426 | 10.6 | 388 | 74.28 |
 
 <!-- board-runs:end -->
+
+## Language switch to C++
+
+The Rust version (0.0412-0.0496 s, S 542) was replaced by a C++ build of the team's own ChatGPT-drafted design (commit `b573d30`). Local interleaved runs showed it about 10% faster (median 85 ms against 94.5 ms); the first board run measured 0.0426 s, 10.6 MiB, S 388. The gain on the board is mostly the smaller source: time was within the Rust version's noise. A Rust port of the same design (commits 7827d83 and f47d313) was 3-5 ms slower than the older Rust code on two board runs, so the speed comes from the C++ build, not only the design. gcc PGO: no gain locally, dropped.
