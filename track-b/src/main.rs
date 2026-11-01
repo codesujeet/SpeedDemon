@@ -356,7 +356,7 @@ impl Units {
 fn main() {
     unsafe { (mallopt(-3, 1 << 16), prctl(41, 1u64, 0u64, 0u64, 0u64)) };
     let qtext = map("/data/queries.txt");
-    let slot = vec![0; (qtext.len() / 8).next_power_of_two()];
+    let slot = vec![0; (qtext.len() / 16).next_power_of_two()];
     let mut terms = Terms { slot, n: 0 };
     let (mut spans, mut ids, mut ops) = (vec![], vec![], vec![]);
     for q in qtext.split(|&b| b == b'\n').filter(|q| !q.is_empty()) {
@@ -442,22 +442,6 @@ fn main() {
 
     let words = ndocs.div_ceil(256) * 4;
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
-    // DIAGNOSTIC: one extra pass that classifies and hashes every token with no table lookup.
-    on_threads(|t| unsafe {
-        let share = &text[cut[t]..cut[t + 1]];
-        let (mut p, end, mut x) = (share.as_ptr(), share.as_ptr_range().end, 0u64);
-        while p < end {
-            let mut m = classes(p).0;
-            while m != 0 {
-                let s = m.trailing_zeros();
-                let len = (!(m >> s)).trailing_zeros().min(32);
-                m &= m.wrapping_add(m & m.wrapping_neg());
-                x ^= hash(p.add(s as usize), len as usize);
-            }
-            p = p.add(64);
-        }
-        std::hint::black_box(x);
-    });
     let found = Mutex::new(vec![]);
     let scans = on_threads(|t| {
         let (mut count, mut last) = (vec![0u16; nkeep + 1], vec![0u16; nkeep + 1]);
