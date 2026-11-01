@@ -66,3 +66,7 @@ All against `origin/speed-demon` 79d68e7, real data, hash `f86973c2...`, output 
 Notes from the work:
 - A pre-existing sharp edge, not changed: the term table is sized from the query file's byte length (`len / 8` slots). A small query file with many distinct short terms can fill it and `Terms::insert` then loops forever (my first fuzz file hung this way). The real data has a 29% load; the spec's tiny scale has the same ratio. Not a risk for the board.
 - The parse change is serial CPU work (9.2 -> 6.7 ms), so unlike the prefetch it should carry over to the board nearly 1:1. Together the branch is worth about 2% of B, below B's +-5% run-to-run board noise.
+
+## B memory timeline and the bitmap cutoff (negative)
+Anonymous memory, MiB, 4 CPUs, `cloud-b-combo`: queries parsed 5.9, sample done 9.6, scan done 38.9 (postings buffers in `Units` about 22, bitmaps about 11.8 = 377 terms x 31 KB, per-thread `count`/`last` about 3.3, term tables about 4.4), postings done 39.0 (the `Units` chunks are freed as the 20 MB `post` fills), answers done 41.1. The board's 47-48 MiB is that plus about 6 MiB of kernel and page-table memory.
+The cutoff for keeping a term as a bitmap (`df * 32 <= sampled` makes it a list) was tried at 16 and 8, and the opposite direction at 64: cutoff 64 adds about 4-5 MiB; cutoff 16 leaves the peak unchanged (52.4 vs 52.2 MiB median of 7) and costs +9% wall; cutoff 8 raises the peak to 55.3 MiB and costs +13% wall. The existing 1/32 is at the optimum. Rejected.
