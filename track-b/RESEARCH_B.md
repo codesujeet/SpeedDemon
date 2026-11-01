@@ -70,3 +70,15 @@ Notes from the work:
 ## B memory timeline and the bitmap cutoff (negative)
 Anonymous memory, MiB, 4 CPUs, `cloud-b-combo`: queries parsed 5.9, sample done 9.6, scan done 38.9 (postings buffers in `Units` about 22, bitmaps about 11.8 = 377 terms x 31 KB, per-thread `count`/`last` about 3.3, term tables about 4.4), postings done 39.0 (the `Units` chunks are freed as the 20 MB `post` fills), answers done 41.1. The board's 47-48 MiB is that plus about 6 MiB of kernel and page-table memory.
 The cutoff for keeping a term as a bitmap (`df * 32 <= sampled` makes it a list) was tried at 16 and 8, and the opposite direction at 64: cutoff 64 adds about 4-5 MiB; cutoff 16 leaves the peak unchanged (52.4 vs 52.2 MiB median of 7) and costs +9% wall; cutoff 8 raises the peak to 55.3 MiB and costs +13% wall. The existing 1/32 is at the optimum. Rejected.
+
+## Real-time breakdown of B's answers phase (valid: thread 0 alone, TSC, `speed-demon` 4ba1710)
+Method note: timing the answers with all 12 threads on one CPU is wrong (each thread's timestamp deltas include the other threads' time); only thread 0 may work while the others return. Total about 355 M cycles, about 16% of B's CPU (the board measured the phase at 25 ms of 167).
+
+| Part | Mcycles | Share |
+|---|---|---|
+| `apply` (55,769 calls, about 3.3 k cycles each) | 183-191 | 52% |
+| `docs()` building lists (first term 30, later terms 52) | 82 | 23% |
+| `line()` formatting results | 65 | 18% |
+| phrase sets | 5 | 1.5% |
+
+`apply` by arm: list OR list 39.1 (12,595 calls), bitmap AND list 38.9 (10,477), list to bitmap build 30.2 (10,091), list merge 26.6 (14,971), bitmap set from list 20.2 (6,180), binary-search AND/NOT 10.8 (7,755), list NOT bitmap 9.4 (3,029), bitmap-bitmap 4.8 (762). Flat: no arm above 21% of `apply`, and the whole phase is 16% of B, so a 25% speed-up of everything in it is about 4% of B (+0.4 pts). Not attempted.
