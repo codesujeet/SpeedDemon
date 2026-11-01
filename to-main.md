@@ -99,3 +99,27 @@ Track C (cloud-c-diag-parse 6dc01a8, cloud-c-diag-regions 2b68de3, cloud-c-diag-
 - Set-up apart from the parse, as I read your request: T(head) - delta(parse) is roughly everything else (mmap, populate, release, exit); delta(regions) and delta(threads) split two of its pieces. If you wanted a literal "populate twice", it is meaningless (second populate hits resident pages), so I did not build it.
 
 Next: B #2 (count and last in one u32 array) on top of the current speed-demon, as its own branch.
+
+## 2026-11-01 18:40 UTC three B branches on aafa498: countlast, masks, info; plus a bug note and a fuzz fix
+
+All three based on aafa498 (buckets kept). Real Dockerfile, `docker build --network=none`, board flags, seeds 1 (x3), 2, 3, 7: all hashes match for each. VM numbers (4-vCPU Xeon, not the board) are one run of 21 interleaved wall runs and one callgrind pass on a 30 MB corpus prefix; the VM has not predicted the board for B so far, so treat them as sanity checks only. Board timing not measured for any of these.
+
+### cloud-b-masks (af446d2): ported from scanmin, the straddle test per token is gone
+- Token starts and ends come from two masks; ends excludes bit 63, so a token reaching the window's last byte has no end and its start is the left-over where the next window begins. One `push` closure for both paths. Lines 579 -> 575 (-4). Instructions -1.7% (1025.4 M -> 1008.4 M), simulated mispredicts -0.7%, wall median 338.0 -> 328.6 ms (inside noise). Expect a small effect; it is the branch your note asked for, and it is also fewer lines.
+
+### cloud-b-info (f7223da): ported from scancore, read-only info table
+- find() returns NONE (u32::MAX) on a miss, one u16 per term says which pending word to OR and whether the term is anchor and list; per-token dedup moved to the kept-list loop. Lines 579 -> 583 (+4). Instructions -6.0% (1025.4 M -> 964.1 M); simulated mispredicts +6.2% (3.82 M -> 4.05 M); wall 309.7 -> 312.2 ms (no difference). So it repeats scanmin's pattern on the VM: fewer instructions, same time. Only the board can say if the shorter closure helps now that find() is cheaper. Independent of cloud-b-masks (touches different lines); they should merge together without conflict, but I have not built the combination (one idea per branch).
+
+### cloud-b-countlast (3b60c85): B #2, mark and count in one u32 per term
+- Lines 579 -> 587 (+8). Instructions +2.2%, simulated mispredicts +4.1%, wall 319.7 -> 322.5 ms (no difference). The idea only pays if the second cache line per list token was a real stall; the VM cannot show it. Mixed expectation, mild: I would put it last in the queue. Note: it changes pre to *const u32, so it conflicts with cloud-b-info in tokens()/the sample pass; they are alternatives for the same arrays, not additive without a rebase.
+
+### cloud-b-tokloop (45b5a50, base 4423afa): already posted, measured slower on the VM (+11.5%); skip.
+
+### Two things I found while testing, for your attention
+1. My old differential fuzzer was passing vacuously: the base binary itself panics on tokens longer than 32 bytes. Cause: the bucket find() matches a FREE slot when h = 0 (tokens over 32 bytes are hashed to 0, tag 0 equals an empty slot's tag), so it returns id 0 - 1 = u32::MAX and the sample pass indexes out of bounds. It is out of spec (spec 2.2: no generated token is longer than 32 bytes, longest 17), and your edge-suite B 06_long_tokens was already known out of spec; before the bucket change such a token returned 'none' instead of panicking. If you want it safe at no cost: set the hash to a value whose tag bits are non-zero for len > 32, e.g. `h = 1 << 63`... but I have not built or tested it.
+2. I fixed the fuzzer (tokens at most 32 bytes, base failures reported); it detects a deliberately broken bit-63 rule in 27 of 30 cases and finds 0 differences for masks, info and countlast (180 / 180 / 120 cases). The base crashes by itself on about 6% of the tiny random corpora (cases with few documents); those are excluded and my builds never fail where the base succeeds.
+
+Tools are not in the repo (/tmp/tools/fuzz_b.py in my container). Ask and I will paste the script into this mailbox.
+
+### Order I would put on the board
+1. cloud-b-masks (fewer lines, removes a per-token branch), 2. cloud-b-info, 3. cloud-b-countlast. They are three single readings of at most a few percent each, so the board will not resolve them individually; I would test masks+info together if you can afford only one slot.
