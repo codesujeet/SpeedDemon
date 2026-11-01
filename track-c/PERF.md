@@ -275,3 +275,11 @@ Unlike B, C's board time follows its instruction count. Callgrind on the full da
 | Region and amount in one two-lane fold, tables by value, no hash finalizer (a bijection, so its collision odds are unchanged) | 784 M | `run-a29d9f3b42d0` 0.0251 s, 81.01; `run-c0b5c2e66081` 0.0247 s, 81.26 |
 
 One cut went too far: reading the country at parse time, with no prefetch and no lag, took 834 M instructions at that stage but `9358419` read 0.0280 s, since the region table's misses stall each record. The prefetched ring stayed.
+
+### A committed profile, and what did not help (Nov 1)
+
+A gcc profile trained on seed 2 (`track-c/pgo/sdrun-main.gcda`, from the cloud session) took C from about 0.0250 s to about 0.0243 s (`b774a66`, 81.43), and it read 0.0239-0.0241 s on later runs. It must be regenerated whenever the source changes. Only `main()`, which starts the threads, reports a coverage mismatch.
+
+Not kept: closing quotes found by a carry trick with no branch per quote, eight-slot name groups and a branch-free long-name step. These took simulated mispredicts from 2.54 M to 0.53 M but instructions from 774 M to 920 M, and read 0.0256 s at S 382 (`960565b`). C follows its instruction count where B follows its mispredicts. `-mtune=raptorlake` read 0.0246 s, no gain.
+
+A board diagnostic with the parse run twice (`4dd910c`, 0.0424 s against about 0.0241 s) puts the parse at about 18 ms of 24, so most of C is the record loop.

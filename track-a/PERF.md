@@ -271,3 +271,11 @@ Fewer instructions did not always mean less time:
 | One stretch of chunks per hour, released in one `madvise` | 739 M | `run-058393b70483` 0.0210 s S 301; `run-44d3d3c26609` 0.0208 s S 301, 84.76 | yes |
 
 The chunk change kept the time and cost 14 fewer lines. S counts formatted code lines only: comments are free, and a line wrapped at 80 columns counts each time.
+
+### Mispredicts, and A's split on the board (Nov 1)
+
+Callgrind's branch simulation on the full data showed about half of A's simulated mispredicts in `select`, and 0.4 M of 2.9 M in the name table's length compares. So the median of three now uses only minimum and maximum, and also finishes ranges of up to 3; the range update has no branch; and the name table compares 16-bit tags in four-slot buckets. Simulated mispredicts fell from 2.89 M to 1.69 M at the same instruction count. Board: `6c7f67e` read 0.0199 s, S 318, 85.10, the best so far, with later readings of 0.0199-0.0212 s on the same source.
+
+Not kept: `-mtune=raptorlake` (0.0223 s on one reading); a direct scan for the largest value in `select` (no change in simulated mispredicts once the median had no branches).
+
+Board diagnostics, each with correct output and one phase run twice: the parse adds about 9.4 ms (`4dd910c`, 0.0294 s, warm, so a little under its first-time cost); the hours phase with `select` adds about 3.4 ms (`15d4eb3`, 0.0234 s) of about 20 ms.

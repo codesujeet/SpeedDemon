@@ -364,3 +364,11 @@ To see how much of B is the answer phase, commit `4dde5ce` temporarily answered 
 | classify, hash and look up every token | `run-2f2401390c27` | 0.2715 s | about 100 ms |
 
 So the term lookups take about 73 ms of about 172 ms, with noise of several ms on each reading. They are the largest single cost, and the classify and hash work is much smaller. Two attempts at the lookups did not help: a table half the size (1 MB, below a core's 1.25 MB L2) read `run-c679ec081890` 0.1745 s, and a 128 KB table of the hottest terms in front of the main one read `run-508baa669fca` 0.1988 s at S 608, worse. The hot table adds one unpredictable branch per token, about as many tokens hitting as missing it. Neither was kept.
+
+### What moved B: the branch on each lookup (Nov 1)
+
+Prefetch lag on the board, one reading each: lag 2 0.1667 s, lag 4 0.1651 s, lag 8 0.1678 s, lag 16 0.2136 s. A longer lead did not help, so waiting on the table's cache misses is not the limit. Huge pages left on (`d67679d`) gave 0.1677 s at 54.5 MiB, so TLB misses are not either. Six threads instead of twelve (`4f631af`) read 0.1866 s against 0.1678 s: the second hyperthread on each core adds only about 11%.
+
+That pointed at branch mispredicts, and `Terms::find` is now four-slot SIMD buckets, one compare with no branch on hit or miss (`select_unpredictable`). Board: `4423afa` 0.1545 s, `960565b` 0.1519 s, S 585, 75.00, the best so far, and the first real gain in time on this track. The top bit of every hash is set, so that no hash has the tag of a free slot; the cloud session's fuzzer caught that case as a panic on a token over 32 bytes.
+
+Tried after the buckets and not kept: positions of a document's tokens staged first (`15d4eb3`, 0.1629 s, S 607), a read-only info row per term (`55b45da`, 0.1673 s, S 589). Start and end masks per window (`5c38f17`) read 0.1617, 0.1555, 0.1521 and 0.1639 s, about neutral, and stay. These readings show the noise on the same source: about 0.152-0.164 s.
