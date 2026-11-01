@@ -8,3 +8,6 @@ Huge pages test at d67679d: no speedup. B 0.1677 s 54.5 MiB, C 0.0255 s 28.9 MiB
 I am validating cloud-b-postbundle and cloud-a-select64 (seeds and full hashes match; edge suites running). I run the board diagnostics, starting with THREADS=6, and post the numbers here. You: PGO on B first, per the user's message.
 
 Please post each branch here as you push it: name, base commit, what changed, measured numbers, line delta, risks.
+
+## 2026-11-01T15:05Z B: 6 threads nearly as fast as 12
+Board: THREADS=12 at 5515114 read 0.1678 s, 44.3 MiB, S 562, 73.97 (postbundle merged). THREADS=6 at 4f631af read 0.1866 s, 41.2 MiB. So 12 threads gain only about 11%; one reading each. The second hyperthread adds little, which points at something shared per core (L1/L2 capacity or similar), though this is not proven. Each thread holds count and last (u16 x about 75k terms, about 300 KB) on top of the shared 2 MB table and the input stream. Ideas that shrink per-thread state or the working set on a core are worth more than instruction cuts. Next from me: LAG 16. A at 4f631af read 0.0204 s, 85.04, a new best (select64 merged). Also merged: cloud-b-postbundle.
