@@ -162,12 +162,12 @@ unsafe fn tokens(mut p: *const u8, t: &Terms, ids: &mut Vec<u32>, pre: *const u1
         let buf = ids.as_mut_ptr();
         let mut look = |&h: &u64| {
             let id = t.find(h);
-            _mm_prefetch::<_MM_HINT_T0>(pre.wrapping_add(id as usize).cast());
+            _mm_prefetch::<_MM_HINT_T1>(pre.wrapping_add(id as usize).cast());
             (*buf.add(out), out) = (id, out + 1);
         };
         let mut push = |q: *const u8, len: u32| {
             let h = if len <= 32 { hash(q, len as usize) } else { 1 << 63 };
-            _mm_prefetch::<_MM_HINT_T0>(t.slot.as_ptr().add(h as usize & mask).cast());
+            _mm_prefetch::<_MM_HINT_T1>(t.slot.as_ptr().add(h as usize & mask).cast());
             if n >= LAG {
                 look(&ring[n % LAG]);
             }
