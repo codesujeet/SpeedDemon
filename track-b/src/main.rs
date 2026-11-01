@@ -21,6 +21,7 @@ extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn mallopt(param: i32, value: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
 }
 
 const THREADS: usize = 12;
@@ -617,6 +618,13 @@ fn main() {
         flush(&mut pending, block);
         buckets.iter_mut().for_each(Units::finish);
         assert!(n < 1 << DOC_BITS, "too many documents per thread");
+        // This share is not read again: its pages go back now, by this thread,
+        // instead of all of the file's at exit by one (MADV_DONTNEED on a clean
+        // private mapping only drops pages; a later read would fault them in).
+        let (from, to) = ((text.as_ptr() as usize + cut[t] + 4095) & !4095, (text.as_ptr() as usize + cut[t + 1]) & !4095);
+        if to > from {
+            unsafe { madvise(from as *mut u8, to - from, 4) };
+        }
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
