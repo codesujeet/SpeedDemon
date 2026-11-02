@@ -334,6 +334,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `c0dd554` | PERF: track A one-pass streaming hours, 85.73 on the board | `run-c7ac1aa2e379` | 0.0239 | 8.5 | 374 | 81.64 |
 | `efaf824` | Track B: phased 16-bit postings, AES token hash, cache-line term buckets (Codex candidate  | `run-344ddf78fe20` | 0.0242 | 9.0 | 374 | 81.25 |
 | `c9a7d97` | PERF: B Codex candidate board reading (efaf824) | `run-1457ed550bfc` | 0.0243 | 9.3 | 374 | 81.09 |
+| `6d27fd1` | Docs: B README records the final choice | `run-31cab2871f42` | 0.0238 | 8.9 | 374 | 81.49 |
 
 <!-- board-runs:end -->
 

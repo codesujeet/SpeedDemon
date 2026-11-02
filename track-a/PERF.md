@@ -117,6 +117,8 @@ middle three, highest memory peak): **0.093 s and 47 MB, against 0.214 s and
 
 ## What the time is now
 
+*Measured on the three-phase design (`best-50` and earlier); the final one-pass source is described in the Nov 2 round at the end, with 14.4 MiB on the board.*
+
 Full data, 3.1 M lines, 239 MB (Linux container, local): on one core the whole
 program takes about 0.28 s (scan about 0.2 s, about 58 ns per line; count,
 select and format about 0.06 s). Peak memory is 44-47 MB: about 12 MB of
@@ -357,6 +359,7 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `c0dd554` | PERF: track A one-pass streaming hours, 85.73 on the board | `run-0aa10b5f95f6` | 0.0193 | 14.2 | 404 | 85.95 |
 | `efaf824` | Track B: phased 16-bit postings, AES token hash, cache-line term buckets (Codex candidate  | `run-e8e4cb7a2cb7` | 0.0254 | 16.5 | 404 | 82.30 |
 | `c9a7d97` | PERF: B Codex candidate board reading (efaf824) | `run-e4625df60834` | 0.0194 | 14.5 | 404 | 85.78 |
+| `6d27fd1` | Docs: B README records the final choice | `run-7a1ab882f19f` | 0.0228 | 16.5 | 404 | 83.46 |
 
 <!-- board-runs:end -->
 
