@@ -2,15 +2,43 @@
 
 ## Summary
 
-Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-50` (commit `2b3efbe`), the frozen source; its board row is in the table, and a repeat reading of the same source (commit `b3760c9`) was `run-f1810d73d5b3` 0.0203 s / 18.0 MiB / 321 / 85.08. Board noise on identical code in our own log: A about 2.1% of the median; a difference of a point or two between commits is within noise. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The first version of the Rust implementation was scored before the log starts; it is listed from the text of this file.
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-51` (commit `3b8422f`), the frozen source, a one-pass design (see the Nov 2 round at the end); its board row is in the table. The previous final, tag `best-50` (commit `2b3efbe`, the three-phase design), read `run-de2d03d15f68` 0.0200 s / 18.4 MiB / 321 / 85.16, and a repeat reading of that source (commit `b3760c9`) was `run-f1810d73d5b3` 0.0203 s / 18.0 MiB / 321 / 85.08. Board noise on identical code in our own log: A about 2.1% of the median; a difference of a point or two between commits is within noise. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The first version of the Rust implementation was scored before the log starts; it is listed from the text of this file.
 
 | Stage | Run ID | Commit | T (s) | M | S | Points |
 |---|---|---|---|---|---|---|
 | Reference (naive) | none (local) |  | 32.05 | 228 MB | 56 code lines | 0 |
 | First version on the board (Rust, steps 1-5) | not recorded (commit `0bbd5d0`; not in the log) | `0bbd5d0` | 0.122 | 79 MB | 537 | 57.68 |
 | First run in the log (Rust) | `run-39a9b4e1b49e` | `32f54ce` | 0.0259 | 23.1 MiB | 508 | 79.88 |
-| Best row in the log (`best-43`, C++) | `run-8f79d074469a` | `8f987f5` | 0.0195 | 19.0 MiB | 318 | 85.32 |
-| Final (`best-50`, C++) | `run-de2d03d15f68` | `2b3efbe` | 0.0200 | 18.4 MiB | 321 | 85.16 |
+| Best row of the three-phase design (`best-43`, C++) | `run-8f79d074469a` | `8f987f5` | 0.0195 | 19.0 MiB | 318 | 85.32 |
+| Previous final (`best-50`, C++, three phases) | `run-de2d03d15f68` | `2b3efbe` | 0.0200 | 18.4 MiB | 321 | 85.16 |
+| Final (`best-51`, C++, one pass) | `run-c858924f52ea` | `3b8422f` | 0.0195 | 14.4 MiB | 404 | 85.73 |
+
+### Board score over time
+
+Best row seen so far at each time (UTC), from `real-spec/board-runs.jsonl`:
+
+```mermaid
+xychart-beta
+    title "Track A: best board points so far"
+    x-axis ["Oct31 10h", "Oct31 18h", "Nov1 06h", "Nov1 12h", "Nov1 18h", "Nov2 00h", "Nov2 05h", "Nov2 13h"]
+    y-axis "points" 75 --> 90
+    line [79.88, 79.88, 84.02, 84.52, 85.32, 85.32, 85.32, 85.73]
+```
+
+Caption: running maximum of the board points of track A at the checkpoints below.
+
+| Checkpoint (UTC) | Points | T (s) | M (MiB) | S | Run ID | Commit |
+|---|---|---|---|---|---|---|
+| Oct31 10h | 79.88 | 0.0259 | 23.1 | 508 | `run-39a9b4e1b49e` | `32f54ce` |
+| Oct31 18h | 79.88 | 0.0259 | 23.1 | 508 | `run-39a9b4e1b49e` | `32f54ce` |
+| Nov1 06h | 84.02 | 0.0220 | 18.5 | 326 | `run-442bba74c314` | `576267e` |
+| Nov1 12h | 84.52 | 0.0214 | 18.7 | 306 | `run-63ba78fa6b18` | `67464a6` |
+| Nov1 18h | 85.32 | 0.0195 | 19.0 | 318 | `run-8f79d074469a` | `8f987f5` |
+| Nov2 00h | 85.32 | 0.0195 | 19.0 | 318 | `run-8f79d074469a` | `8f987f5` |
+| Nov2 05h | 85.32 | 0.0195 | 19.0 | 318 | `run-8f79d074469a` | `8f987f5` |
+| Nov2 13h | 85.73 | 0.0195 | 14.4 | 404 | `run-c858924f52ea` | `3b8422f` |
+
+The log starts on Oct 31 at 09:59 UTC; earlier board readings are in the table above and are not in the log. Board readings of unchanged code differ by a few percent, so single steps of a point or two are within noise.
 
 What moved the score:
 
@@ -24,6 +52,7 @@ What moved the score:
 8. Instruction cuts (805 M to 738 M): 0.0267 s to 0.0207-0.0209 s (`run-b20f497b4193`, `run-6fbe7156e8a3`).
 9. Fewer mispredicts (median of three with no branches, tagged four-slot name buckets): simulated 2.89 M to 1.69 M; 0.0199 s, 85.10 (`best-40`, `run-f5770f0edb3d`).
 10. One stretch of chunks per hour, released by one `madvise`: same time, 14 fewer source lines (S 301).
+11. One pass with each hour closed and written while the log is still parsed (radix sort per hour, Codex-written, `3b8422f`): 0.0195 s, 14.4 MiB, 85.73 (`run-c858924f52ea`); memory 4 MiB lower for 83 more lines.
 
 What did not help:
 
@@ -37,6 +66,7 @@ What did not help:
 8. Line ends found per line again (610 M instructions): 0.0213 s and 0.0227 s, not faster.
 9. Branch-free output formatting (fewer instructions and mispredicts): board 0.0314 s against 0.0307 s, so formatting is not on the critical path.
 10. Dropping the input's page table entries after the barrier or after every chunk: more TLB shootdowns, no better total.
+11. A first streaming-hours attempt (`4bb6d40`): locally equal wall and 3 MiB less memory, on the board 14% slower (`run-70e34892adfd`, 83.80); reverted. The second form of the idea (item 11 above) worked.
 
 
 Every step from the reference to the current version.

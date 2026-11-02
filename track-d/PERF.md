@@ -12,6 +12,33 @@ Where the track stands and why, before the long log below. Board numbers come fr
 | Best row in the log | `run-1e5e115c0722` | `2a7cc01` | 0.1662 | 66.1 MiB | 518 | 69.02 |
 | Final (`best-50`) | `run-e682dbdc30a2` | `2b3efbe` | 0.1729 | 66.3 MiB | 518 | 68.58 |
 
+### Board score over time
+
+Best row seen so far at each time (UTC), from `real-spec/board-runs.jsonl`:
+
+```mermaid
+xychart-beta
+    title "Track D: best board points so far"
+    x-axis ["Oct31 10h", "Oct31 18h", "Nov1 06h", "Nov1 12h", "Nov1 18h", "Nov2 00h", "Nov2 05h", "Nov2 13h"]
+    y-axis "points" 60 --> 70
+    line [63.02, 68.83, 68.83, 69.02, 69.02, 69.02, 69.02, 69.02]
+```
+
+Caption: running maximum of the board points of track D at the checkpoints below.
+
+| Checkpoint (UTC) | Points | T (s) | M (MiB) | S | Run ID | Commit |
+|---|---|---|---|---|---|---|
+| Oct31 10h | 63.02 | 0.2308 | 94.3 | 680 | `run-0a5e5f081b09` | `32f54ce` |
+| Oct31 18h | 68.83 | 0.1692 | 66.0 | 517 | `run-237237831d54` | `4f9e4bd` |
+| Nov1 06h | 68.83 | 0.1692 | 66.0 | 517 | `run-237237831d54` | `4f9e4bd` |
+| Nov1 12h | 69.02 | 0.1662 | 66.1 | 518 | `run-1e5e115c0722` | `2a7cc01` |
+| Nov1 18h | 69.02 | 0.1662 | 66.1 | 518 | `run-1e5e115c0722` | `2a7cc01` |
+| Nov2 00h | 69.02 | 0.1662 | 66.1 | 518 | `run-1e5e115c0722` | `2a7cc01` |
+| Nov2 05h | 69.02 | 0.1662 | 66.1 | 518 | `run-1e5e115c0722` | `2a7cc01` |
+| Nov2 13h | 69.02 | 0.1662 | 66.1 | 518 | `run-1e5e115c0722` | `2a7cc01` |
+
+The log starts on Oct 31 at 09:59 UTC; earlier board readings are in the table above and are not in the log. Board readings of unchanged code differ by a few percent, so single steps of a point or two are within noise.
+
 What moved the score:
 
 1. Bidirectional Dijkstra over forward and reverse CSR with a 4-ary heap (step 1), the base of everything else.

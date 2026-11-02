@@ -11,6 +11,35 @@ Where the track stands and why, before the long log below. Board numbers come fr
 | First run in the log | `run-67ca8f767f8d` | `32f54ce` | 0.3209 | 61.0 MiB | 869 | 64.13 |
 | Best row in the log, also final (`best-50`) | `run-e04aea56e89d` | `2b3efbe` | 0.1124 | 43.4 MiB | 695 | 77.72 |
 
+<!-- FINAL-B: if a faster B source replaces best-50 before the freeze, add its row here (tag or commit, T, M, S, points, run ID) and say which source is final in the paragraph above. -->
+
+### Board score over time
+
+Best row seen so far at each time (UTC), from `real-spec/board-runs.jsonl`:
+
+```mermaid
+xychart-beta
+    title "Track B: best board points so far"
+    x-axis ["Oct31 10h", "Oct31 18h", "Nov1 06h", "Nov1 12h", "Nov1 18h", "Nov2 00h", "Nov2 05h", "Nov2 13h"]
+    y-axis "points" 60 --> 80
+    line [64.13, 69.70, 73.42, 73.53, 75.75, 77.67, 77.72, 77.72]
+```
+
+Caption: running maximum of the board points of track B at the checkpoints below.
+
+| Checkpoint (UTC) | Points | T (s) | M (MiB) | S | Run ID | Commit |
+|---|---|---|---|---|---|---|
+| Oct31 10h | 64.13 | 0.3209 | 61.0 | 869 | `run-67ca8f767f8d` | `32f54ce` |
+| Oct31 18h | 69.70 | 0.2331 | 49.0 | 611 | `run-6268f725a495` | `f47d313` |
+| Nov1 06h | 73.42 | 0.1674 | 47.2 | 617 | `run-d58c749305c7` | `a94d376` |
+| Nov1 12h | 73.53 | 0.1668 | 47.1 | 607 | `run-1e6abe410603` | `37fae72` |
+| Nov1 18h | 75.75 | 0.1377 | 43.8 | 640 | `run-7eae9828db9d` | `723f9a8` |
+| Nov2 00h | 77.67 | 0.1130 | 43.5 | 692 | `run-19fd5cec2739` | `218638a` |
+| Nov2 05h | 77.72 | 0.1124 | 43.4 | 695 | `run-e04aea56e89d` | `2b3efbe` |
+| Nov2 13h | 77.72 | 0.1124 | 43.4 | 695 | `run-e04aea56e89d` | `2b3efbe` |
+
+The log starts on Oct 31 at 09:59 UTC; earlier board readings are in the table above and are not in the log. Board readings of unchanged code differ by a few percent, so single steps of a point or two are within noise.
+
 What moved the score:
 
 1. Read the queries first and intern only their terms; tokenize the corpus once in parallel (steps 1-4): 56 s to 0.426 s on the board (53.19 points).

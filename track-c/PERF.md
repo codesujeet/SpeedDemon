@@ -12,6 +12,33 @@ Where the track stands and why, before the long log below. Board numbers come fr
 | Best row in the log (C++) | `run-b8a31e97e700` | `6efb41f` | 0.0240 | 8.2 MiB | 374 | 81.77 |
 | Final (`best-50`, C++) | `run-81747cac71e7` | `2b3efbe` | 0.0243 | 8.9 MiB | 374 | 81.28 |
 
+### Board score over time
+
+Best row seen so far at each time (UTC), from `real-spec/board-runs.jsonl`:
+
+```mermaid
+xychart-beta
+    title "Track C: best board points so far"
+    x-axis ["Oct31 10h", "Oct31 18h", "Nov1 06h", "Nov1 12h", "Nov1 18h", "Nov2 00h", "Nov2 05h", "Nov2 13h"]
+    y-axis "points" 70 --> 85
+    line [72.30, 73.85, 79.18, 80.54, 81.63, 81.77, 81.77, 81.77]
+```
+
+Caption: running maximum of the board points of track C at the checkpoints below.
+
+| Checkpoint (UTC) | Points | T (s) | M (MiB) | S | Run ID | Commit |
+|---|---|---|---|---|---|---|
+| Oct31 10h | 72.30 | 0.0482 | 9.6 | 542 | `run-6e20c9b0c201` | `32f54ce` |
+| Oct31 18h | 73.85 | 0.0412 | 9.9 | 542 | `run-9e0e1b6e7e0d` | `f00df83` |
+| Nov1 06h | 79.18 | 0.0293 | 8.6 | 400 | `run-202087ed39eb` | `4dde5ce` |
+| Nov1 12h | 80.54 | 0.0266 | 8.4 | 373 | `run-93446999afd8` | `800e1ce` |
+| Nov1 18h | 81.63 | 0.0242 | 8.3 | 374 | `run-d37977de033c` | `3d695ff` |
+| Nov2 00h | 81.77 | 0.0240 | 8.2 | 374 | `run-b8a31e97e700` | `6efb41f` |
+| Nov2 05h | 81.77 | 0.0240 | 8.2 | 374 | `run-b8a31e97e700` | `6efb41f` |
+| Nov2 13h | 81.77 | 0.0240 | 8.2 | 374 | `run-b8a31e97e700` | `6efb41f` |
+
+The log starts on Oct 31 at 09:59 UTC; earlier board readings are in the table above and are not in the log. Board readings of unchanged code differ by a few percent, so single steps of a point or two are within noise.
+
 What moved the score:
 
 1. Parse straight off the mapped file with per-country ownership and a dense region table (steps 1-4): 14 s to 0.135 s on the board (49.44 points).
