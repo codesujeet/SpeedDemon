@@ -1,6 +1,6 @@
 # Architecture overview
 
-One place for how all four solutions work. Details, measurements and run IDs are in each track's `PERF.md`; where this file is not sure it says "see PERF.md". Source references are to tag `best-50` (the sources of A, B and C are the same in the current head).
+One place for how all four solutions work. Details, measurements and run IDs are in each track's `PERF.md`; where this file is not sure it says "see PERF.md". Source references are to tag `best-51` for A and `best-50` for B, C and D (B, C and D are unchanged in the current head). The story of the 72 hours, the board progress chart and the list of what failed and why are in the [root README](../README.md); each track README has a "Research and technique" and a "What failed and why" section.
 
 ## Contents
 
@@ -25,30 +25,31 @@ One place for how all four solutions work. Details, measurements and run IDs are
 
 ## Track A: Ingest
 
-Source: `track-a/src/main.cpp` (C++20, g++ 15, `-O3 -march=x86-64-v3 -static`).
+Source: `track-a/src/main.cpp` (C++20, g++ 15, `-O3 -march=x86-64-v3 -static`), tag `best-51`, 522 lines, S 404.
 
 - **Input:** `/data/requests.log`, lines of timestamp (27 bytes), method, endpoint, status, latency; 72 fixed hours.
 - **Output:** `/out/summary.txt`: per hour and endpoint (in byte order of the name) the count, p50, p95, p99 (nearest rank, exact), the 5xx count and the 5xx rate in parts per million.
 
 ```mermaid
 flowchart TD
-    M["mmap log, cut into 8 pieces per thread"] --> P["Phase 1 parse: threads claim pieces"]
-    P --> P2["per line: hour from timestamp digits, endpoint id from lock-free table, 4-byte record into the hour's 16 KB chunk"]
+    M["mmap log, line-aligned pieces, 8 per thread, smaller towards the end"] --> P["Parse: threads claim pieces in order"]
+    P --> P2["per line: hour from timestamp digits, endpoint id from the lock-free table, 4-byte record into the hour's own region"]
     P2 --> X["drop the piece's input pages"]
-    X --> B1["barrier: last thread ranks endpoint names in byte order"]
-    B1 --> H["Phase 2 hours: threads claim hours 0 to 71"]
-    H --> H2["counting sort of the hour's latencies by endpoint rank, three selections per group, line sizes computed"]
-    H2 --> B2["barrier: last thread turns sizes into offsets, sizes and maps the output file"]
-    B2 --> T["Phase 3 text: threads claim hours and format straight into the mapped file"]
-    T --> E["_exit(0)"]
+    X --> Q{"first unparsed piece starts 30 min into the next hour?"}
+    Q -- yes --> H["close the hour: radix sort by endpoint rank and latency, percentiles read by index, line sizes computed, region handed back"]
+    Q -- no --> P
+    H --> W["sizes known: placed hours are formatted straight into the mapped output"]
+    W --> E["_exit(0)"]
+    P2 -. "a line for a closed hour" .-> L["late flag: hand everything back, redo with every hour held open"]
+    L -.-> P
 ```
 
-Caption: A runs parse, name-rank barrier, hour selection, size barrier, text formatting, all on one pool of at most 12 threads.
+Caption: A is one pass; each hour is closed and sorted while later pieces are still parsed, and text is written into the mapped output as soon as the sizes of the earlier hours are known. A late line (never seen in generated data) restarts the pass with every hour held open.
 
-- **Data structures:** `Names` (4,096 slots of 64-bit words: 16-bit tag, length, arena offset; four slots probed per step by a CRC32 of the first and last 8 bytes; names copied to a 512 KiB arena); records of 4 bytes (latency above a 13-bit key: 12-bit endpoint id and the 5xx flag) in 16 KB chunks per hour and thread, each hour's chunks in its own stretch of one mapping; a side list for latencies of 2^19 us or more; per-hour `Line` arrays (24 bytes).
-- **Phases and threads:** one `std::thread` pool, `std::barrier` between phases, pieces/hours claimed by atomic counters. Line ends are listed 4 KB at a time with AVX2 masks; the hour comes from one multiply over the date digits; the endpoint's ends from 16-byte compares; the latency decoded without a loop. Selection is a branch-free median-of-three Lomuto partition (40 rounds, then `std::nth_element`). Output sizes are computed without formatting, so every hour's file offset is known before any text is written.
-- **Memory:** the hour's chunks are released by one `madvise` as soon as copied into scratch; the output file's pages then fill. Peak 18.4 MiB on the board (`run-de2d03d15f68`).
-- **Limits and assumptions:** timestamps 27 bytes in the fixed 72-hour span; method at most 7 bytes, `" SSS latency"` at most 15 bytes; lines at least 40 bytes; more than 4,096 distinct endpoints do not fit (the arena overflow exits with status 2; a seed has 1,842); reads up to 64 bytes past a line (relies on the zero page); no handling of malformed input.
+- **Data structures:** `Names` (8,192 slots of 16 bits, claimed by compare-and-swap, up to about 2,000 names of at most 128 bytes in a text arena); records of 4 bytes (latency above a 12-bit key: the 5xx flag and the endpoint id plus one); a latency of 2^20 - 1 us or more (about 1% of lines) takes two places (an escape value, then the raw one); per hour a region of records, per group a `Line` with its numbers and the exact size of its text line.
+- **Phases and threads:** one `std::thread` pool (at most 12) and a `std::barrier` only where a pass ends; pieces claimed from an atomic counter. Line ends of each 64-byte block are found at once and a line is read from both ends; the hour comes from the day and hour digits. An hour is sorted by a three-pass radix sort of one 31-bit key (endpoint rank above the 20-bit latency), so each group comes out sorted and the percentiles are plain indexes; there is no selection step any more. Output sizes are computed without formatting, so every hour's file offset is known before any text is written; a thread with no piece left to claim writes the next placed hour.
+- **Memory:** hours still open hold records; a closed hour's region goes back by `madvise`; the output file's pages then fill. Peak 14.4 MiB on the board (`run-c858924f52ea`), against 18.4 MiB for the earlier three-phase design (`best-50`, `run-de2d03d15f68`: parse, name-rank barrier, selection with a branch-free median of three, size barrier, text).
+- **Limits and assumptions:** timestamps 27 bytes in the fixed 72-hour span; method at most 7 bytes, `" SSS latency"` at most 15 bytes; lines at least 40 bytes; the log is in about clock order (an hour's last lines arrive 5 to 10 minutes late, a later one costs a second pass, which is correct but about 10 times slower); more than about 2,000 distinct endpoints do not fit (exit with status 3; a seed has 1,842); reads up to 64 bytes past a line (relies on the zero page); no handling of malformed input.
 
 ## Track B: Index
 
@@ -79,6 +80,7 @@ Caption: B runs queries, sample, classify, scan (tokens, lookup ring, per-docume
 - **Data structures:** term table of 32-byte buckets with four 64-bit slots (hash top bits above an 18-bit id plus 1); the hash is three AES rounds over up to 32 bytes (lower-cased), top bit forced, so a term is identified by 45 bits and there is no string compare; per term either a bitmap (document frequency in the sample above 1/32) or a list of `u16` document offsets per thread (a unit is `term index / 32` above a 4-bit gap code; a gap of 15 or more takes a second `u16`); 32 buckets of units per thread; sorted lists and bitmaps merged strictly left to right.
 - **Phases and threads:** 12 threads started once and reused (`on_threads` with a barrier gate). The lookup ring is pre-filled with the hash of no term, so the first lookups need no test; ids are looked up four tokens after their slot was prefetched; each unit is written with a branch-free second `u16`; the SIMD compaction (permutation table `LEFT`) splits ids without branches; two counting sorts renumber terms and group phrase anchors. The fill phase is throttled so no thread starts bucket b before all have finished bucket b-2 (otherwise the peak depended on scheduling).
 - **Memory:** the term table sits on 2 MB pages while the scan runs and is unmapped after it; each thread drops its share of `docs.txt` after the scan and its twelfth of postings and bitmaps after the answers. Peak 43.4 MiB (`run-e04aea56e89d`).
+- <!-- FINAL-B: if a faster B replaces this source before the freeze, update this section (flowchart, data structures, limits) and the B numbers: T, M, S, points, run ID. --> The numbers and description here are for `best-50`.
 - **Limits and assumptions:** terms identified by hash alone (45 bits; odds against a collision were not computed exactly); tokens over 32 bytes never match; term ids 18 bits (at most 262,143 query terms, the public data has about 76,000); at most 131,072 list terms; per-thread document offsets are `u16`, so each of the 12 shares must hold fewer than 65,536 documents and no term may occur in 65,536 or more documents of one share (the full corpus gives about 20,800 per share); document ids dense and ascending; AVX2 and AES-NI required; empty or tiny inputs not handled. Not checked at run time.
 
 ## Track C: Join
@@ -138,9 +140,10 @@ Caption: D runs parse and file, build parts, BFS-blob renumbering plus reverse g
 
 ## Correctness checks
 
-- **A, B, C:** the output matched the reference at full scale on generated seeds 1, 2, 3, 7, 11 to 16 and 21 to 23. Each also matched the published SHA-256 on every full-size run listed in its `PERF.md` and README (A: 100 back-to-back runs of the first C++ version, later drafts 80 or more; B: 40 for the second draft; C: 100).
+- **A, B, C:** the output matched the reference at full scale on generated seeds 1, 2, 3, 7, 11 to 16 and 21 to 23 (the final A also on a fresh full-scale seed 61, and A's earlier streaming attempt on seed 41; seeds 31 and 51 are not recorded in this repository). Each also matched the published SHA-256 on every full-size run listed in its `PERF.md` and README (A: 100 back-to-back runs of the first C++ version, later drafts 80 or more; B: 40 for the second draft; C: 100).
 - **D:** published hash, generated seeds 2, 3 and 7, tiny and sample scales, and a 66-case edge suite; `cargo clippy -D warnings` clean.
 - **Edge suites with known out-of-spec failures:**
+  - A: no failures for the final version (its late-line fallback was forced locally and is correct).
   - B: `06_long_tokens` (tokens over 32 bytes never match).
   - C: `13_distinct_names_300k` (hangs beyond 131,072 distinct names), `14_300_countries` and `15_2000_countries` (more than 254 countries exit with "too many countries"), `92_OOS_note_lf_digit` (an out-of-spec note case; the case is named in the suite, its detail is not in PERF.md).
 - The suites and datasets are generated locally and are not in this repository; the commands to run the checks are in each track's README ("Verification").
@@ -149,15 +152,15 @@ Caption: D runs parse and file, build parts, BFS-blob renumbering plus reverse g
 
 Condensed from the `PERF.md` files; numbers and run IDs are there.
 
-- **A:** `pread` into per-worker buffers instead of the mapping; `MAP_POPULATE` or touching all input pages first (page faults only move); populate of the output; cascading selection; `-O2`; `-mtune=raptorlake`; SIMD partition in `select` (`pdep`/`pext`; fewer instructions, no faster); finding line ends per line again; branch-free output formatting (formatting is not on the critical path); dropping page-table entries after the barrier or every chunk; 16 pieces per thread; PGO on the C++ version; a Rust port of the C++ design.
-- **B:** a larger or a half-size term table; a 128 KB table of hot terms in front of the main table (adds one unpredictable branch per token); eight-slot term buckets (commit `fbfc622`, reverted; see PERF.md); prefetch lags 2, 8 and 16 (lag 4 kept; 16 slower); huge pages made no difference; six threads instead of twelve (slower); prefetching the text 2 KB ahead; a 23% cut in instructions without a time gain; branchless merges and AVX2 set operations in the answer phase; 2 MB pieces (earlier design); staging token positions; a read-only info row per term; a 16-byte, two-round hash and a 1/256 sample (tried late, reverted).
-- **C:** gcc PGO on the first C++ version (no gain then; adopted later with a committed profile); two cursors per piece; the quoted-field fast path (57% of mispredicts); a block-mask pass for field ends (fewer mispredicts, 33% more instructions); three-stage batches; chunked `pread`; `MAP_POPULATE` on the records mapping; carry-trick quote handling and eight-slot name groups; a dense-id name table (the first C++ draft, `b573d30`; the current code uses the table slot as the id; see PERF.md); a 111-bit name fingerprint; reading the country at parse time without prefetch; ring lag 32; `-mtune=raptorlake`; a Rust port of the C++ design. A C++ build without libstdc++ is not described in the PERF files; see PERF.md before relying on that item.
+- **A:** hours finished while the log is still read, first attempt (`4bb6d40`: wall equal locally, 14% slower on the board, `run-70e34892adfd`; the one-pass design that replaced it worked, see above); `pread` into per-worker buffers instead of the mapping; `MAP_POPULATE` or touching all input pages first (page faults only move); populate of the output; cascading selection; `-O2`; `-mtune=raptorlake`; SIMD partition in `select` (`pdep`/`pext`; fewer instructions, no faster); finding line ends per line again; branch-free output formatting (formatting is not on the critical path); dropping page-table entries after the barrier or every chunk; 16 pieces per thread; PGO on the C++ version; a Rust port of the C++ design.
+- **B:** a larger or a half-size term table; a 128 KB table of hot terms in front of the main table (adds one unpredictable branch per token); eight-slot term buckets (commit `fbfc622`, reverted; see PERF.md); prefetch lags 2, 8 and 16 (lag 4 kept; 16 slower); huge pages made no difference; six threads instead of twelve (slower); prefetching the text 2 KB ahead; a 23% cut in instructions without a time gain; branchless merges and AVX2 set operations in the answer phase; 2 MB pieces (earlier design); staging token positions; a read-only info row per term; a 16-byte, two-round hash, a 1/256 sample, a thread pool started first thing, a 40-byte phrase record and a `keep()` filter on the id compaction (tried on Nov 2 and reverted: locally 3-12% faster, on the board inside the noise and 6-29 lines longer).
+- **C:** amount min and max by a branch (`1c6a645`, reverted); gcc PGO on the first C++ version (no gain then; adopted later with a committed profile); two cursors per piece; the quoted-field fast path (57% of mispredicts); a block-mask pass for field ends (fewer mispredicts, 33% more instructions); three-stage batches; chunked `pread`; `MAP_POPULATE` on the records mapping; carry-trick quote handling and eight-slot name groups; a dense-id name table (the first C++ draft, `b573d30`; the current code uses the table slot as the id; see PERF.md); a 111-bit name fingerprint; reading the country at parse time without prefetch; ring lag 32; `-mtune=raptorlake`; a Rust port of the C++ design. A C++ build without libstdc++ is not described in the PERF files; see PERF.md before relying on that item.
 - **D:** each worker scanning the whole edge stream; hash labels instead of arrays; atomic row cursors for the original-id CSR; packing the heap entry into one `u64`; dropping the sweep-clear of labels; other label page sizes; a deeper prefetch in the ordering; a radix heap (used in an earlier design, replaced by 4-ary heaps in the current draft).
 
 ## What limited us
 
 - **B:** the chain of dependent steps per token (hash, table lookup, record) and its branch mispredicts; B followed mispredicts, not instruction count. Term lookups were the largest single cost (about 73 ms of about 172 ms in a board diagnostic taken before the four-slot buckets).
 - **C:** instructions per record (about 285 to 343 by two callgrind counts, see PERF.md); C's board time followed its instruction count.
-- **A:** the parse (about 9 ms of roughly 20 ms in board diagnostics) runs near memory bandwidth for the input; the hours phase adds about 3 ms.
+- **A:** the parse (about 9 ms of roughly 20 ms in board diagnostics of the earlier three-phase design) runs near memory bandwidth for the input; the hours phase added about 3 ms there. The one-pass design overlaps the two and also lowered the memory peak.
 - **D:** no board-based phase profile of the current draft; its score is not counted.
 - **Measurement:** no hardware counters were available on the local Docker setup; callgrind simulations, `llvm-mca`, a few `perf stat` runs on a laptop and the board itself (extra passes on correct-output builds) were used instead. Board readings of identical code differ by a few percent (noise figures in the README).
