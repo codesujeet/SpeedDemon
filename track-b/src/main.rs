@@ -42,17 +42,26 @@ type Job = &'static (dyn Fn(usize) + Sync);
 static JOB: Mutex<Option<Job>> = Mutex::new(None);
 static GATE: OnceLock<Barrier> = OnceLock::new();
 
-fn on_threads<R: Send>(f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    if GATE.set(Barrier::new(THREADS)).is_ok() {
-        for t in 1..THREADS {
-            std::thread::spawn(move || loop {
-                GATE.get().unwrap().wait();
-                let job = JOB.lock().unwrap().unwrap(); // the guard is dropped here, before the job runs
-                job(t);
-                GATE.get().unwrap().wait();
-            });
-        }
+// Pool thread t first starts threads 2t and 2t + 1, so the 11 threads exist after four spawns in a row, not eleven.
+fn worker(t: usize) {
+    for c in [2 * t, 2 * t + 1].into_iter().filter(|&c| c < THREADS) {
+        std::thread::spawn(move || worker(c));
     }
+    loop {
+        GATE.get().unwrap().wait();
+        let job = JOB.lock().unwrap().unwrap(); // the guard is dropped here, before the job runs
+        job(t);
+        GATE.get().unwrap().wait();
+    }
+}
+
+// The pool is started first thing, so that its threads exist by the time the first job is posted.
+fn start_pool() {
+    let _ = GATE.set(Barrier::new(THREADS));
+    std::thread::spawn(|| worker(1));
+}
+
+fn on_threads<R: Send>(f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let gate = GATE.get().unwrap();
     let out: Vec<Mutex<Option<R>>> = (0..THREADS).map(|_| Mutex::new(None)).collect();
     let run = |t: usize| *out[t].lock().unwrap() = Some(f(t));
@@ -383,6 +392,7 @@ static LEFT: [[u32; 8]; 256] = {
 };
 
 fn main() {
+    start_pool();
     unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
     // Every token's lookup lands on a random line of the term table, so it is put on 2 MB pages (one TLB
