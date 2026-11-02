@@ -357,9 +357,13 @@ struct Units {
 impl Units {
     fn add(&mut self, offset: u32, doc: u32) {
         let gap = doc - std::mem::replace(&mut self.prev, doc);
-        self.v.push((offset << 4 | gap.min(GAP)) as u16);
-        if gap >= GAP {
-            self.v.push(gap as u16);
+        // Both u16 are written; the second only stays (len + 2) when the gap needs it, so there is no branch on it.
+        self.v.reserve(2);
+        let len = self.v.len();
+        unsafe {
+            let p = self.v.as_mut_ptr().add(len);
+            (*p, *p.add(1)) = ((offset << 4 | gap.min(GAP)) as u16, gap as u16);
+            self.v.set_len(len + 1 + (gap >= GAP) as usize);
         }
     }
 }
