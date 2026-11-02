@@ -307,6 +307,14 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `2bb727f` | Track C: link with gc-sections and no separate code segment (binary pages mapped at run ti | `run-f3bcd686f903` | 0.0199 | 19.3 | 318 | 85.04 |
 | `36a75bc` | Track B: token lengths from the run of ones in the class mask, one mask instead of two | `run-1988ffbe4d9f` | 0.0202 | 19.5 | 318 | 84.80 |
 | `218638a` | Track A: hour-sized buffers in their own mappings (mallopt 32 KiB) and exact lines reserve | `run-1b7e512b0af6` | 0.0204 | 18.2 | 321 | 84.98 |
+| `6751504` | Docs: rewrite READMEs from the sources, add PERF summaries with board run IDs | `run-29810e27ed81` | 0.0201 | 17.9 | 321 | 85.21 |
+| `1c6a645` | Track C: amount min and max updated by a branch (they rarely change), profile regenerated | `run-47dfe8f6ab3f` | 0.0202 | 18.4 | 321 | 85.04 |
+| `2b3efbe` | Revert "Track C: amount min and max updated by a branch (they rarely change), profile rege | `run-de2d03d15f68` | 0.0200 | 18.4 | 321 | 85.16 |
+| `bc4c063` | Track B: phrase candidates checked with one 256-bit compare against a padded per-phrase re | `run-81efdc8a22a4` | 0.0202 | 18.3 | 321 | 85.04 |
+| `f57c41d` | Revert "Track B: phrase candidates checked with one 256-bit compare against a padded per-p | `run-290b25bce1c9` | 0.0202 | 18.3 | 321 | 85.05 |
+| `77c3a49` | Track B: the df sample is 1/256 of the text, not 1/64 | `run-a52ec9d39572` | 0.0208 | 18.5 | 321 | 84.71 |
+| `b3760c9` | Revert "Track B: the thread pool is started first thing, as a tree of spawns" | `run-f1810d73d5b3` | 0.0203 | 18.0 | 321 | 85.08 |
+| `6c5b7ff` | Track B: tokens of up to 16 bytes hashed with two AES rounds over 16 bytes | `run-0223320ed21e` | 0.0207 | 18.2 | 321 | 84.84 |
 
 <!-- board-runs:end -->
 
