@@ -40,7 +40,7 @@ What profiling showed, and what each change did (details and run IDs in `PERF.md
 | Dropping page-table entries after the barrier or every chunk | no better | more TLB shootdowns |
 | Streaming hours, first attempt (`7867844`, `01c21aa`, `4bb6d40`; reverted in `ea03266`) | local wall equal, memory 18.6 to 15.5 MiB; board `run-70e34892adfd` 0.0228 s (+14%), 15.6 MiB, S 388, 83.80 | threads waiting for an hour to be ready showed only on the board; 67 more lines |
 | gcc PGO | -3.9% instructions, no timing gain over 12 interleaved runs | not adopted |
-| Streaming hours, second form: one pass, early close, radix sort, Codex-written (`3b8422f`) | board 0.0195 s, 14.4 MiB, S 404, 85.73 | adopted: the board reading, not the local one, decided |
+| Streaming hours, second form: one pass, early close, radix sort, another team's code (`3b8422f`, see Provenance) | board 0.0195 s, 14.4 MiB, S 404, 85.73 | adopted: the board reading, not the local one, decided |
 
 The local-against-board lesson is in the [root README](../README.md#what-failed-and-why).
 
@@ -85,4 +85,4 @@ The history with run IDs is in [`PERF.md`](PERF.md); the whole-repo architecture
 
 ## Provenance
 
-The final one-pass source is a Codex candidate (OpenAI) written in the owner's own session, which we reviewed, tested and measured; the earlier designs were written with Claude Code and ChatGPT drafts. AI assistance is allowed by the contest rules.
+The earlier designs were written with Claude Code and ChatGPT drafts; AI assistance is allowed by the contest rules. Provenance, disclosed after the freeze: this one-pass source reached us through the owner's own Codex/ChatGPT sessions. We later found that it is byte-for-byte identical (a diff shows 0 lines) to `track-a/main.cpp` in the public repository of team Cache Me (`manusingh090/speed-demon-2026-entry`, commit `ff75792`, 2026-11-02 11:59 UTC; that repository has been public since 2026-10-30). We did not know this when we adopted it at 12:51 UTC. We did not write the design or the code; we only verified, measured and adopted it, and the credit for it belongs to that team. The design in the flowchart above (one pass, hour closed 30 minutes into the next hour, radix sort per hour, redo if a line is late) is that team's, which we describe here because it is what the frozen commit does.
