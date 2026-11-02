@@ -2,15 +2,15 @@
 
 ## Summary
 
-Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-47` (commit `748922e`), the last tagged commit with stored board runs. The later tag `best-49` (`218638a`) has no stored board run yet: see the Board runs table below. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-4 is listed from the text of this file.
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-50` (commit `2b3efbe`), the frozen source; its board row is in the table, and a repeat reading of the same source (commit `b3760c9`) was `run-e54d176ef27d` 0.0243 s / 9.1 MiB / 374 / 81.19. Board noise on identical code in our own log: C about 3.5% of the median; a difference of a point or two between commits is within noise. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-4 is listed from the text of this file.
 
 | Stage | Run ID | Commit | T (s) | M | S | Points |
 |---|---|---|---|---|---|---|
 | Reference (naive) | none (local) |  | 14.44 | 367 MB | - | 0 |
 | Steps 1-4 (Rust), earliest board run cited in this file | `run-cf24ab5675f5` (not in the log) | `db4cc76` | 0.135 | 141 MiB | 543 | 49.44 |
 | First run in the log (Rust) | `run-6e20c9b0c201` | `32f54ce` | 0.0482 | 9.6 MiB | 542 | 72.30 |
-| Best row in the log (`best-45`, C++) | `run-ce287149e4e9` | `2c4de9a` | 0.0239 | 8.4 MiB | 374 | 81.66 |
-| Final (`best-47`, C++) | `run-c636f7b1f0f0` | `748922e` | 0.0243 | 8.5 MiB | 374 | 81.44 |
+| Best row in the log (C++) | `run-b8a31e97e700` | `6efb41f` | 0.0240 | 8.2 MiB | 374 | 81.77 |
+| Final (`best-50`, C++) | `run-81747cac71e7` | `2b3efbe` | 0.0243 | 8.9 MiB | 374 | 81.28 |
 
 What moved the score:
 

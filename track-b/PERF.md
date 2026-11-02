@@ -2,14 +2,14 @@
 
 ## Summary
 
-Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-47` (commit `748922e`), the last tagged commit with stored board runs. The later tag `best-49` (`218638a`) has no stored board run yet: see the Board runs table below. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-4 is listed from the text of this file.
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-50` (commit `2b3efbe`), the frozen source; its board row is in the table, and a repeat reading of the same source (commit `b3760c9`) was `run-a9cebb112702` 0.1131 s / 43.2 MiB / 695 / 77.68. Board noise on identical code in our own log: B swings between 0.113 and 0.133 s; a difference of a point or two between commits is within noise. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-4 is listed from the text of this file.
 
 | Stage | Run ID | Commit | T (s) | M | S | Points |
 |---|---|---|---|---|---|---|
 | Reference (naive) | none (local) |  | 56.35 | 2,200 MB | - | 0 |
 | Steps 1-4 (Rust), earliest board run cited in this file | `run-c4d559ad6869` (not in the log) | `db4cc76` | 0.426 | 362 MiB | 905 | 53.19 |
 | First run in the log | `run-67ca8f767f8d` | `32f54ce` | 0.3209 | 61.0 MiB | 869 | 64.13 |
-| Best row in the log (also final, `best-47`) | `run-09ecd8747b3e` | `748922e` | 0.1203 | 43.4 MiB | 642 | 77.25 |
+| Best row in the log, also final (`best-50`) | `run-e04aea56e89d` | `2b3efbe` | 0.1124 | 43.4 MiB | 695 | 77.72 |
 
 What moved the score:
 

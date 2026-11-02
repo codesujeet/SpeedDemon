@@ -1,6 +1,6 @@
 # Track C: Join (C++)
 
-Reads `/data/regions.csv` (region id to country code) and `/data/records.csv` (CRLF line endings, a BOM and a header, quoted name and note fields) and writes `/out/aggregates.txt`: per country the record count, sums, minimum and maximum amount and the number of distinct names, with records of unknown regions under `_UNMATCHED`. The exact task and output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/c-join.md).
+Reads `/data/regions.csv` (region id to country code) and `/data/records.csv` (CRLF line endings, a BOM and a header, quoted name and note fields) and writes `/out/aggregates.txt`: per country the record count, the sum of ids, the sum, minimum and maximum amount, the number of distinct names and the total name and note lengths, with records of unknown regions under `_UNMATCHED`. The exact task and output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/c-join.md).
 
 ## Approach
 
@@ -8,7 +8,7 @@ One C++20 file, `src/main.cpp`, built with g++ 15 (`-O3 -march=x86-64-v3 -static
 
 1. **Countries.** `regions.csv` is split by lines; each thread flags the country codes it sees (3 letters, in a 15-bit table). Countries get indices 1..N in code order (0 is `_UNMATCHED`).
 2. **Region table.** Each thread fills its slice of a direct table, one byte per region id, from region id to country index.
-3. **Records.** `records.csv` is split after CRLFs into 8 pieces per thread. The spec (section 2.2) says a CR appears only as the first byte of a CRLF terminator, so the byte after a CRLF always starts a record. Each record is read field by field: the id's comma from one 8-byte word, a quoted field's end by stepping through the bit mask of its quotes (a `""` pair is an escape), so commas and line feeds inside quotes cost nothing; the region's comma and the line feed come from one 32-byte compare each. Numbers are decoded eight digits at a time. Sums go to the thread's own per-country totals. Names go through a shared lock-free table to dense ids, which are marked in one bitset per country; the region read, the table lookup and the bitset word are each prefetched 16 records ahead. A mark that sets a new bit adds one to the country's distinct names, so no pass over the bitsets is needed afterwards. A thread returns the pages of a finished piece to the system.
+3. **Records.** `records.csv` is split after CRLFs into 8 pieces per thread. The spec (section 2.2) says a CR appears only as the first byte of a CRLF terminator, so the byte after a CRLF always starts a record. Each record is read field by field: the id's comma from one 8-byte word, a quoted field's end by stepping through the bit mask of its quotes (a `""` pair is an escape), so commas and line feeds inside quotes cost nothing; the region's comma and the line feed come from one 32-byte compare each. Numbers are decoded eight digits at a time. Sums go to the thread's own per-country totals. Names go through a shared lock-free table (a name's id is its slot) and are marked in one bitset per country; the region read, the table lookup and the bitset word are each prefetched 16 records ahead through rings that start and end full of dummy records. Large tables are populated up front in shares and each piece's pages are mapped with one `MADV_POPULATE_READ`. A mark that sets a new bit adds one to the country's distinct names, so no pass over the bitsets is needed afterwards. A thread returns the pages of a finished piece to the system.
 4. **Output.** The totals of the threads are summed, the text is written, and the process ends with `_exit(0)`.
 
 The `Dockerfile` builds with `-fprofile-use` and the profile `pgo/sdrun-main.gcda`, recorded on seed 2. It must be regenerated whenever the source changes (`-Wno-error=coverage-mismatch` keeps the build from failing on a mismatch).
@@ -25,6 +25,13 @@ The `Dockerfile` builds with `-fprofile-use` and the profile `pgo/sdrun-main.gcd
 
 None.
 
-## Checks
+## Verification
 
-100 back-to-back full-size runs of the C++ source with the harness flags matched the published hash, and outputs matched the Rust build on seeds 1, 2, 3 and 7. gcc profile-guided optimization gave no gain on the first C++ version and was dropped then; it was adopted later, once a profile from a separate run was committed (about 0.0250 s to 0.0243 s on the board). The earlier Rust versions are at git tags up to `best-19`. The optimisation history, with run IDs, is in [`PERF.md`](PERF.md).
+Needs Docker; the datasets are generated with the contest's generator and are not in the repository. From the repository root:
+
+```
+python3 check.py c --data <directory with the regions.csv and records.csv> --expected d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536
+.\real-spec\dock.ps1 -Track c -Scale full -Runs 20
+```
+
+The first builds the track image offline and compares the SHA-256 of the output with the published hash of the seed-1 data; the second replicates the board run (pre-warmed volume, board flags, `memory.peak`) and prints MATCH or MISMATCH. Outputs matched the reference on generated seeds 1, 2, 3, 7, 11 to 16 and 21 to 23 at full scale; 100 back-to-back full-size runs matched the published hash. Known out-of-spec failures in the edge suite: `13_distinct_names_300k` (hangs beyond 131,072 names), `14_300_countries` and `15_2000_countries` (more than 254 countries), `92_OOS_note_lf_digit`. gcc PGO was dropped on the first C++ version and adopted later with a committed profile (about 0.0250 s to 0.0243 s on the board); the `Dockerfile` needs the profile to match the source. The history with run IDs is in [`PERF.md`](PERF.md); the whole-repo architecture is in [`../docs/OVERVIEW.md`](../docs/OVERVIEW.md).

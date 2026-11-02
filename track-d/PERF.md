@@ -2,7 +2,7 @@
 
 ## Summary
 
-Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-47` (commit `748922e`), the last tagged commit with stored board runs. The later tag `best-49` (`218638a`) has no stored board run yet: see the Board runs table below. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-8 is listed from the text of this file. Source size S is 518 on every D row from the replacement draft on (0.166-0.198 s across 98 rows), so that spread is mostly board noise rather than D code changes.
+Where the track stands and why, before the long log below. Board numbers come from `real-spec/board-runs.jsonl` (run IDs as stored); the "reference" row is the contest's unmodified reference solution measured locally in Docker (laptop, slower than the scoring box; it has no board run and scores 0). "Final" is tag `best-50` (commit `2b3efbe`), the frozen source; its board row is in the table, and a repeat reading of the same source (commit `b3760c9`) was `run-1bdc615064c5` 0.1713 s / 66.1 MiB / 518 / 68.69. Board noise on identical code in our own log: D about 3.9% of the median; a difference of a point or two between commits is within noise. The log below is chronological: phrases such as "current version" in its header describe the time they were written, not the final state. The earliest board run for steps 1-8 is listed from the text of this file. Source size S is 518 on every D row from the replacement draft on (0.166-0.198 s across 98 rows), so that spread is mostly board noise rather than D code changes.
 
 | Stage | Run ID | Commit | T (s) | M | S | Points |
 |---|---|---|---|---|---|---|
@@ -10,7 +10,7 @@ Where the track stands and why, before the long log below. Board numbers come fr
 | Steps 1-8 (Rust), earliest board run cited in this file | `run-890f67017a83` (not in the log) | `db4cc76` | 0.475 | 382 MiB | 736 | 48.85 |
 | First run in the log | `run-0a5e5f081b09` | `32f54ce` | 0.2308 | 94.3 MiB | 680 | 63.02 |
 | Best row in the log | `run-1e5e115c0722` | `2a7cc01` | 0.1662 | 66.1 MiB | 518 | 69.02 |
-| Final (`best-47`) | `run-cd014768facf` | `748922e` | 0.1725 | 65.8 MiB | 518 | 68.63 |
+| Final (`best-50`) | `run-e682dbdc30a2` | `2b3efbe` | 0.1729 | 66.3 MiB | 518 | 68.58 |
 
 What moved the score:
 

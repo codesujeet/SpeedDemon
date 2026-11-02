@@ -22,9 +22,16 @@ One Rust file, `src/main.rs`, std only (no crates), built for x86-64-v3 through 
 
 None.
 
-## Checks
+## Verification
 
-The current source was checked against the published hash, generated datasets of seeds 2, 3 and 7, tiny and sample scales, and an edge-case suite (66 cases); `cargo clippy -D warnings` was clean. There are no unit tests for this implementation (`tests/track_d.rs` targets the earlier one and is not compiled). The optimisation history, with run IDs, is in [`PERF.md`](PERF.md).
+Needs Docker; the datasets are generated with the contest's generator and are not in the repository. From the repository root:
+
+```
+python3 check.py d --data <directory with the graph.txt and queries.txt> --expected a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e
+.\real-spec\dock.ps1 -Track d -Scale full -Runs 20
+```
+
+The first builds the track image offline and compares the SHA-256 of the output with the published hash of the seed-1 data; the second replicates the board run (pre-warmed volume, board flags, `memory.peak`) and prints MATCH or MISMATCH. The current source was checked against the published hash, generated seeds 2, 3 and 7, tiny and sample scales and an edge-case suite (66 cases); `cargo clippy -D warnings` was clean. There are no unit tests for this implementation (`tests/track_d.rs` targets the earlier one and is not compiled). The history with run IDs is in [`PERF.md`](PERF.md); the whole-repo architecture is in [`../docs/OVERVIEW.md`](../docs/OVERVIEW.md).
 
 ## Provenance
 

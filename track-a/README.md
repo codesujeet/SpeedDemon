@@ -1,12 +1,12 @@
 # Track A: Ingest (C++)
 
-Reads `/data/requests.log` (one line per request: timestamp, method, endpoint, status, latency) and writes `/out/summary.txt`: for every hour and endpoint, the count, the 50th, 95th and 99th percentile latency and the 5xx rate. The exact task and output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/a-ingest.md). Percentiles are exact (nearest rank), because the output is checked by hash.
+Reads `/data/requests.log` (one line per request: timestamp, method, endpoint, status, latency) and writes `/out/summary.txt`: for every hour and endpoint, the count, the 50th, 95th and 99th percentile latency, the number of 5xx responses and the 5xx rate in parts per million. The exact task and output format are in the [spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/a-ingest.md). Percentiles are exact (nearest rank), because the output is checked by hash.
 
 ## Approach
 
 One C++20 file, `src/main.cpp`, built with g++ 15 (`-O3 -march=x86-64-v3 -static`) on the allowlisted gcc image. One pool of at most 12 threads (`hardware_concurrency`, capped) does everything in three phases:
 
-1. **Parse.** The log is memory-mapped over a spare zero page and cut at line ends into 8 pieces per thread, which threads claim in order. A line's hour index comes from the fixed 27-byte timestamp (day and hour digits only, 72 hours). The line ends of each 4 KB are listed first, then the method, endpoint and latency are read with 16- and 32-byte compares. Endpoints are interned in one lock-free 4,096-slot table (CRC32 hash, four slots per bucket compared by 16-bit tag, then the name). Each line files a 4-byte record (13-bit key: 12-bit endpoint id plus the 5xx flag; latency above it) in a 16 KB chunk of its hour. A thread unmaps a piece's input pages as soon as it is parsed.
+1. **Parse.** The log is memory-mapped over a spare zero page and cut at line ends into 8 pieces per thread, which threads claim in order. A line's hour index comes from the fixed 27-byte timestamp (day and hour digits only, 72 hours). The line ends of each 4 KB are listed first, then the method, endpoint and latency are read with 16- and 32-byte compares. Endpoints are interned in one lock-free 4,096-slot table (CRC32 hash, four slots per bucket compared by 16-bit tag, then the name). Each line files a 4-byte record (13-bit key: 12-bit endpoint id plus the 5xx flag; latency above it) in a 16 KB chunk of its hour. A thread drops a piece's input pages (`madvise`) as soon as it is parsed.
 2. **Hours.** The last thread to arrive at a barrier ranks the endpoint names in byte order. Threads then claim hours: an hour's latencies are counting-sorted by endpoint rank into scratch and three selections per group give p50, p95 and p99. Each group's numbers are kept together with the exact size its text line will take, since a number's width is known without formatting it. The hour's chunks go back to the system in one `madvise`.
 3. **Text.** The last thread into the next barrier turns the sizes into offsets, sizes the output file and maps it; then every thread formats its hours straight into the file. The process ends with `_exit(0)`.
 
@@ -28,6 +28,13 @@ Limits of this implementation, none reachable with the published data (a seed ha
 
 None.
 
-## Checks
+## Verification
 
-The first C++ version ran 100 back-to-back full-size runs with the harness flags, all matching the published hash, and the later drafts 80 or more. Each change was also compared against the Rust build on seeds 1, 2, 3 and 7. The earlier Rust version (0.026-0.029 s, S 508-510) is kept at git tag `best-19`. The optimisation history, with run IDs, is in [`PERF.md`](PERF.md).
+Needs Docker; the datasets are generated with the contest's generator and are not in the repository. From the repository root:
+
+```
+python3 check.py a --data <directory with the requests.log (A)> --expected 495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3
+.\real-spec\dock.ps1 -Track a -Scale full -Runs 20
+```
+
+The first builds the track image offline and compares the SHA-256 of the output with the published hash of the seed-1 data; the second replicates the board run (pre-warmed volume, board flags, `memory.peak`) and prints MATCH or MISMATCH. Full-size runs matched the published hash every time they were repeated (100 back-to-back runs of the first C++ version, 80 or more for later drafts), and outputs matched the reference on generated seeds 1, 2, 3, 7, 11 to 16 and 21 to 23 at full scale. The earlier Rust version (0.026-0.029 s, S 508-510) is at git tag `best-19`. The history with run IDs is in [`PERF.md`](PERF.md); the whole-repo architecture is in [`../docs/OVERVIEW.md`](../docs/OVERVIEW.md).
