@@ -382,14 +382,6 @@ static LEFT: [[u32; 8]; 256] = {
     t
 };
 
-// One record per anchored phrase: its ids padded to eight lanes, so a candidate is checked by one vector compare.
-struct Rec {
-    ids: [u32; 8],
-    q: u32,
-    j: u8,
-    len: u8,
-}
-
 fn main() {
     unsafe { mallopt(-3, 1 << 16) };
     let qtext = map("/data/queries.txt");
@@ -505,16 +497,7 @@ fn main() {
         (0..nkeep - a0).for_each(|k| astart[k + 1] += astart[k]);
         let (mut put, mut grouped) = (astart.clone(), vec![(0, 0, 0); anchored.len()]);
         anchored.iter().for_each(|a| (grouped[put[slot(a)]], put[slot(a)]) = (*a, put[slot(a)] + 1));
-        let recs: Vec<Rec> = grouped
-            .iter()
-            .map(|&(_, q, j)| {
-                let span = spans[q as usize];
-                let mut r = Rec { ids: [0; 8], q, j: j as u8, len: (span.2 - span.1) as u8 };
-                r.ids[..r.len as usize].copy_from_slice(&ids[span.1 as usize..span.2 as usize]);
-                r
-            })
-            .collect();
-        (nbits, a0, lists, nkeep, recs, astart)
+        (nbits, a0, lists, nkeep, grouped, astart)
     };
 
     let words = ndocs.div_ceil(256) * 4;
@@ -586,18 +569,12 @@ fn main() {
             }
             for at in anchors[..na].iter().map(|&at| at as usize) {
                 let k = (toks[at] as usize).min(nkeep) - a0;
-                for r in &anchored[astart[k]..astart[k + 1]] {
-                    let (s, len) = (at.wrapping_sub(r.j as usize), r.len as usize);
-                    // One compare of eight ids (the buffer keeps spare ids past the end); lanes from len up are ignored.
-                    if at >= r.j as usize && s + len <= toks.len() {
-                        let eq = unsafe {
-                            let v = _mm256_loadu_si256(toks.as_ptr().add(s).cast());
-                            _mm256_cmpeq_epi32(v, _mm256_loadu_si256(r.ids.as_ptr().cast()))
-                        };
-                        let want = (1u32 << len) - 1;
-                        if unsafe { _mm256_movemask_ps(_mm256_castsi256_ps(eq)) } as u32 & want == want {
-                            mine.push((r.q, doc));
-                        }
+                for &(_, q, j) in &anchored[astart[k]..astart[k + 1]] {
+                    let span = spans[q as usize];
+                    let phrase = &ids[span.1 as usize..span.2 as usize];
+                    let s = at.wrapping_sub(j as usize);
+                    if toks.get(s..s.wrapping_add(phrase.len())) == Some(phrase) {
+                        mine.push((q, doc));
                     }
                 }
             }
