@@ -420,6 +420,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `3367bd7` | Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-2406dadbf314` | 0.1189 | 43.5 | 695 | 77.11 |
 | `8b9c845` | Revert "Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-66277d8d199c` | 0.1159 | 43.8 | 695 | 77.35 |
 | `4bb6d40` | Track A: one malloc arena (the 12 thread arenas held 1.4 MiB); memory.peak 16.2 -> 15.3 Mi | `run-9ce05794d44f` | 0.1141 | 43.4 | 695 | 77.56 |
+| `3896a27` | PERF: A streaming-hours experiment, reverted (run-70e34892adfd) | `run-c3a2d6096045` | 0.1129 | 43.8 | 695 | 77.64 |
+| `bdb58fd` | Track B: filtering a list by a bitmap or a longer list writes every id and advances by the | `run-ddc2d15bb20e` | 0.1116 | 43.3 | 724 | 77.68 |
 
 <!-- board-runs:end -->
 
@@ -469,3 +471,4 @@ Tried and reverted (the board did not confirm the local gain; B reading with the
 - Not on the board (local numbers only): interleaving two or four token streams in one loop (neutral to slightly slower, more instructions); a 64-byte bucket layout with tags and ids in one line (-5 instructions per token but 4 to 7% slower wall); an exact multiplicative key for short tokens (slower than AES); folding `count[]` into the unit write; dropping the `last[]` prefetch; VAES hashing of two tokens (about 1 instruction per token); a flat (term, doc) pair stream (needs about 44 MB more, over the memory cap); SIMD list intersection (merging is about 9% of the answer phase).
 
 Board noise on identical code was large for B: the same source read 0.1124, 0.1131 and, in another reading, 0.113-0.133 s; single readings under about 4% cannot be told apart.
+- Pool first, 16-byte two-round hash, `keep()` filter (`0dda495`, `4599ca9`, `bdb58fd`; reverted): 0.1116 s, 43.3 MiB, S 724, 77.68 against best-50's 0.1124 s, S 695, 77.72. Locally the minimum fell about 8% over 40 interleaved runs and the median stayed flat; on the board the gain was inside the noise and the 29 extra lines cost as much. Also tried locally and dropped: SIMD 8x8 intersection (-9% on one CPU, +7% at 12 CPUs, as the permutes share a port with the SMT sibling), a persistent scratch bitmap for list conversion, prefetching the bitmap word, threshold tuning, a duplicate-query memo (0.7% of queries, at most 0.17 ms).

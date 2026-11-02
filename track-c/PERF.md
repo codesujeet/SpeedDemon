@@ -300,6 +300,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `3367bd7` | Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-11b535d03634` | 0.0243 | 8.9 | 374 | 81.25 |
 | `8b9c845` | Revert "Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-e2ac990c088b` | 0.0283 | 8.9 | 374 | 79.62 |
 | `4bb6d40` | Track A: one malloc arena (the 12 thread arenas held 1.4 MiB); memory.peak 16.2 -> 15.3 Mi | `run-b57858e1654f` | 0.0242 | 8.9 | 374 | 81.30 |
+| `3896a27` | PERF: A streaming-hours experiment, reverted (run-70e34892adfd) | `run-48caaa1c5c62` | 0.0266 | 9.2 | 374 | 80.16 |
+| `bdb58fd` | Track B: filtering a list by a bitmap or a longer list writes every id and advances by the | `run-6aba41d76b9e` | 0.0241 | 8.6 | 374 | 81.48 |
 
 <!-- board-runs:end -->
 
