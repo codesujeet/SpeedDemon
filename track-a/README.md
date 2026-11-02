@@ -10,18 +10,7 @@ Tag `best-51` (commit `3b8422f`): 0.0195 s, 14.4 MiB, S 404, 85.73 on the board 
 
 One C++20 file, `src/main.cpp`, built with g++ 15 (`-O3 -march=x86-64-v3 -static`) on the allowlisted gcc image. One pool of at most 12 threads (`hardware_concurrency`, capped) makes one pass over the log; each hour is finished and written while later parts of the log are still being parsed.
 
-```mermaid
-flowchart TD
-    M["mmap log over a spare zero page; line-aligned pieces, 8 per thread, smaller towards the end"] --> P["threads claim pieces in order and parse"]
-    P --> R["per line: hour from the date digits; endpoint id from the lock-free table; 4-byte record into the hour's region"]
-    R --> D["drop the piece's input pages"]
-    D --> Q{"first unparsed piece 30 min into the next hour?"}
-    Q -- yes --> C["close the hour: radix sort, percentiles by index, line sizes, give the region back"]
-    Q -- no --> P
-    C --> T["format placed hours straight into the mapped output"]
-    T --> X["_exit(0)"]
-    R -. "line for a closed hour" .-> F["fallback: hand back everything, redo holding all hours open"]
-```
+![Track A flowchart: one-pass parse, early hour close, radix sort, percentiles by index, output into the mapped file, with a redo path for late lines](../docs/diagrams/track-a.svg)
 
 1. **Parse.** The log is memory-mapped over a spare zero page and cut at line ends into pieces (eight per thread, smaller towards the end so threads finish together), claimed in order. The line ends of each 64-byte block are found at once and a line is read from both ends; the hour comes from the fixed 27-byte timestamp's day and hour digits (72 hours). Endpoints are interned in one lock-free table (8,192 slots, 16-bit tags, claimed by compare-and-swap). Each line files a 4-byte record (latency above a 12-bit key: the 5xx flag and the endpoint id) in its hour's region; latencies of 2^20 - 1 us or more (about 1% of lines) take two places. A thread drops a piece's input pages (`madvise`) once parsed.
 2. **Close hours early.** The log is in about clock order (an hour's last lines arrive 5 to 10 minutes after it ends), so an hour is closed as soon as the first unparsed piece starts 30 minutes into the next hour. Its records are radix-sorted by endpoint rank and latency in three passes, so each group's p50, p95 and p99 are read off by index, and the region goes back to the system. Each group keeps its numbers and the exact size of its text line (a number's width is known without formatting it).

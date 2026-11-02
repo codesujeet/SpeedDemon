@@ -30,19 +30,7 @@ Source: `track-a/src/main.cpp` (C++20, g++ 15, `-O3 -march=x86-64-v3 -static`), 
 - **Input:** `/data/requests.log`, lines of timestamp (27 bytes), method, endpoint, status, latency; 72 fixed hours.
 - **Output:** `/out/summary.txt`: per hour and endpoint (in byte order of the name) the count, p50, p95, p99 (nearest rank, exact), the 5xx count and the 5xx rate in parts per million.
 
-```mermaid
-flowchart TD
-    M["mmap log, line-aligned pieces, 8 per thread, smaller towards the end"] --> P["Parse: threads claim pieces in order"]
-    P --> P2["per line: hour from timestamp digits, endpoint id from the lock-free table, 4-byte record into the hour's own region"]
-    P2 --> X["drop the piece's input pages"]
-    X --> Q{"first unparsed piece starts 30 min into the next hour?"}
-    Q -- yes --> H["close the hour: radix sort by endpoint rank and latency, percentiles read by index, line sizes computed, region handed back"]
-    Q -- no --> P
-    H --> W["sizes known: placed hours are formatted straight into the mapped output"]
-    W --> E["_exit(0)"]
-    P2 -. "a line for a closed hour" .-> L["late flag: hand everything back, redo with every hour held open"]
-    L -.-> P
-```
+![Track A flowchart: one-pass parse, early hour close, radix sort, percentiles by index, output into the mapped file, with a redo path for late lines](diagrams/track-a.svg)
 
 Caption: A is one pass; each hour is closed and sorted while later pieces are still parsed, and text is written into the mapped output as soon as the sizes of the earlier hours are known. A late line (never seen in generated data) restarts the pass with every hour held open.
 
@@ -58,22 +46,7 @@ Source: `track-b/src/main.rs` (Rust, std only, AVX2 and AES-NI, `.cargo/config.t
 - **Input:** `/data/queries.txt` (BOOL queries with operators `A`, `O`, `N`, and PHRASE queries) and `/data/docs.txt` (one document per line, `id<TAB>text`, ids dense and ascending).
 - **Output:** `/out/results.txt`, one line per query: count, sum of ids, first ten ids.
 
-```mermaid
-flowchart TD
-    Q["Read queries.txt first: SIMD tokenize, hash each term, insert into the term table"] --> S["Sample: each thread walks the first 1/64 of its share and counts document frequency per query term"]
-    S --> C["Classify: bitmap terms, list terms, phrase anchors, phrase-only terms; renumber by a counting sort"]
-    C --> SC["Scan: 12 threads over equal shares of docs.txt"]
-    subgraph SCAN["Scan, per document"]
-        direction TB
-        TK["tokens: 64-byte window, class masks, hash, prefetch slot, lookup ring of 4"] --> ID["ids appended per document"]
-        ID --> PK["SIMD compaction of ids into bitmap ids and anchor positions"]
-        PK --> W["set bitmap bits, check phrases at anchors, write units for list terms"]
-    end
-    SC --> SCAN
-    SCAN --> F["Fill: units scattered into one u16 offset run per term and thread, bucket by bucket"]
-    F --> A["Answers: threads take 64 queries at a time; merge, bitmap and list operations"]
-    A --> O["Output chunks joined in query order, _exit(0)"]
-```
+![Track B flowchart: queries first, term table, sample and classify, scan with lookup ring, fill, answers, output](diagrams/track-b.svg)
 
 Caption: B runs queries, sample, classify, scan (tokens, lookup ring, per-document pass), fill, answers, output, on 12 persistent threads.
 
@@ -90,21 +63,7 @@ Source: `track-c/src/main.cpp` (C++20, g++ 15, `-O3 -march=x86-64-v3 -static`, g
 - **Input:** `/data/regions.csv` (header, `id,ABC` lines, ascending ids) and `/data/records.csv` (BOM, header, CRLF lines, quoted name and note fields).
 - **Output:** `/out/aggregates.txt`: per country (in code order, then `_UNMATCHED`) the record count, sum of ids, sum, minimum and maximum amount, number of distinct names, total name bytes and total note bytes.
 
-```mermaid
-flowchart TD
-    R["Phase 1 regions: flag country codes per piece; populate tables"] --> N["Countries numbered once 1..N in code order"]
-    N --> RT["Phase 2 region table: byte per region id to country index; populate bitsets"]
-    RT --> RP["Phase 3 records: 8 pieces per thread claimed by threads"]
-    subgraph LOOP["Per record, three stages LAG 16 apart"]
-        direction TB
-        P1["parse fields; prefetch region row and name slot"] --> P2["read country, add to totals, look up name slot, prefetch bitset word"]
-        P2 --> P3["mark name in the country's bitset; a new bit counts a distinct name"]
-    end
-    RP --> LOOP
-    LOOP --> D["drop the piece's pages"]
-    D --> TT["Sum per-thread totals"]
-    TT --> O["Write aggregates.txt, _exit(0)"]
-```
+![Track C flowchart: regions, country table, region table, records in three stages, totals, output](diagrams/track-c.svg)
 
 Caption: C runs regions, country table, parse records (ring: parse, lookup, mark), totals, output.
 
@@ -120,16 +79,7 @@ Source: `track-d/src/main.rs` (Rust, std only, `.cargo/config.toml`).
 - **Input:** `/data/graph.txt` (first line node and edge counts, then one weighted directed edge per line) and `/data/queries.txt` (source, target pairs).
 - **Output:** `/out/distances.txt`: the shortest distance per query, `-1` if unreachable.
 
-```mermaid
-flowchart TD
-    Q["Read queries"] --> P["1. Parse once: line-aligned ranges per thread; each edge filed under its tail's part of 16,384 nodes"]
-    P --> B["2. Build each part: count degrees and place edges in a 64 KB counter array, no atomics"]
-    B --> BF["3. Locality order: threads grow BFS blobs of 512 nodes, nodes claimed by compare-exchange"]
-    BF --> RN["Copy graph into the new numbering, then build the reverse graph"]
-    RN --> S["Sort queries by renumbered endpoints"]
-    S --> DJ["4. Query: workers take queries from an atomic counter; bidirectional Dijkstra, 4-ary heaps, paged distances"]
-    DJ --> O["Write distances.txt, exit(0)"]
-```
+![Track D flowchart: parse and file edges, build parts, BFS-blob renumbering and reverse graph, bidirectional Dijkstra queries, output](diagrams/track-d.svg)
 
 Caption: D runs parse and file, build parts, BFS-blob renumbering plus reverse graph, then bidirectional Dijkstra queries on persistent workers.
 

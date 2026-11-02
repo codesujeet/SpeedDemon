@@ -6,21 +6,7 @@ Reads `/data/regions.csv` (region id to country code) and `/data/records.csv` (C
 
 Tag `best-50» (commit `2b3efbe»): 0.0243 s, 8.9 MiB, S 374, 81.28 on the board (`run-81747cac71e7»); the best row in the log is `run-b8a31e97e700», 0.0240 s, 8.2 MiB, 81.77, and the same source read 81.19 to 81.62 on its other rows. Progress (running best points, rows from `real-spec/board-runs.jsonl»): 72.30 (`run-6e20c9b0c201», Rust, Oct 31), 73.85 (`run-9e0e1b6e7e0d»), 79.18 (`run-202087ed39eb», Nov 1 06:00), 80.54 (`run-93446999afd8»), 81.63 (`run-d37977de033c»), 81.77. The long table is in [`PERF.md»](PERF.md).
 
-```mermaid
-flowchart TD
-    R["Phase 1 regions: flag country codes per piece; populate tables"] --> N["Countries numbered once 1..N in code order"]
-    N --> RT["Phase 2 region table: byte per region id to country index"]
-    RT --> RP["Phase 3 records: 8 pieces per thread, claimed by threads"]
-    subgraph LOOP["Per record, three stages 16 records apart"]
-        direction TB
-        P1["parse fields; prefetch region row and name slot"] --> P2["read country, add to totals, look up name slot, prefetch bitset word"]
-        P2 --> P3["mark the name in the country's bitset; a new bit counts a distinct name"]
-    end
-    RP --> LOOP
-    LOOP --> D["drop the piece's pages"]
-    D --> TT["Sum per-thread totals"]
-    TT --> O["Write aggregates.txt, _exit(0)"]
-```
+![Track C flowchart: regions, country table, region table, records in three stages, totals, output](../docs/diagrams/track-c.svg)
 
 Caption: regions, country table, records (a ring of parse, lookup and mark stages), totals, output.
 

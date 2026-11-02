@@ -10,22 +10,7 @@ Final choice. A faster alternative (phased 16-bit postings, AES token hash, cach
 
 
 
-```mermaid
-flowchart TD
-    Q["Read queries.txt first: SIMD tokenize, hash each term, insert into the term table"] --> S["Sample: each thread counts document frequency of query terms in the first 1/64 of its share"]
-    S --> C["Classify: bitmap terms, list terms, phrase anchors, phrase-only terms; renumber by a counting sort"]
-    C --> SC["Scan: 12 threads over equal shares of docs.txt"]
-    subgraph SCAN["Scan, per document"]
-        direction TB
-        TK["tokens: 64-byte window, class masks, AES hash, prefetch slot, lookup ring of 4"] --> ID["ids appended per document"]
-        ID --> PK["SIMD compaction of ids into bitmap ids and anchor positions"]
-        PK --> W["set bitmap bits, check phrases at anchors, write units for list terms"]
-    end
-    SC --> SCAN
-    SCAN --> F["Fill: units scattered into one u16 offset run per term and thread, bucket by bucket (gate: at most two buckets apart)"]
-    F --> A["Answers: threads take 64 queries at a time; merge, bitmap and list operations"]
-    A --> O["Output chunks joined in query order, _exit(0)"]
-```
+![Track B flowchart: queries first, term table, sample and classify, scan with lookup ring, fill, answers, output](../docs/diagrams/track-b.svg)
 
 Caption: queries first, sample, classify, scan (tokens, lookup ring, per-document pass), fill, answers, output, on 12 persistent threads.
 

@@ -59,16 +59,7 @@ Times are UTC from the board log (`ended_at`); git's committer times are +05:30.
 
 Best points seen so far on the board per track, at fixed times (UTC), from `real-spec/board-runs.jsonl`:
 
-```mermaid
-xychart-beta
-    title "Best board points so far per track (running maximum)"
-    x-axis ["Oct31 10h", "Oct31 18h", "Nov1 06h", "Nov1 12h", "Nov1 18h", "Nov2 00h", "Nov2 05h", "Nov2 13h"]
-    y-axis "points" 60 --> 90
-    line [79.88, 79.88, 84.02, 84.52, 85.32, 85.32, 85.32, 85.73]
-    line [64.13, 69.70, 73.42, 73.53, 75.75, 77.67, 77.72, 77.72]
-    line [72.30, 73.85, 79.18, 80.54, 81.63, 81.77, 81.77, 81.77]
-    line [63.02, 68.83, 68.83, 69.02, 69.02, 69.02, 69.02, 69.02]
-```
+![Best board points so far per track (running maximum): A reaches 85.73, C 81.77, B 77.72, D 69.02](docs/diagrams/progress.svg)
 
 Caption: the four lines are, from the top at the right edge, A (85.73), C (81.77), B (77.72) and D (69.02). The values and the run that set each:
 
@@ -85,51 +76,30 @@ Caption: the four lines are, from the top at the right edge, A (85.73), C (81.77
 
 Track B's wall time on the board, selected rows from the log:
 
-```mermaid
-xychart-beta
-    title "Track B wall time on the board (s), selected log rows"
-    x-axis ["first row", "2ce9b21", "a94d376", "960565b", "748922e", "best-50"]
-    y-axis "T (s)" 0 --> 0.35
-    bar [0.3209, 0.1767, 0.1674, 0.1519, 0.1203, 0.1124]
-```
+![Track B wall time on the board in seconds: 0.3209 at the first row down to 0.1124 at best-50](docs/diagrams/track-b-time.svg)
 
 Caption: B board time in seconds: 0.3209 (`run-67ca8f767f8d`), 0.1767 (`run-42bec5c66bdc`), 0.1674 (`run-d58c749305c7`), 0.1519 (`run-1dc829833835`), 0.1203 (`run-09ecd8747b3e`), 0.1124 (`run-e04aea56e89d`). Per-track tables of the same kind (with T and M) are in each `PERF.md` summary.
 
 ## How the repo fits together
 
-```mermaid
-flowchart LR
-    S["Contest spec per track: inputs, output format, SHA-256"] --> T["track-a to track-d: one source file each"]
-    T --> D["Dockerfile build: offline, allowlisted base image"]
-    D --> R["Board run: T, M, S, points"]
-    R --> F["real-spec/board.py reads the public feed"]
-    F --> J["real-spec/board-runs.jsonl"]
-    J --> P["track PERF.md: summary, log, Board runs table"]
-    D --> L["Local check: check.py, dock.ps1, callgrind, perf"]
-    L --> E["Verify: published hash, seeds, edge suites"]
-    E -.-> T
-    P -.-> T
-```
+![System overview: contest spec, track source, offline Dockerfile build, board run, board feed, board-runs.jsonl and PERF.md, with the local verification loop feeding back into the source](docs/diagrams/system-overview.svg)
+
+![System design: the repository and Dockerfile, the sandboxed run from /data to /out, and what the board measures (T, M, S and the output hash)](docs/diagrams/system-design.svg)
+
+How a track's points follow from the measurements (constants from the contest's `scoring.py`):
+
+![How the score is computed: K is the product of (Tref/T)^0.50, min(Mref/M, 50)^0.20, min(Sref/S, 1)^0.15 and min(Dref/D, 1)^0.15; points are 50 log10 K clamped to 0 to 100](docs/diagrams/scoring.svg)
 
 Caption: spec -> track source -> Dockerfile build -> board run -> board feed -> `board-runs.jsonl` -> `PERF.md`; local measurement and verification, and the PERF log, feed back into the source. The board was both the judge and, several times, the profiler.
 
-The four solutions in one picture (details and a flowchart per track are in [`docs/OVERVIEW.md`](docs/OVERVIEW.md)):
+The four solutions (details and a flowchart per track are in [`docs/OVERVIEW.md`](docs/OVERVIEW.md)):
 
-```mermaid
-flowchart TB
-    subgraph SA["A Ingest, C++"]
-        A1["parse pieces in parallel: 4-byte records per hour"] --> A2["close an hour early: radix sort, percentiles by index"] --> A3["format text straight into the mapped output"]
-    end
-    subgraph SB["B Index, Rust"]
-        B1["queries first: term table"] --> B2["sample and classify: bitmap or list terms"] --> B3["scan docs with prefetched lookup ring"] --> B4["answer queries left to right"]
-    end
-    subgraph SC["C Join, C++"]
-        C1["country table"] --> C2["region byte table"] --> C3["records: parse, lookup, mark through prefetch rings"] --> C4["sum totals"]
-    end
-    subgraph SD["D Traverse, Rust"]
-        D1["parse and file edges"] --> D2["BFS-blob renumbering, reverse graph"] --> D3["bidirectional Dijkstra, 4-ary heaps"]
-    end
-```
+Flowcharts of the four solutions (the sources of these figures are in [`docs/diagrams/`](docs/diagrams/), built with `build.sh`):
+
+- A Ingest: [`track-a.svg`](docs/diagrams/track-a.svg)
+- B Index: [`track-b.svg`](docs/diagrams/track-b.svg)
+- C Join: [`track-c.svg`](docs/diagrams/track-c.svg)
+- D Traverse: [`track-d.svg`](docs/diagrams/track-d.svg)
 
 Caption: A, B, C and D in three or four stages each; all map their input, use at most 12 threads and end with `_exit`/`exit` without freeing.
 

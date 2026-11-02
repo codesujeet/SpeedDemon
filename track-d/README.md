@@ -6,16 +6,7 @@ Reads `/data/graph.txt` (a directed weighted graph, one edge per line) and the q
 
 Tag `best-50» (commit `2b3efbe»): 0.1729 s, 66.3 MiB, S 518, 68.58 on the board (`run-e682dbdc30a2»). Track D is not counted in the overall score (the best three tracks count) and had its last source change on Nov 1 (commit `4d1d805», exit right after the output). Progress (running best points, rows from `real-spec/board-runs.jsonl»): 63.02 (`run-0a5e5f081b09», Oct 31), 68.83 (`run-237237831d54», Oct 31 18:30, after the new design: S 680 to 517), 69.02 (`run-1e5e115c0722», the best row, a reading of unchanged code). The long table is in [`PERF.md»](PERF.md).
 
-```mermaid
-flowchart TD
-    Q["Read queries"] --> P["1. Parse once: line-aligned ranges per thread; each edge filed under its tail's part of 16,384 nodes"]
-    P --> B["2. Build each part: count degrees and place edges in a 64 KB counter array, no atomics"]
-    B --> BF["3. Locality order: threads grow BFS blobs of 512 nodes, nodes claimed by compare-exchange"]
-    BF --> RN["Copy the graph into the new numbering, then build the reverse graph"]
-    RN --> S["Sort queries by renumbered endpoints"]
-    S --> DJ["4. Query: workers take queries from an atomic counter; bidirectional Dijkstra, 4-ary heaps, paged distances"]
-    DJ --> O["Write distances.txt, exit(0)"]
-```
+![Track D flowchart: parse and file edges, build parts, BFS-blob renumbering and reverse graph, bidirectional Dijkstra queries, output](../docs/diagrams/track-d.svg)
 
 Caption: parse and file, build parts, BFS-blob renumbering plus reverse graph, then bidirectional Dijkstra on persistent workers.
 
