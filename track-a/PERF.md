@@ -315,6 +315,11 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `77c3a49` | Track B: the df sample is 1/256 of the text, not 1/64 | `run-a52ec9d39572` | 0.0208 | 18.5 | 321 | 84.71 |
 | `b3760c9` | Revert "Track B: the thread pool is started first thing, as a tree of spawns" | `run-f1810d73d5b3` | 0.0203 | 18.0 | 321 | 85.08 |
 | `6c5b7ff` | Track B: tokens of up to 16 bytes hashed with two AES rounds over 16 bytes | `run-0223320ed21e` | 0.0207 | 18.2 | 321 | 84.84 |
+| `fc62566` | Log board runs through 6c5b7ff | `run-178e7e2c50b0` | 0.0212 | 18.6 | 321 | 84.50 |
+| `3d61246` | PERF: Nov 2 experiments with board rows (kept and reverted) | `run-b82636d735c7` | 0.0203 | 18.7 | 321 | 84.93 |
+| `3367bd7` | Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-bc9e8d3c9f37` | 0.0206 | 18.4 | 322 | 84.82 |
+| `8b9c845` | Revert "Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-5ae032552261` | 0.0204 | 18.1 | 321 | 85.04 |
+| `4bb6d40` | Track A: one malloc arena (the 12 thread arenas held 1.4 MiB); memory.peak 16.2 -> 15.3 Mi | `run-70e34892adfd` | 0.0228 | 15.6 | 388 | 83.80 |
 
 <!-- board-runs:end -->
 
@@ -364,3 +369,4 @@ Board diagnostics, each with correct output and one phase run twice: the parse a
 
 - Hour-sized buffers in their own mappings (`mallopt(M_MMAP_THRESHOLD, 32 KiB)` plus `reserve`, `218638a`, `run-1b7e512b0af6`): 0.0204 s, 18.2 MiB, S 321, 84.98. Peak memory fell by about 1.1 MiB (19.3 to 18.2 on the board; 19.18 to 18.11 MiB in 10 interleaved local runs) for 3 code lines. Kept.
 - Not on the board (local numbers only): sorting groups of 32 or fewer outright (more instructions, 733.2 M to 743.4 M: only 27% of the latencies sit in such groups); smaller chunks (no change in peak); gcc PGO (-3.9% instructions, no measurable timing gain over 12 interleaved runs, so not adopted); claiming hours biggest first and letting the last thread call `_exit` (about 0.3 ms estimated, not measurable locally).
+- Streaming hours (`7867844`, `01c21aa`, `4bb6d40`; reverted in `ea03266`), `run-70e34892adfd`: 0.0228 s, 15.6 MiB, S 388, 83.80 (best-50 was 0.0200 s, 18.4 MiB, 85.16). Hours were finished and written with `pwrite` while the log was still being read, and the per-hour scratch and malloc arenas were given back; locally `memory.peak` fell 18.6 to 15.5 MiB at an equal median wall time, and seed 41 at full scale matched the reference. On the board the memory gain held (-2.8 MiB, about +0.6 pt) but time rose 14%, which cost more than that and 67 more source lines. Threads waiting for an hour to be ready showed up there and not in the local loop. Reverted; A is back at `best-50`.

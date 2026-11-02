@@ -415,6 +415,11 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `77c3a49` | Track B: the df sample is 1/256 of the text, not 1/64 | `run-dd8939172c8a` | 0.1150 | 43.1 | 701 | 77.48 |
 | `b3760c9` | Revert "Track B: the thread pool is started first thing, as a tree of spawns" | `run-a9cebb112702` | 0.1131 | 43.2 | 695 | 77.68 |
 | `6c5b7ff` | Track B: tokens of up to 16 bytes hashed with two AES rounds over 16 bytes | `run-2de379871887` | 0.1177 | 43.4 | 709 | 77.16 |
+| `fc62566` | Log board runs through 6c5b7ff | `run-e5cf13482a36` | 0.1127 | 43.6 | 695 | 77.67 |
+| `3d61246` | PERF: Nov 2 experiments with board rows (kept and reverted) | `run-cee307327cd8` | 0.1135 | 43.2 | 695 | 77.64 |
+| `3367bd7` | Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-2406dadbf314` | 0.1189 | 43.5 | 695 | 77.11 |
+| `8b9c845` | Revert "Track A: piece sizes shrink toward the end so threads finish together (experiment) | `run-66277d8d199c` | 0.1159 | 43.8 | 695 | 77.35 |
+| `4bb6d40` | Track A: one malloc arena (the 12 thread arenas held 1.4 MiB); memory.peak 16.2 -> 15.3 Mi | `run-9ce05794d44f` | 0.1141 | 43.4 | 695 | 77.56 |
 
 <!-- board-runs:end -->
 
