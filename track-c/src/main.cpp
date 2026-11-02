@@ -260,8 +260,8 @@ void parse_records(const char* p, const char* end, const char* file_end, const u
         ++t.count;
         t.id_sum += old.id;
         t.amount_sum += old.cents;
-        if (old.cents < t.amount_min) t.amount_min = old.cents;
-        if (old.cents > t.amount_max) t.amount_max = old.cents;
+        t.amount_min = std::min(t.amount_min, old.cents);
+        t.amount_max = std::max(t.amount_max, old.cents);
         t.text_bytes += old.text_bytes;
         marks[k] = {c, names.id(old.name)};
         seen.prefetch(c, marks[k].id);
