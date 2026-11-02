@@ -257,7 +257,7 @@ int main() {
     size_t size = lseek(in, 0, SEEK_END);
     auto* log = (char*)mmap(nullptr, size + 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (size && mmap(log, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, in, 0) == MAP_FAILED) return perror("mmap"), 1;
-    // Line-aligned pieces, eight per thread, claimed in order: a thread that
+    // Line-aligned pieces, eight per thread (shrinking toward the end, so the threads finish together), claimed in order: a thread that
     // starts late or shares its core takes fewer.
     // Each hour's stretch has room for every line (a line is at least 40 bytes)
     // plus one part-full chunk per thread; pages are charged only once written.
@@ -269,7 +269,7 @@ int main() {
     std::vector<size_t> cut(pieces + 1, size);
     cut[0] = 0;
     for (int k = 1; k < pieces; ++k)
-        for (cut[k] = std::max(cut[k - 1], size * k / pieces); cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
+        for (cut[k] = std::max(cut[k - 1], size / 2 * (3 * pieces * k - k * k) / (pieces * pieces)); cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
     std::atomic<int> claim_piece{0}, claim{0}, claim_text{0};
 
     // Between the phases, endpoints are ranked in unsigned byte order (a
