@@ -1,21 +1,29 @@
 // Speed Demon 2026, Track A (Ingest).
 //
-// One pool of threads reads the log and finishes the hours while it is still being read.
+// One pool of threads does everything in two phases.
 //
-// Parse. The log is memory-mapped and cut into line-aligned pieces, claimed in order. The
-// timestamp is always 27 bytes and the 72-hour span is fixed, so a line's hour index comes from
-// its day and hour digits alone. One 64-byte scan after the timestamp finds the method's end,
-// the endpoint's end and the line's end. Endpoints are interned in one lock-free table shared
-// by all threads, and each line files a 4-byte record (latency, endpoint id, 5xx flag) under its
-// hour.
+// Phase 1, parse. The log is memory-mapped and cut into line-aligned ranges,
+// one per thread. The timestamp is always 27 bytes and the 72-hour span is
+// fixed, so a line's hour index comes from its day and hour digits alone. One
+// 64-byte scan after the timestamp finds the method's end, the endpoint's end
+// and the line's end. Endpoints are interned in one lock-free table shared by
+// all threads, and each line files a 4-byte record (latency, endpoint id, 5xx
+// flag) under its hour.
 //
-// Hours. The log is nearly in time order, so hour h is finished (by whichever thread is free)
-// as soon as the pieces parsed from the start hold a line of hour h + 2; a check at the end of
-// each piece catches a log where that guess was wrong, and then the run starts over with every
-// hour finished after the parse. An hour's ~43k latencies are counting-sorted by endpoint,
-// three selections per group give the percentiles, and the text is written with pwrite at the
-// offset that the sizes of the earlier hours give. The hour's records are then released, so the
-// memory in use is mostly the output file's pages, not the records.
+// Between the phases the last thread to arrive sorts the names, so each
+// endpoint id gets its rank in output order.
+//
+// Phase 2, hours. Threads claim hours in order. An hour's ~43k latencies are
+// counting-sorted by endpoint rank into per-thread scratch and three
+// selections per group give the percentiles. Each group's numbers are kept
+// (24 bytes a line) along with the exact size the hour's text will take, since
+// a number's width is known without formatting it.
+//
+// Phase 3, text. The last thread into the barrier turns the sizes into
+// offsets, sizes the output file and maps it; then every thread formats its
+// hours straight into the file. No hour waits for another and no write call
+// queues on the file's lock, and the output's pages fill only after the
+// records have been released.
 #include <bits/stdc++.h>
 #include <fcntl.h>
 #include <malloc.h>
@@ -31,7 +39,7 @@ constexpr int HOURS = 72;  // 2026-10-30T18:00Z to 2026-11-02T17:59:59Z
 // A record packs the latency above a 13-bit key: a 12-bit endpoint id and
 // the 5xx flag. Latencies of 2^19 us or more (about 3% of lines) do not fit
 // and are kept on a side list with their key instead.
-constexpr u32 KEY_BITS = 13, ERR = 1u << 12, ID_MASK = ERR - 1, PACKED_MAX = (1u << 19) - 1;
+constexpr u32 KEY_BITS = 13, ERR = 1u << 12, ID_MASK = ERR - 1, PACKED_MAX = 1u << 19;
 
 // Bit i is set when byte i of the 32 at p equals c.
 inline u32 eq32(const char* p, char c) {
@@ -172,6 +180,8 @@ struct Parser {
     // Each hour's next free record. Chunks are aligned to their size, so a cursor
     // with no low bits is either null or just past a full chunk.
     u32* to[HOURS] = {};
+    // (latency, key) of the long ones.
+    std::vector<std::pair<u32, u32>> wide[HOURS];
 
     void run(const char* p, const char* end) {
         // The line ends of the next 4 KB are listed first, so a line's start does not
@@ -207,230 +217,155 @@ struct Parser {
                 u32 latency = decode(eol, eol - sp - 1);
                 p = eol + 1;
 
-                u32*& w = to[h];
-                auto put = [&](u32 v) {
-                    if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
-                        Chunk* c = chunks[h] + carved[h]++;
-                        c->prev = last[h], last[h] = c, w = c->rec;
-                    }
-                    *w++ = v;
-                };
                 if (__builtin_expect(latency >= PACKED_MAX, 0)) {
-                    // A marker, then the latency in the next slot, never split between chunks:
-                    // with one slot left, a marker alone fills it.
-                    if (!((uintptr_t(w) + 4) & (sizeof(Chunk) - 1))) put(~0u);
-                    put(PACKED_MAX << KEY_BITS | key), put(latency);
-                } else
-                    put(latency << KEY_BITS | key);
+                    wide[h].push_back({latency, key});
+                    continue;
+                }
+                u32*& w = to[h];
+                if (!(uintptr_t(w) & (sizeof(Chunk) - 1))) {
+                    Chunk* c = chunks[h] + carved[h]++;
+                    c->prev = last[h], last[h] = c, w = c->rec;
+                }
+                *w++ = latency << KEY_BITS | key;
             }
         }
     }
 
-    // The state after a piece: for each hour, its newest chunk and next free record.
-    // Written once by its thread, read by whoever finishes an hour.
-    struct Snap {
-        Chunk* last[HOURS];
-        u32* to[HOURS];
-    };
-    std::atomic<const Snap*> pub{nullptr};
-
-    // Publishes the state after a piece as s and returns the lowest and highest hour the
-    // piece added records to.
-    std::pair<int, int> publish(Snap& s) {
-        static const Snap none{};
-        const Snap* old = pub.load(std::memory_order_relaxed);
-        std::copy(last, last + HOURS, s.last), std::copy(to, to + HOURS, s.to);
-        int lo = HOURS, hi = -1;
-        for (int h = 0; h < HOURS; ++h)
-            if (to[h] != (old ? old : &none)->to[h]) lo = std::min(lo, h), hi = h;
-        pub.store(&s);
-        return {lo, hi};
-    }
-
-    // Calls f(endpoint id, error flag, latency) for every record of hour h in a snapshot.
+    // Calls f(endpoint rank, key, latency) for every record of hour h.
     template <class F>
-    static void each(const Snap& s, int h, F&& f) {
-        u32 n = s.last[h] ? s.to[h] - s.last[h]->rec : 0;  // the newest chunk's; the older ones are full
-        for (const Chunk* c = s.last[h]; c; c = c->prev, n = Chunk::CAP)
-            for (u32 i = 0; i < n; ++i) {
-                u32 v = c->rec[i], latency = v >> KEY_BITS;
-                if (latency == PACKED_MAX) {  // a long latency follows; a marker in the last slot is padding
-                    if (i == Chunk::CAP - 1) continue;
-                    latency = c->rec[++i];
-                }
-                f(v & ID_MASK, v & ERR, latency);
-            }
+    void each(int h, const u32* rank, F&& f) const {
+        u32 n = last[h] ? to[h] - last[h]->rec : 0;  // the newest chunk's; the older ones are full
+        for (const Chunk* c = last[h]; c; c = c->prev, n = Chunk::CAP)
+            for (u32 i = 0; i < n; ++i) f(rank[c->rec[i] & ID_MASK], c->rec[i] & ERR, c->rec[i] >> KEY_BITS);
+        for (auto [latency, key] : wide[h]) f(rank[key & ID_MASK], key & ERR, latency);
     }
 };
 
-int main(int, char** argv) {
+int main() {
     // With transparent huge pages, a chunk region written only in part could be
     // backed by whole 2 MB pages and count against peak memory.
     prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
-    // Hour-sized buffers get their own mappings, so freeing them returns the pages.
+    // Hour-sized buffers (lines, scratch) get their own mappings, so freeing them returns the pages
+    // and the output file's cache does not pile on top of retained heap.
     mallopt(M_MMAP_THRESHOLD, 1 << 15);
     const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
     int in = open("/data/requests.log", O_RDONLY);
-    int out = open("/out/summary.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int out = open("/out/summary.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (in < 0 || out < 0) return perror("open"), 1;
 
     // Map the log over one spare zero page, so the 64-byte scans stay in bounds.
     size_t size = lseek(in, 0, SEEK_END);
     auto* log = (char*)mmap(nullptr, size + 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (size && mmap(log, size, PROT_READ, MAP_PRIVATE | MAP_FIXED, in, 0) == MAP_FAILED) return perror("mmap"), 1;
+    // Line-aligned pieces, eight per thread, claimed in order: a thread that
+    // starts late or shares its core takes fewer.
     // Each hour's stretch has room for every line (a line is at least 40 bytes)
     // plus one part-full chunk per thread; pages are charged only once written.
     const size_t room = size / 40 / Chunk::CAP + 1 + nt;
     auto region = (uintptr_t)mmap(nullptr, (HOURS * room + 1) * sizeof(Chunk), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (region == uintptr_t(MAP_FAILED)) return perror("mmap"), 1;
     for (int h = 0; h < HOURS; ++h) chunks[h] = (Chunk*)((region + sizeof(Chunk) - 1) & -sizeof(Chunk)) + h * room;
-    // Line-aligned pieces, eight per thread, claimed in order: a thread that
-    // starts late or shares its core takes fewer.
     const int pieces = 8 * nt;
     std::vector<size_t> cut(pieces + 1, size);
     cut[0] = 0;
     for (int k = 1; k < pieces; ++k)
         for (cut[k] = std::max(cut[k - 1], size * k / pieces); cut[k] < size && log[cut[k] - 1] != '\n';) ++cut[k];
+    std::atomic<int> claim_piece{0}, claim{0}, claim_text{0};
 
-    // Hours are finished while the log is still being read. The log is nearly in time order (a
-    // line is at most ten minutes late), so once the finished pieces from the start of the file
-    // hold a line of hour h + 2, hour h should be complete. That is a guess, and it is checked:
-    // an hour is claimed with `next_hour` and then reads every thread's newest snapshot; a piece
-    // publishes its snapshot and then reads `next_hour`. All four are seq_cst, so either the hour
-    // read that snapshot or the piece sees the hour claimed and sets `late`; the program then
-    // runs again with the guess off (no hour starts before all pieces are finished). A piece adds
-    // records only after its thread's last snapshot, in chunks and slots the snapshot does not
-    // include, so a reader never touches memory that a writer is writing.
-    const bool safe = getenv("SD_SAFE");
+    // Between the phases, endpoints are ranked in unsigned byte order (a
+    // proper prefix first), which is the order lines are printed in an hour.
     std::vector<Parser> parsers(nt);
-    std::vector<Parser::Snap> snaps(pieces);
-    std::vector<int> top(pieces);  // the highest hour of a piece, written before finished[k]
-    std::unique_ptr<std::atomic<bool>[]> finished(new std::atomic<bool>[pieces]());
-    std::atomic<int> claim_piece{0}, next_hour{0}, texted{0}, progress{0};
-    std::atomic<bool> late{false};
-    u64 text_end = 0;  // where the next hour's text goes; handed from hour to hour through `texted`
-    auto ready = [&](int h) {
-        int k = 0, newest = -1;
-        for (; k < pieces && finished[k]; ++k) newest = std::max(newest, top[k]);
-        return k == pieces || (!safe && newest >= h + 2);
-    };
+    std::vector<std::string_view> names;
+    std::vector<u32> rank(Names::SLOTS);  // endpoint id -> rank
+    std::barrier ranked(nt, [&]() noexcept {
+        std::vector<std::pair<std::string_view, u32>> by_name;
+        for (u32 id = 0; id < Names::SLOTS; ++id)
+            if (u64 v = endpoints.slot[id]) by_name.push_back({endpoints.name(v), id});
+        std::sort(by_name.begin(), by_name.end());
+        for (auto [name, id] : by_name) rank[id] = names.size(), names.push_back(name);
+    });
 
     struct Line {
-        u32 id, n, p50, p95, p99, errors;
+        u32 e, n, p50, p95, p99, errors;
     };
-    auto name = [](u32 id) { return endpoints.name(endpoints.slot[id]); };
     auto ppm = [](const Line& l) { return u32(u64(l.errors) * 1000000 / l.n); };
-    // Works out hour h and writes its text. `ids` holds the endpoint ids in the order of their
-    // names (a proper prefix first), which is the order lines are printed in an hour.
-    auto finish = [&](int h, std::vector<u32>& ids) {
-        std::vector<const Parser::Snap*> view;
-        for (auto& ps : parsers)
-            if (const Parser::Snap* s = ps.pub.load()) view.push_back(s);
-        std::vector<u32> count(Names::SLOTS), errors(Names::SLOTS), start(Names::SLOTS);
-        u32 total = 0;
-        for (auto s : view) Parser::each(*s, h, [&](u32 id, u32 err, u32) { ++count[id], errors[id] += err != 0, ++total; });
-        // Counting sort of the hour's latencies by endpoint: the start of each group, in name order.
-        // A name that appeared since `ids` was made is missing from it, and the sum falls short.
-        auto place = [&] {
-            u32 sum = 0;
-            for (u32 id : ids) start[id] = sum, sum += count[id];
-            return sum == total;
-        };
-        if (!place()) {
-            ids.clear();
-            for (u32 id = 0; id < Names::SLOTS; ++id)
-                if (endpoints.slot[id]) ids.push_back(id);
-            std::sort(ids.begin(), ids.end(), [&](u32 a, u32 b) { return name(a) < name(b); });
-            if (!place()) late = true, total = 0, view.clear(), std::fill(count.begin(), count.end(), 0), place();
-        }
-        auto latency = std::make_unique_for_overwrite<u32[]>(total);
-        for (auto s : view) Parser::each(*s, h, [&](u32 id, u32, u32 l) { latency[start[id]++] = l; });
-        madvise(chunks[h], carved[h] * sizeof(Chunk), MADV_DONTNEED);
-
-        std::vector<Line> lines;
-        u64 bytes = 0;
-        for (u32 id : ids) {
-            u32 n = count[id];
-            if (n == 0) continue;
-            // Nearest rank p is index ceil(p * n / 100) - 1. A selection
-            // leaves only larger values after its rank, so each higher rank
-            // is selected among those: half the group for p95, a twentieth
-            // for p99. (An equal rank is already in place.)
-            u32* a = latency.get() + start[id] - n;
-            u32 r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
-            for (u32 from = 0; u32 r : {r50, r95, r99})
-                if (r >= from) select(a + from, n - from, r - from), from = r + 1;
-            const Line& l = lines.emplace_back(id, n, a[r50], a[r95], a[r99], errors[id]);
-            // Label, name, six numbers each after a space, newline.
-            bytes += 21 + name(id).size() + 7;
-            for (u32 x : {l.n, l.p50, l.p95, l.p99, l.errors, ppm(l)}) bytes += width(x);
-        }
-        latency.reset();
-        // This hour's text goes after the earlier hours', once their sizes are known.
-        for (int t; (t = texted.load(std::memory_order_acquire)) != h;) texted.wait(t);
-        u64 at = text_end;
-        text_end += bytes;
-        texted.store(h + 1, std::memory_order_release);
-        texted.notify_all();
-
-        char label[24], buf[1 << 14];
-        int day = (h + 18) / 24;
-        snprintf(label, sizeof label, "2026-%02d-%02dT%02d:00:00Z ", day < 2 ? 10 : 11, day < 2 ? 30 + day : day - 1, (h + 18) % 24);
-        char* o = buf;
-        auto flush = [&] {
-            for (char* p = buf; p < o;) {
-                ssize_t w = pwrite(out, p, o - p, at);
-                if (w <= 0) _exit(1);
-                p += w, at += w;
-            }
-            o = buf;
-        };
-        for (const Line& l : lines) {
-            std::string_view s = name(l.id);
-            if (o + s.size() + 128 > buf + sizeof buf) flush();
-            o = std::copy_n(label, 21, o);
-            o = std::copy(s.begin(), s.end(), o);
-            for (u32 x : {l.n, l.p50, l.p95, l.p99, l.errors, ppm(l)}) {
-                *o++ = ' ';
-                o = std::to_chars(o, o + 10, x).ptr;
-            }
-            *o++ = '\n';
-        }
-        flush();
-    };
+    std::vector<std::vector<Line>> lines(HOURS);
+    std::vector<u64> at(HOURS + 1);  // an hour's text size, then its offset
+    char* text = nullptr;
+    std::barrier sized(nt, [&]() noexcept {
+        u64 total = 0;
+        for (int h = 0; h < HOURS; ++h) total += std::exchange(at[h], total);
+        at[HOURS] = total;
+        if (total == 0) return;
+        if (ftruncate(out, total) || (text = (char*)mmap(nullptr, total, PROT_READ | PROT_WRITE, MAP_SHARED, out, 0)) == MAP_FAILED) _exit(1);
+    });
 
     std::vector<std::thread> pool;
     for (int t = 0; t < nt; ++t) pool.emplace_back([&, t] {
-        std::vector<u32> ids;
-        // scratch per hour
-        // Claims and finishes the hours that are ready, in order.
-        auto drain = [&] {
-            for (int h; (h = next_hour) < HOURS && ready(h);)
-                if (next_hour.compare_exchange_strong(h, h + 1)) finish(h, ids);
-        };
         for (int k; (k = claim_piece++) < pieces;) {
             parsers[t].run(log + cut[k], log + cut[k + 1]);
             // The piece is not read again: its pages are unmapped now, by this
             // thread, instead of all of the log's at exit by one.
             uintptr_t from = (uintptr_t(log + cut[k]) + 4095) & ~uintptr_t(4095), to = uintptr_t(log + cut[k + 1]) & ~uintptr_t(4095);
             if (to > from) madvise((void*)from, to - from, MADV_DONTNEED);
-            auto [lo, hi] = parsers[t].publish(snaps[k]);
-            if (lo < next_hour) late = true;
-            top[k] = hi;
-            finished[k] = true;
-            ++progress, progress.notify_all();
-            drain();
         }
-        for (int p = progress; next_hour < HOURS; p = progress) {
-            drain();
-            if (next_hour < HOURS) progress.wait(p);
+        ranked.arrive_and_wait();
+
+        {  // the scratch goes before the text phase, where the output counts
+        const u32 ne = names.size();
+        std::vector<u32> start(ne + 1), errors(ne), latency;
+        for (int h; (h = claim++) < HOURS;) {
+            // Counting sort of the hour's latencies by endpoint rank: count into
+            // start[e + 1], prefix, then place each latency at its group's cursor.
+            std::fill(start.begin(), start.end(), 0);
+            std::fill(errors.begin(), errors.end(), 0);
+            for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32 e, u32 err, u32) { ++start[e + 1], errors[e] += err != 0; });
+            for (u32 e = 0; e < ne; ++e) start[e + 1] += start[e];
+            latency.resize(start[ne]);
+            std::vector<u32> cursor(start.begin(), start.end() - 1);
+            for (auto& ps : parsers) ps.each(h, rank.data(), [&](u32 e, u32, u32 l) { latency[cursor[e]++] = l; });
+            madvise(chunks[h], carved[h] * sizeof(Chunk), MADV_DONTNEED);
+            lines[h].reserve(ne);
+
+            u64 size = 0;
+            for (u32 e = 0; e < ne; ++e) {
+                u32 n = start[e + 1] - start[e];
+                if (n == 0) continue;
+                // Nearest rank p is index ceil(p * n / 100) - 1. A selection
+                // leaves only larger values after its rank, so each higher rank
+                // is selected among those: half the group for p95, a twentieth
+                // for p99. (An equal rank is already in place.)
+                u32* a = latency.data() + start[e];
+                u32 r50 = (50 * n + 99) / 100 - 1, r95 = (95 * n + 99) / 100 - 1, r99 = (99 * n + 99) / 100 - 1;
+                for (u32 from = 0; u32 r : {r50, r95, r99})
+                    if (r >= from) select(a + from, n - from, r - from), from = r + 1;
+                const Line& l = lines[h].emplace_back(e, n, a[r50], a[r95], a[r99], errors[e]);
+                // Label, name, six numbers each after a space, newline.
+                size += 21 + names[e].size() + 7;
+                for (u32 x : {l.n, l.p50, l.p95, l.p99, l.errors, ppm(l)}) size += width(x);
+            }
+            at[h] = size;
         }
-        ++progress, progress.notify_all();  // wakes the others to see that all hours are claimed
+        }
+        sized.arrive_and_wait();
+
+        for (int h; (h = claim_text++) < HOURS;) {
+            char label[24];
+            int day = (h + 18) / 24;
+            snprintf(label, sizeof label, "2026-%02d-%02dT%02d:00:00Z ", day < 2 ? 10 : 11, day < 2 ? 30 + day : day - 1, (h + 18) % 24);
+            char* o = text + at[h];
+            for (const Line& l : lines[h]) {
+                o = std::copy_n(label, 21, o);
+                o = std::copy(names[l.e].begin(), names[l.e].end(), o);
+                for (u32 x : {l.n, l.p50, l.p95, l.p99, l.errors, ppm(l)}) {
+                    *o++ = ' ';
+                    o = std::to_chars(o, o + 10, x).ptr;
+                }
+                *o++ = '\n';
+            }
+            std::vector<Line>().swap(lines[h]);
+        }
     });
     for (auto& th : pool) th.join();
-    if (late && !safe) {  // the log was not in time order: run again, finishing hours only after the parse
-        setenv("SD_SAFE", "1", 1);
-        execv("/proc/self/exe", argv);
-    }
-    _exit(late);
+    _exit(0);
 }
