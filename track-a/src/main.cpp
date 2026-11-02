@@ -326,8 +326,7 @@ int main(int, char** argv) {
         std::vector<const Parser::Snap*> view;
         for (auto& ps : parsers)
             if (const Parser::Snap* s = ps.pub.load()) view.push_back(s);
-        std::vector<u32> scratch(3 * Names::SLOTS);  // large enough to be mapped on its own, and returned
-        u32 *count = scratch.data(), *errors = count + Names::SLOTS, *start = errors + Names::SLOTS;
+        std::vector<u32> count(Names::SLOTS), errors(Names::SLOTS), start(Names::SLOTS);
         u32 total = 0;
         for (auto s : view) Parser::each(*s, h, [&](u32 id, u32 err, u32) { ++count[id], errors[id] += err != 0, ++total; });
         // Counting sort of the hour's latencies by endpoint: the start of each group, in name order.
@@ -342,14 +341,13 @@ int main(int, char** argv) {
             for (u32 id = 0; id < Names::SLOTS; ++id)
                 if (endpoints.slot[id]) ids.push_back(id);
             std::sort(ids.begin(), ids.end(), [&](u32 a, u32 b) { return name(a) < name(b); });
-            if (!place()) late = true, total = 0, view.clear(), std::fill_n(count, Names::SLOTS, 0), place();
+            if (!place()) late = true, total = 0, view.clear(), std::fill(count.begin(), count.end(), 0), place();
         }
         auto latency = std::make_unique_for_overwrite<u32[]>(total);
         for (auto s : view) Parser::each(*s, h, [&](u32 id, u32, u32 l) { latency[start[id]++] = l; });
         madvise(chunks[h], carved[h] * sizeof(Chunk), MADV_DONTNEED);
 
         std::vector<Line> lines;
-        lines.reserve(ids.size());
         u64 bytes = 0;
         for (u32 id : ids) {
             u32 n = count[id];
