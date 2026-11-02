@@ -268,7 +268,7 @@ int main(int, char** argv) {
     // backed by whole 2 MB pages and count against peak memory.
     prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
     // Hour-sized buffers get their own mappings, so freeing them returns the pages.
-    mallopt(M_MMAP_THRESHOLD, 1 << 15), mallopt(M_ARENA_MAX, 1);
+    mallopt(M_MMAP_THRESHOLD, 1 << 15);
     const int nt = std::clamp<int>(std::thread::hardware_concurrency(), 1, 12);
     int in = open("/data/requests.log", O_RDONLY);
     int out = open("/out/summary.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
