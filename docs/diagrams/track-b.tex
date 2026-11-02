@@ -1,0 +1,34 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \def\w{156mm}
+  \node[box=\w, hl=cB] (q) at (0,0) {\nt{1. Read queries.txt first}{SIMD tokenize with class masks; hash each term (three AES rounds); insert into the term table of 4-slot, 32-byte buckets}};
+  \node[box=\w] (s) at (0,-2.2) {\nt{2. Sample}{each thread counts document frequency of the query terms in the first 1/64 of its share of docs.txt}};
+  \node[box=\w] (c) at (0,-4.4) {\nt{3. Classify}{bitmap terms (above 1/32 of the sample), list terms, phrase anchors, phrase-only terms; renumber by a counting sort}};
+
+  % scan group
+  \node[box=34mm] (t1) at (-5.85,-8.6) {\nt{Tokens}{64-byte window, class masks, AES hash, prefetch slot; lookup ring of 4}};
+  \node[box=34mm] (t2) at (-1.95,-8.6) {\nt{Ids}{appended per document}};
+  \node[box=34mm] (t3) at (1.95,-8.6) {\nt{SIMD compaction}{ids split into bitmap ids and anchor positions}};
+  \node[box=34mm] (t4) at (5.85,-8.6) {\nt{Per document}{set bitmap bits, check phrases at anchors, write units for list terms}};
+  \begin{scope}[on background layer]
+    \node[grp=cB, fit=(t1)(t2)(t3)(t4), inner ysep=11pt] (scan) {};
+  \end{scope}
+  \node[grplabel=cB, anchor=south west] at ([xshift=2mm,yshift=-1mm]scan.north west) {4. Scan: 12 threads over equal shares of docs.txt};
+
+  \node[box=\w] (f) at (0,-12.6) {\nt{5. Fill}{units scattered into one u16 offset run per term and thread, bucket by bucket; threads kept at most two buckets apart}};
+  \node[box=\w] (a) at (0,-14.8) {\nt{6. Answers}{threads take 64 queries at a time; merge, bitmap and list operations, strictly left to right}};
+  \node[box=\w, hl=cB] (o) at (0,-17.0) {\nt{7. Output}{chunks joined in query order into \texttt{/out/results.txt}; \texttt{\_exit(0)}}};
+
+  \draw[arr] (q) -- (s);
+  \draw[arr] (s) -- (c);
+  \draw[arr] (c) -- (scan.north);
+  \draw[arr] (t1) -- (t2);
+  \draw[arr] (t2) -- (t3);
+  \draw[arr] (t3) -- (t4);
+  \draw[arr] (scan.south) -- (f);
+  \draw[arr] (f) -- (a);
+  \draw[arr] (a) -- (o);
+\end{tikzpicture}
+\end{document}

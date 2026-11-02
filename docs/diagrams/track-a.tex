@@ -1,0 +1,26 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \def\w{74mm}
+  \node[box=\w, hl=cA] (m) at (0,0) {\nt{mmap the log}{over a spare zero page; line-aligned pieces, 8 per thread, smaller towards the end}};
+  \node[box=\w] (p) at (0,-2.2) {\nt{Parse: threads claim pieces in order}{per line: hour from the date digits, endpoint id from the lock-free table, 4-byte record into the hour's own region}};
+  \node[box=\w] (d) at (0,-4.6) {\nt{Drop the piece's input pages}{\texttt{madvise}}};
+  \node[dec=60mm] (q) at (0,-7.3) {first unparsed piece starts 30 min into the next hour?};
+  \node[box=\w, hl=cA] (c) at (0,-9.8) {\nt{Close the hour}{radix sort by endpoint rank and latency, percentiles read by index, line sizes computed, region handed back}};
+  \node[box=\w, hl=cA] (w) at (0,-12.1) {\nt{Format straight into the mapped output}{sizes are known, so placed hours are written in parallel}};
+  \node[box=\w, hl=cA] (x) at (0,-14.0) {\nt{\texttt{\_exit(0)}}{output: \texttt{/out/summary.txt}}};
+
+  \node[box=50mm, accent=warn, draw=warn] (l) at (8.6,-2.2) {\nt{Fallback: late line}{a line for an already closed hour sets a flag; hand everything back and redo with every hour held open (about 10 times slower, never seen in generated data)}};
+
+  \draw[arr] (m) -- (p);
+  \draw[arr] (p) -- (d);
+  \draw[arr] (d) -- (q);
+  \draw[arr] (q) -- node[lab, right, xshift=1mm, yshift=1mm] {yes} (c);
+  \draw[arr] (c) -- (w);
+  \draw[arr] (w) -- (x);
+  \draw[arr] (q.west) -- ++(-1.1,0) node[lab, above, pos=0.5] {no} |- (p.west);
+  \draw[redo] (p.east) -- node[lab, above] {late line} (l.west);
+  \draw[redo] (l.north) |- node[lab, above, pos=0.75] {redo} (m.east);
+\end{tikzpicture}
+\end{document}

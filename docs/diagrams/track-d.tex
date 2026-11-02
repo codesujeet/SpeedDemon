@@ -1,0 +1,23 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \def\w{150mm}
+  \node[box=\w, hl=cD] (q) at (0,0) {\nt{Read queries}{source, target pairs from queries.txt}};
+  \node[box=\w] (p) at (0,-2.0) {\nt{1. Parse once}{graph.txt cut at line ends into one range per thread; each edge filed under its tail's part of 16,384 nodes, as one 32-bit word}};
+  \node[box=\w] (b) at (0,-4.2) {\nt{2. Build each part}{count out-degrees and place edges inside a 64 KB counter array: no atomics}};
+  \node[box=\w] (bf) at (0,-6.4) {\nt{3. Locality order}{threads grow BFS blobs of 512 nodes, nodes claimed by compare-exchange on one byte each}};
+  \node[box=\w] (rn) at (0,-8.6) {\nt{Renumber and reverse}{copy the graph into the new numbering, then build the reverse graph (in-degrees counted atomically)}};
+  \node[box=\w] (s) at (0,-10.6) {\nt{Sort queries}{by renumbered endpoints}};
+  \node[box=\w, hl=cD] (dj) at (0,-12.8) {\nt{4. Query}{persistent workers take queries from an atomic counter; bidirectional Dijkstra on the forward and reverse graphs, 4-ary heaps, distances in pages of 256, grow the side with the smaller queue}};
+  \node[box=\w, hl=cD] (o) at (0,-15.2) {\nt{Write \texttt{/out/distances.txt}}{one distance per query, \texttt{-1} if unreachable; \texttt{exit(0)}}};
+
+  \draw[arr] (q) -- (p);
+  \draw[arr] (p) -- (b);
+  \draw[arr] (b) -- (bf);
+  \draw[arr] (bf) -- (rn);
+  \draw[arr] (rn) -- (s);
+  \draw[arr] (s) -- (dj);
+  \draw[arr] (dj) -- (o);
+\end{tikzpicture}
+\end{document}

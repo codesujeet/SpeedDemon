@@ -1,0 +1,20 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+\begin{axis}[
+  width=15cm, height=8cm,
+  ybar, bar width=22pt,
+  ymin=0, ymax=0.36, ytick distance=0.05,
+  ylabel={wall time T (s)},
+  symbolic x coords={first row,2ce9b21,a94d376,960565b,748922e,best-50},
+  xtick=data, scaled y ticks=false, yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2},
+  xlabel={selected rows of the board log (commit or label)},
+  ymajorgrids, grid style={rule!40},
+  enlarge x limits=0.12,
+  nodes near coords, nodes near coords style={font=\footnotesize, /pgf/number format/fixed, /pgf/number format/precision=4, /pgf/number format/zerofill},
+]
+\addplot[fill=cB!25, draw=cB, line width=1pt] coordinates {(first row,0.3209) (2ce9b21,0.1767) (a94d376,0.1674) (960565b,0.1519) (748922e,0.1203) (best-50,0.1124)};
+\end{axis}
+\end{tikzpicture}
+\end{document}

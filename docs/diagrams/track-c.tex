@@ -1,0 +1,34 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \def\w{150mm}
+  \node[box=\w, hl=cC] (r) at (0,0) {\nt{1. Regions}{regions.csv split by lines; each thread flags the 3-letter country codes it sees in a 15-bit table; tables populated up front}};
+  \node[box=\w] (n) at (0,-2.1) {\nt{Countries numbered once, 1..N in code order}{0 is \texttt{\_UNMATCHED}}};
+  \node[box=\w] (rt) at (0,-4.1) {\nt{2. Region table}{one byte per region id gives the country index; each thread fills its slice}};
+  \node[box=\w] (rp) at (0,-6.2) {\nt{3. Records}{records.csv split after CRLFs into 8 pieces per thread, claimed by at most 12 threads}};
+
+  \node[box=44mm] (p1) at (-5.3,-10.0) {\nt{Stage 1: parse}{fields; prefetch region row and name slot}};
+  \node[box=44mm] (p2) at (0,-10.0) {\nt{Stage 2: lookup}{read country, add to totals, find name slot, prefetch bitset word}};
+  \node[box=44mm] (p3) at (5.3,-10.0) {\nt{Stage 3: mark}{set the name's bit in the country's bitset; a new bit counts a distinct name}};
+  \begin{scope}[on background layer]
+    \node[grp=cC, fit=(p1)(p2)(p3), inner ysep=11pt] (loop) {};
+  \end{scope}
+  \node[grplabel=cC, anchor=south west] at ([xshift=2mm,yshift=-1mm]loop.north west) {Per record: three stages, 16 records apart};
+
+  \node[box=\w] (d) at (0,-13.5) {\nt{Drop the piece's pages}{returned to the system after each piece}};
+  \node[box=\w] (tt) at (0,-15.4) {\nt{Sum per-thread totals}{per-thread, per-country counts, sums, minimum, maximum, distinct names}};
+  \node[box=\w, hl=cC] (o) at (0,-17.5) {\nt{4. Output}{write \texttt{/out/aggregates.txt}; \texttt{\_exit(0)}}};
+
+  \draw[arr] (r) -- (n);
+  \draw[arr] (n) -- (rt);
+  \draw[arr] (rt) -- (rp);
+  \draw[arr] (rp) -- (loop.north);
+  \draw[arr] (p1) -- (p2);
+  \draw[arr] (p2) -- (p3);
+  \draw[arr] (loop.south) -- (d);
+  \draw[arr] (d) -- (tt);
+  \draw[arr] (tt) -- (o);
+  \draw[redo] (d.east) -- ++(1.1,0) |- node[lab, fill=white, pos=0.5, sloped, above=-1pt] {next piece} (rp.east);
+\end{tikzpicture}
+\end{document}

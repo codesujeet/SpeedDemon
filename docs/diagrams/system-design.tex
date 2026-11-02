@@ -1,0 +1,41 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  % repository
+  \node[box=40mm, hl=cA] (src) at (0,2.1)  {\nt{Track source}{one file in \texttt{src/}; no third-party dependencies}};
+  \node[box=40mm, hl=cA] (df)  at (0,-0.4) {\nt{Dockerfile}{offline build on an allowlisted base image}};
+  \begin{scope}[on background layer]
+    \node[grp=cA, fit=(src)(df)] (repo) {};
+  \end{scope}
+  \node[grplabel=cA, anchor=south west] at ([xshift=2mm,yshift=-1mm]repo.north west) {Repository: \texttt{track-X/}};
+
+  % sandbox
+  \node[box=30mm] (data) at (7.2,0.9) {\nt{/data}{input files, read only}};
+  \node[box=44mm, hl=cC] (proc) at (13.4,0.9) {\nt{Track process}{maps inputs; pool of at most 12 threads; phases as in the track flowchart; ends with \texttt{exit} without freeing}};
+  \node[box=30mm] (out) at (19.6,0.9) {\nt{/out}{one output file}};
+  \begin{scope}[on background layer]
+    \node[grp=cC, fit=(data)(proc)(out), inner ysep=14pt] (sand) {};
+  \end{scope}
+  \node[grplabel=cC, anchor=south west] at ([xshift=2mm,yshift=-1mm]sand.north west) {Board sandbox: read-only filesystem, no network, unprivileged user, memory and process limits};
+
+  % measurement
+  \node[box=34mm] (T) at (7.5,-4.8)  {\nt{T}{wall time}};
+  \node[box=34mm] (M) at (11.4,-4.8) {\nt{M}{peak memory}};
+  \node[box=34mm] (S) at (15.3,-4.8) {\nt{S}{formatted source lines}};
+  \node[box=34mm] (H) at (19.2,-4.8) {\nt{Output check}{SHA-256 against the published hash}};
+  \begin{scope}[on background layer]
+    \node[grp=cB, fit=(T)(M)(S)(H), inner ysep=14pt] (meas) {};
+  \end{scope}
+  \node[grplabel=cB, anchor=south west] at ([xshift=2mm,yshift=-1mm]meas.north west) {Measured by the board};
+
+  \node[box=40mm, hl=cB] (pts) at (0,-4.8) {\nt{Points}{\texttt{50 log10 K}; see the scoring diagram}};
+
+  \draw[arr] (src) -- (df);
+  \draw[arr] (df.east) -- node[lab, above] {image} ([yshift=0mm]sand.west |- df.east);
+  \draw[arr] (data) -- (proc);
+  \draw[arr] (proc) -- (out);
+  \draw[arr] (sand.south) -- (meas.north |- sand.south) -- (meas.north);
+  \draw[arr] (meas.west) -- (pts.east);
+\end{tikzpicture}
+\end{document}

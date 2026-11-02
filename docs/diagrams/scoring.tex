@@ -1,0 +1,29 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  \tikzset{term/.style={box=36mm, minimum height=26mm, inner sep=6pt}}
+  \node[term, hl=cA] (t) at (0,0)    {\nt{Time T}{$\bigl(T_{\mathrm{ref}}/T\bigr)^{0.50}$}\par\vspace{3pt}{\footnotesize no cap: faster always pays}};
+  \node[term, hl=cC] (m) at (5.0,0)  {\nt{Memory M}{$\min\!\bigl(M_{\mathrm{ref}}/M,\;50\bigr)^{0.20}$}\par\vspace{3pt}{\footnotesize ratio capped at 50: no credit below $M_{\mathrm{ref}}/50$}};
+  \node[term, hl=cB] (s) at (10.0,0) {\nt{Source S}{$\min\!\bigl(S_{\mathrm{ref}}/S,\;1\bigr)^{0.15}$}\par\vspace{3pt}{\footnotesize capped at 1.0: lines can only cost, never pay}};
+  \node[term, hl=cD] (d) at (15.0,0) {\nt{Dependencies D}{$\min\!\bigl(D_{\mathrm{ref}}/D,\;1\bigr)^{0.15}$}\par\vspace{3pt}{\footnotesize $D = 1 + $ direct dependencies; capped at 1.0}};
+
+  \foreach \a/\b in {t/m, m/s, s/d}{
+    \node[font=\Large, text=mute] at ($(\a)!0.5!(\b)$) {$\times$};
+  }
+
+  \node[box=60mm] (k) at (7.5,-3.6) {\nt{Efficiency coefficient $K$}{the product of the four factors}};
+  \node[box=60mm] (p) at (7.5,-5.9) {\nt{Points}{$50\log_{10}K$, clamped to $[0,100]$: $K=1\to 0$, $K=10\to 50$, $K=100\to 100$}};
+  \node[box=60mm] (tt) at (7.5,-8.2) {\nt{Track total}{$0.65\times\mathrm{points} + 0.35\times\mathrm{judge\ score}$}};
+  \node[box=60mm, hl=cA] (o) at (7.5,-10.5) {\nt{Overall}{geometric mean of the best three track totals}};
+
+  \foreach \x in {t,m,s,d}{
+    \draw[ink, line width=0.9pt] (\x.south) |- ([yshift=5mm]k.north);
+  }
+  \draw[arr] ([yshift=5mm]k.north) -- (k.north);
+  \draw[arr] (k) -- (p);
+  \draw[arr] (p) -- (tt);
+  \draw[arr] (tt) -- (o);
+  \node[lab, anchor=west, text width=52mm] at (11.5,-3.6) {Each $X_{\mathrm{ref}}$ is the contest's reference value for that track; $T$ in seconds, $M$ in bytes, $S$ in formatted code lines.};
+\end{tikzpicture}
+\end{document}

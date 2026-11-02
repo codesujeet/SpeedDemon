@@ -1,0 +1,32 @@
+\documentclass[tikz,border=10pt]{standalone}
+\input{style}
+\begin{document}
+\begin{tikzpicture}
+  % main pipeline (row 1) and its return path (row 2)
+  \node[box=36mm, hl=cA] (spec) at (0,0)  {\nt{Contest spec}{inputs, output format, SHA-256}};
+  \node[box=36mm, hl=cA] (src)  at (5.2,0) {\nt{Track source}{\texttt{track-a} to \texttt{track-d}, one file each}};
+  \node[box=36mm, hl=cA] (dock) at (10.4,0) {\nt{Dockerfile build}{offline, allowlisted base image}};
+  \node[box=36mm, hl=cA] (run)  at (15.6,0) {\nt{Board run}{T, M, S, points}};
+
+  \node[box=36mm] (feed)  at (15.6,-3.4) {\nt{Board feed}{read by \texttt{real-spec/board.py}}};
+  \node[box=36mm] (jsonl) at (10.4,-3.4) {\nt{board-runs.jsonl}{one row per scored run}};
+  \node[box=36mm] (perf)  at (5.2,-3.4)  {\nt{PERF.md}{summary, log, Board runs table}};
+
+  % local verification loop (row 0)
+  \node[box=36mm, hl=cC] (local) at (10.4,3.4) {\nt{Local check}{\texttt{check.py}, \texttt{dock.ps1}, callgrind, perf}};
+  \node[box=36mm, hl=cC] (ver)   at (5.2,3.4)  {\nt{Verify}{published hash, seeds, edge suites}};
+
+  \draw[arr] (spec) -- (src);
+  \draw[arr] (src) -- (dock);
+  \draw[arr] (dock) -- (run);
+  \draw[arr] (run) -- (feed);
+  \draw[arr] (feed) -- (jsonl);
+  \draw[arr] (jsonl) -- (perf);
+  \draw[arr] (dock) -- node[lab, right] {same image} (local);
+  \draw[arr] (local) -- (ver);
+  \draw[redo] (ver) -- node[lab, right] {fix or tune} (src);
+  \draw[redo] (perf) -- node[lab, right, align=left, text width=30mm] {board numbers decide what to keep} (src);
+  \node[lab, anchor=south] at (7.8,4.5) {\textbf{Local loop}: laptop and Docker, never the judge};
+  \node[lab, anchor=north] at (10.4,-4.5) {\textbf{Board loop}: the board was the judge and, often, the profiler};
+\end{tikzpicture}
+\end{document}
