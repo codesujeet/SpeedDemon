@@ -68,9 +68,10 @@ fn number(text: &[u8], i: usize) -> u32 {
     digits.fold(0, |v, &b| v * 10 + (b - b'0') as u32)
 }
 
-// Longer tokens (a rare path, taken by a branch): three AES rounds over the masked 32 bytes (the high half is the first round key).
+// Three AES rounds over the masked 32 bytes (the high half is the first round key): every output bit
+// depends on every input byte, in seven instructions where a multiply mix took thirty.
 #[target_feature(enable = "aes")]
-unsafe fn hash_long(p: *const u8, len: usize) -> u64 {
+unsafe fn hash(p: *const u8, len: usize) -> u64 {
     static KEEP: [u128; 4] = [!0, !0, 0, 0];
     let mask = _mm256_loadu_si256(KEEP.as_ptr().cast::<u8>().add(32 - len).cast());
     let v = _mm256_or_si256(_mm256_loadu_si256(p.cast()), _mm256_set1_epi8(0x20));
@@ -80,22 +81,6 @@ unsafe fn hash_long(p: *const u8, len: usize) -> u64 {
     let x = _mm_aesenc_si128(_mm_aesenc_si128(x, k), k);
     // The top bit is always set, so that no hash has the tag of a free slot.
     _mm_cvtsi128_si64(x) as u64 | 1 << 63
-}
-
-// Up to 16 bytes (nearly every token): two AES rounds over the masked, lower-cased 16 bytes. The first round mixes each
-// column of four bytes and the second spreads that over all 16, so the low 64 bits depend on every byte. The load is
-// 16 bytes at p, inside the 4096 bytes `map` leaves after a file.
-#[target_feature(enable = "aes")]
-unsafe fn hash(p: *const u8, len: usize) -> u64 {
-    static KEEP: [u128; 2] = [!0, 0];
-    if len > 16 {
-        return hash_long(p, len);
-    }
-    let mask = _mm_loadu_si128(KEEP.as_ptr().cast::<u8>().add(16 - len).cast());
-    let w = _mm_and_si128(_mm_or_si128(_mm_loadu_si128(p.cast()), _mm_set1_epi8(0x20)), mask);
-    let k = _mm_set1_epi64x(0x9E37_79B9_7F4A_7C15u64 as i64);
-    // The top bit is always set, so that no hash has the tag of a free slot.
-    _mm_cvtsi128_si64(_mm_aesenc_si128(_mm_aesenc_si128(w, k), k)) as u64 | 1 << 63
 }
 
 // Open addressing over 32-byte buckets of four slots, each the hash's top bits above
