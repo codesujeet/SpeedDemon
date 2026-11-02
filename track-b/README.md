@@ -6,6 +6,8 @@ Reads `/data/docs.txt` (one document per line, starting with its numeric id and 
 
 Tag `best-50` (commit `2b3efbe`): 0.1124 s, 43.4 MiB, S 695, 77.72 on the board (`run-e04aea56e89d`). Progress (running best points, rows from `real-spec/board-runs.jsonl`): 64.13 (`run-67ca8f767f8d`, Oct 31) to 69.70 (`run-6268f725a495`) to 73.42 (`run-d58c749305c7`, Nov 1 early) to 75.75 (`run-7eae9828db9d`) to 77.67 (`run-19fd5cec2739`) to 77.72. The long table is in [`PERF.md`](PERF.md).
 
+Final choice. A faster alternative (phased 16-bit postings, AES token hash, cache-line term buckets, 1,134 formatted lines) read 0.0979 s and 0.1022 s on the board (commits `efaf824` and `c9a7d97`), 77.78 and 77.31 points, against 77.34 to 77.72 for this source. The 439 extra lines cost about as many points as the time gained, and its term identity has fewer hash bits, so this source (`best-50`) stays final. Details in PERF.md.
+
 
 
 ```mermaid
