@@ -241,18 +241,6 @@ fn has(bits: &[u64], d: u32) -> bool {
     bits[d as usize / 64] >> (d % 64) & 1 != 0
 }
 
-// Vec::retain with a branch on the predicate mispredicts on a dense bitmap (about half of the ids stay, at random); this writes
-// every id at the write cursor and advances it by the predicate.
-fn keep(v: &mut Vec<u32>, mut f: impl FnMut(u32) -> bool) {
-    let mut k = 0;
-    for i in 0..v.len() {
-        let d = v[i];
-        v[k] = d;
-        k += f(d) as usize;
-    }
-    v.truncate(k);
-}
-
 fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
     use Docs::*;
     let bit = |d: u32| (d as usize / 64, 1u64 << (d % 64));
@@ -268,7 +256,7 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
             Bits(a)
         }
         (Bits(b), b'A', List(mut v)) | (List(mut v), b'A' | b'N', Bits(b)) => {
-            (keep(&mut v, |d| has(&b, d) == (op == b'A')), List(v)).1
+            (v.retain(|&d| has(&b, d) == (op == b'A')), List(v)).1
         }
         (Bits(mut a), _, List(b)) | (List(b), _, Bits(mut a)) => {
             let x = a.to_mut();
@@ -279,7 +267,7 @@ fn apply<'a>(cur: Docs<'a>, op: u8, term: Docs<'a>, words: usize) -> Docs<'a> {
         }
         (List(mut a), b'A' | b'N', List(b)) if a.len() * 16 < b.len() => {
             let mut j = 0;
-            keep(&mut a, |d| {
+            a.retain(|&d| {
                 j += b[j..].partition_point(|&x| x < d);
                 (j < b.len() && b[j] == d) == (op == b'A')
             });
