@@ -354,6 +354,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `bdb58fd` | Track B: filtering a list by a bitmap or a longer list writes every id and advances by the | `run-0769c072bb90` | 0.0206 | 18.0 | 321 | 84.92 |
 | `147661d` | PERF: B round (pool first, 16-byte hash, keep filter) reverted | `run-5f11811f0530` | 0.0205 | 18.6 | 321 | 84.85 |
 | `3b8422f` | Track A: one pass, each hour finished and written while the log is still parsed (Codex can | `run-c858924f52ea` | 0.0195 | 14.4 | 404 | 85.73 |
+| `c0dd554` | PERF: track A one-pass streaming hours, 85.73 on the board | `run-0aa10b5f95f6` | 0.0193 | 14.2 | 404 | 85.95 |
+| `efaf824` | Track B: phased 16-bit postings, AES token hash, cache-line term buckets (Codex candidate  | `run-e8e4cb7a2cb7` | 0.0254 | 16.5 | 404 | 82.30 |
 
 <!-- board-runs:end -->
 

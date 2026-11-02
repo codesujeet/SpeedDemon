@@ -453,6 +453,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `bdb58fd` | Track B: filtering a list by a bitmap or a longer list writes every id and advances by the | `run-ddc2d15bb20e` | 0.1116 | 43.3 | 724 | 77.68 |
 | `147661d` | PERF: B round (pool first, 16-byte hash, keep filter) reverted | `run-70fcc34df584` | 0.1441 | 42.5 | 695 | 75.12 |
 | `3b8422f` | Track A: one pass, each hour finished and written while the log is still parsed (Codex can | `run-f7d2f4b0b44d` | 0.1169 | 43.0 | 695 | 77.34 |
+| `c0dd554` | PERF: track A one-pass streaming hours, 85.73 on the board | `run-e44b4d3f3495` | 0.1144 | 43.8 | 695 | 77.49 |
+| `efaf824` | Track B: phased 16-bit postings, AES token hash, cache-line term buckets (Codex candidate  | `run-5fa002ed2f8c` | 0.0979 | 40.7 | 1134 | 77.78 |
 
 <!-- board-runs:end -->
 
@@ -503,3 +505,4 @@ Tried and reverted (the board did not confirm the local gain; B reading with the
 
 Board noise on identical code was large for B: the same source read 0.1124, 0.1131 and, in another reading, 0.113-0.133 s; single readings under about 4% cannot be told apart.
 - Pool first, 16-byte two-round hash, `keep()` filter (`0dda495`, `4599ca9`, `bdb58fd`; reverted): 0.1116 s, 43.3 MiB, S 724, 77.68 against best-50's 0.1124 s, S 695, 77.72. Locally the minimum fell about 8% over 40 interleaved runs and the median stayed flat; on the board the gain was inside the noise and the 29 extra lines cost as much. Also tried locally and dropped: SIMD 8x8 intersection (-9% on one CPU, +7% at 12 CPUs, as the permutes share a port with the SMT sibling), a persistent scratch bitmap for list conversion, prefetching the bitmap word, threshold tuning, a duplicate-query memo (0.7% of queries, at most 0.17 ms).
+- Phased 16-bit postings with AES token hash and cache-line term buckets, written by the Codex candidate and fixed here (`efaf824`, `run-5fa002ed2f8c`): 0.0979 s, 40.7 MiB, S 1134, 77.78 (best-50: 0.1124 s, S 695, 77.72). Locally it ran about 20% faster than best-50 in interleaved runs (median ratio 0.80 at 12 and at 6 CPUs); on the board the time fell 13% but the source grew by 439 formatted lines, which costs about 1.6 points, so the net is small and rests on the time holding across readings. Before adoption the candidate failed 7 edge cases that best-50 passes (a hash fold that sent periodic tokens to one value, a long-token hash that cancelled, a 16-bit phase assert, an 18-bit doc-count assert); each was fixed and the edge suite now passes 19 of 19, with hashes matching on seeds 1, 2, 3, 7, 61, 62 and a token-length fuzz from 1 to 40 bytes. Remaining known limit: term identity is a hash of about 47 effective bits with no byte check.
