@@ -302,6 +302,8 @@ Each row is one scored run of the named commit on the live board, copied from th
 | `4bb6d40` | Track A: one malloc arena (the 12 thread arenas held 1.4 MiB); memory.peak 16.2 -> 15.3 Mi | `run-b57858e1654f` | 0.0242 | 8.9 | 374 | 81.30 |
 | `3896a27` | PERF: A streaming-hours experiment, reverted (run-70e34892adfd) | `run-48caaa1c5c62` | 0.0266 | 9.2 | 374 | 80.16 |
 | `bdb58fd` | Track B: filtering a list by a bitmap or a longer list writes every id and advances by the | `run-6aba41d76b9e` | 0.0241 | 8.6 | 374 | 81.48 |
+| `147661d` | PERF: B round (pool first, 16-byte hash, keep filter) reverted | `run-853c72421b62` | 0.0262 | 9.6 | 374 | 80.11 |
+| `3b8422f` | Track A: one pass, each hour finished and written while the log is still parsed (Codex can | `run-2125619725d4` | 0.0240 | 8.5 | 374 | 81.58 |
 
 <!-- board-runs:end -->
 
