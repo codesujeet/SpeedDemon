@@ -28,7 +28,7 @@ Final sources: Track A is tag `best-51` (commit `3b8422f`); Tracks B and C are t
 | C Join | two CSV files joined and aggregated per country | C++20 | 0.0243 | 8.9 | 374 | 81.28 | `run-81747cac71e7` |
 | D Traverse | shortest paths on a road-like graph | Rust | 0.1729 | 66.3 | 518 | 68.58 | `run-e682dbdc30a2` |
 
-<!-- FINAL-B: if Track B's source is replaced before the freeze, update the B row above (T, M, S, points, run ID, tag or commit), the B mentions in docs/OVERVIEW.md and track-b/README.md, and the Final row in track-b/PERF.md. Search the repo for "FINAL-B" to find every place. -->
+
 
 Caption: four tracks; A at `best-51` (85.73), B and C at `best-50` (77.72, 81.28), D not counted (68.58).
 
@@ -227,7 +227,6 @@ For AI assistants:
 - `track-c/pgo/sdrun-main.gcda` is a gcc profile recorded for the current C source; it must be regenerated if that source changes, not edited.
 - Output hashes are checked by the board, so a faster change that alters output is wrong. Verify with the commands above.
 - `docs/EXPERIMENTS.md` and the log sections of each `PERF.md` are chronological history; words such as "current" there refer to the time of writing.
-- Search for `FINAL-B` to find the places where Track B's final result is recorded.
 
 ## Layout
 

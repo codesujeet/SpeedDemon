@@ -11,7 +11,7 @@ Where the track stands and why, before the long log below. Board numbers come fr
 | First run in the log | `run-67ca8f767f8d` | `32f54ce` | 0.3209 | 61.0 MiB | 869 | 64.13 |
 | Best row in the log, also final (`best-50`) | `run-e04aea56e89d` | `2b3efbe` | 0.1124 | 43.4 MiB | 695 | 77.72 |
 
-<!-- FINAL-B: if a faster B source replaces best-50 before the freeze, add its row here (tag or commit, T, M, S, points, run ID) and say which source is final in the paragraph above. -->
+
 
 ### Board score over time
 
@@ -506,3 +506,4 @@ Tried and reverted (the board did not confirm the local gain; B reading with the
 Board noise on identical code was large for B: the same source read 0.1124, 0.1131 and, in another reading, 0.113-0.133 s; single readings under about 4% cannot be told apart.
 - Pool first, 16-byte two-round hash, `keep()` filter (`0dda495`, `4599ca9`, `bdb58fd`; reverted): 0.1116 s, 43.3 MiB, S 724, 77.68 against best-50's 0.1124 s, S 695, 77.72. Locally the minimum fell about 8% over 40 interleaved runs and the median stayed flat; on the board the gain was inside the noise and the 29 extra lines cost as much. Also tried locally and dropped: SIMD 8x8 intersection (-9% on one CPU, +7% at 12 CPUs, as the permutes share a port with the SMT sibling), a persistent scratch bitmap for list conversion, prefetching the bitmap word, threshold tuning, a duplicate-query memo (0.7% of queries, at most 0.17 ms).
 - Phased 16-bit postings with AES token hash and cache-line term buckets, written by the Codex candidate and fixed here (`efaf824`, `run-5fa002ed2f8c`): 0.0979 s, 40.7 MiB, S 1134, 77.78 (best-50: 0.1124 s, S 695, 77.72). Locally it ran about 20% faster than best-50 in interleaved runs (median ratio 0.80 at 12 and at 6 CPUs); on the board the time fell 13% but the source grew by 439 formatted lines, which costs about 1.6 points, so the net is small and rests on the time holding across readings. Before adoption the candidate failed 7 edge cases that best-50 passes (a hash fold that sent periodic tokens to one value, a long-token hash that cancelled, a 16-bit phase assert, an 18-bit doc-count assert); each was fixed and the edge suite now passes 19 of 19, with hashes matching on seeds 1, 2, 3, 7, 61, 62 and a token-length fuzz from 1 to 40 bytes. Remaining known limit: term identity is a hash of about 47 effective bits with no byte check.
+- Second board reading of the same Codex B source (`c9a7d97`): 0.1022 s, 40.9 MiB, S 1134, 77.31. Together with `efaf824` (0.0979 s, 77.78) the mean is 77.5, inside best-50's range of 77.34 to 77.72, so the faster source was reverted (`best-50` stays final for B): equal expected points for 439 more lines and a narrower term hash.

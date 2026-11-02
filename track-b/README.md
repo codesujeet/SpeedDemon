@@ -6,7 +6,7 @@ Reads `/data/docs.txt` (one document per line, starting with its numeric id and 
 
 Tag `best-50` (commit `2b3efbe`): 0.1124 s, 43.4 MiB, S 695, 77.72 on the board (`run-e04aea56e89d`). Progress (running best points, rows from `real-spec/board-runs.jsonl`): 64.13 (`run-67ca8f767f8d`, Oct 31) to 69.70 (`run-6268f725a495`) to 73.42 (`run-d58c749305c7`, Nov 1 early) to 75.75 (`run-7eae9828db9d`) to 77.67 (`run-19fd5cec2739`) to 77.72. The long table is in [`PERF.md`](PERF.md).
 
-<!-- FINAL-B: if a faster B source replaces this one before the freeze, update this Result section (numbers, run ID, tag), the Approach and flowchart if the design changed, and the Provenance note (Codex-written variant). -->
+
 
 ```mermaid
 flowchart TD
@@ -108,4 +108,4 @@ Full-scale outputs also matched on seeds 2, 3 and 7 with hashes `7f224ef6`, `7e0
 
 ## Provenance
 
-This source started as a draft written with ChatGPT/Codex (OpenAI) by the team owner, then reviewed, tested and tuned with Claude Code. AI assistance is allowed by the contest rules. The earlier piece-based implementation and its history are in git history. <!-- FINAL-B: if the faster Codex-written variant replaces this source, say so here with its tag and numbers. -->
+This source started as a draft written with ChatGPT/Codex (OpenAI) by the team owner, then reviewed, tested and tuned with Claude Code. AI assistance is allowed by the contest rules. The earlier piece-based implementation and its history are in git history.
