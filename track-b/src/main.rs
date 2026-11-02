@@ -459,7 +459,7 @@ fn main() {
         }
         let samples = on_threads(|t| {
             let (mut df, mut last) = (vec![0u32; nterms + 1], vec![0u16; nterms + 1]);
-            let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 64];
+            let sample = &text[cut[t]..cut[t] + (cut[t + 1] - cut[t]) / 256];
             let n = walk(sample, 0, &terms, last.as_ptr(), |doc, toks| {
                 let mark = (doc + 1) as u16;
                 for &id in toks {
