@@ -359,3 +359,8 @@ Callgrind's branch simulation on the full data showed about half of A's simulate
 Not kept: `-mtune=raptorlake` (0.0223 s on one reading); a direct scan for the largest value in `select` (no change in simulated mispredicts once the median had no branches).
 
 Board diagnostics, each with correct output and one phase run twice: the parse adds about 9.4 ms (`4dd910c`, 0.0294 s, warm, so a little under its first-time cost); the hours phase with `select` adds about 3.4 ms (`15d4eb3`, 0.0234 s) of about 20 ms.
+
+### Nov 2 round: what was tried on A (board rows from the log)
+
+- Hour-sized buffers in their own mappings (`mallopt(M_MMAP_THRESHOLD, 32 KiB)` plus `reserve`, `218638a`, `run-1b7e512b0af6`): 0.0204 s, 18.2 MiB, S 321, 84.98. Peak memory fell by about 1.1 MiB (19.3 to 18.2 on the board; 19.18 to 18.11 MiB in 10 interleaved local runs) for 3 code lines. Kept.
+- Not on the board (local numbers only): sorting groups of 32 or fewer outright (more instructions, 733.2 M to 743.4 M: only 27% of the latencies sit in such groups); smaller chunks (no change in peak); gcc PGO (-3.9% instructions, no measurable timing gain over 12 interleaved runs, so not adopted); claiming hours biggest first and letting the last thread call `_exit` (about 0.3 ms estimated, not measurable locally).

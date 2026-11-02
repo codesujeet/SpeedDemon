@@ -451,3 +451,16 @@ Prefetch lag on the board, one reading each: lag 2 0.1667 s, lag 4 0.1651 s, lag
 That pointed at branch mispredicts, and `Terms::find` is now four-slot SIMD buckets, one compare with no branch on hit or miss (`select_unpredictable`). Board: `4423afa` 0.1545 s, `960565b` 0.1519 s, S 585, 75.00, the best so far, and the first real gain in time on this track. The top bit of every hash is set, so that no hash has the tag of a free slot; the cloud session's fuzzer caught that case as a panic on a token over 32 bytes.
 
 Tried after the buckets and not kept: positions of a document's tokens staged first (`15d4eb3`, 0.1629 s, S 607), a read-only info row per term (`55b45da`, 0.1673 s, S 589). Start and end masks per window (`5c38f17`) read 0.1617, 0.1555, 0.1521 and 0.1639 s, about neutral, and stay. These readings show the noise on the same source: about 0.152-0.164 s.
+
+### Nov 2 round: what moved B and what did not (board rows from the log)
+
+Kept, in order (each row is one board reading, B only): the AES token hash and the bitmap-row sink (`2c4de9a`, `run-bc67e0e3c5b4`: 0.1305 s, 76.34); the candidate split of the per-document pass (`fdf11ec`, `run-8eaa9372dea1`: 0.1222 s, 77.02); five small cuts (unchecked indexes, the miss id as `u32::MAX`, the fill reading the unit stream by index, counting-sort renumbering; `748922e`, `run-09ecd8747b3e`: 0.1203 s, 77.25); SIMD id compaction, a lookup ring pre-filled with the no-term hash, a counting sort of phrase anchors (`52421b0`, `run-7d246c6f9544`: 0.1152 s, 77.48); a branch-free unit write (`2b3efbe`, `run-e04aea56e89d`: 0.1124 s, 77.72, the final source).
+
+Tried and reverted (the board did not confirm the local gain; B reading with the commit applied):
+- Fill gate 2 -> 8 buckets (`42f185b`, `run-6057c09e79f7`): 0.1384 s against 0.1382 s before; about +1 MiB of peak, no gain.
+- Phrase-anchor check as one 40-byte record and a vector compare (`bc4c063`, `run-9a4b81133a26`): 0.1159 s, 77.23, 27 more lines; local scan -12%, board -0%.
+- Thread pool started first thing plus a 1/256 sample (`77c3a49`, `run-dd8939172c8a`): 0.1150 s, 77.48, 6 more lines; local pre-scan -3.5 to -5.6 ms, board no gain.
+- Tokens of up to 16 bytes hashed with two AES rounds (`6c5b7ff`, `run-2de379871887`): 0.1177 s, 77.16, 15 more lines; local scan -8% at 12 CPUs, board no gain.
+- Not on the board (local numbers only): interleaving two or four token streams in one loop (neutral to slightly slower, more instructions); a 64-byte bucket layout with tags and ids in one line (-5 instructions per token but 4 to 7% slower wall); an exact multiplicative key for short tokens (slower than AES); folding `count[]` into the unit write; dropping the `last[]` prefetch; VAES hashing of two tokens (about 1 instruction per token); a flat (term, doc) pair stream (needs about 44 MB more, over the memory cap); SIMD list intersection (merging is about 9% of the answer phase).
+
+Board noise on identical code was large for B: the same source read 0.1124, 0.1131 and, in another reading, 0.113-0.133 s; single readings under about 4% cannot be told apart.
