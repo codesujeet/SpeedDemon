@@ -2,20 +2,23 @@
 
 Solo entry for [Speed Demon 2026](https://speeddemon.dev), a 72-hour performance contest with four tracks. Each track is a small batch program that reads files from `/data`, writes one output file to `/out`, and is scored on the live board by wall time (T), peak memory (M) and source size (S, formatted code lines); the board's points are `50 * log10(K)`. Every track here is one source file with no third-party dependencies.
 
+**Write-up:** [The change that looked free on my laptop and cost 14% on the judge's machine](https://sujeet.info/blog/speed-demon-2026), the entry to the Hackathon Raptors Write-Up Side Quest. It tells the story behind these numbers; this README is the reference.
+
 ## Contents
 
 1. [Results at a glance](#results-at-a-glance)
 2. [The 72 hours](#the-72-hours)
 3. [Progress on the board](#progress-on-the-board)
 4. [How the repo fits together](#how-the-repo-fits-together)
-5. [What we learned](#what-we-learned)
-6. [What failed and why](#what-failed-and-why)
-7. [Verification](#verification)
-8. [Reproduction guide](#reproduction-guide)
-9. [How to read this repo](#how-to-read-this-repo)
-10. [Layout](#layout)
-11. [How the code was produced](#how-the-code-was-produced)
-12. [What would be next](#what-would-be-next)
+5. [Architecture of each track](#architecture-of-each-track)
+6. [What we learned](#what-we-learned)
+7. [What failed and why](#what-failed-and-why)
+8. [Verification](#verification)
+9. [Reproduction guide](#reproduction-guide)
+10. [How to read this repo](#how-to-read-this-repo)
+11. [Layout](#layout)
+12. [How the code was produced](#how-the-code-was-produced)
+13. [What would be next](#what-would-be-next)
 
 ## Results at a glance
 
@@ -104,6 +107,52 @@ Flowcharts of the four solutions (the sources of these figures are in [`docs/dia
 Caption: A, B, C and D in three or four stages each; all map their input, use at most 12 threads and end with `_exit`/`exit` without freeing.
 
 Tracks A and C started as Rust and were moved to C++ during the event because the C++ builds had a shorter source and, linked statically, started faster on the board; the last Rust versions are at git tags `best-19` and earlier. The task specs are in the [contest repository](https://github.com/hackathon-raptors/speed-demon-2026/tree/main/specs).
+
+## Architecture of each track
+
+One picture per track, then the techniques that decided the result. Details and board run IDs for every step are in each track's `PERF.md`.
+
+**A, Ingest.** Twelve threads claim pieces of the mapped log, intern endpoint names and write 4-byte records per hour. After a barrier each hour is bucketed per endpoint and the percentiles are selected, and the text is formatted straight into the mapped output. Each thread releases the input pages of a finished piece.
+
+![Track A, the three-phase design: parse, per-hour selection, format into the mapped output; input pages released as each piece finishes](docs/img/arch-a.webp)
+
+**B, Index.** Twelve lanes tokenize, hash (three AES rounds) and look each token up in a four-slot bucket, recording it as a bitmap or a list of 16-bit document offsets. The lanes merge left to right and the query operators run on the result.
+
+![Track B: tokens to masks, AES hash, four-slot bucket lookup, bitmap or list, then merge and query evaluation](docs/img/arch-b.webp)
+
+**C, Join.** The records file is cut at quote parity. Twelve workers parse field by field with a prefetch ring, look names up in a table of 8-byte cells and mark each distinct name with an atomic bit set; per-country totals are written in code order, then `_UNMATCHED`.
+
+![Track C: cut at quote parity, twelve workers with a prefetch ring, name table, atomic bit set and per-country totals](docs/img/arch-c.webp)
+
+**D, Traverse (not counted).** The graph is parsed in line-aligned parts into forward and reverse CSR and renumbered in blobs. Queries run as bidirectional Dijkstra with 4-ary heaps and paged distances, and stop when the two queue tops sum to at least the best distance found.
+
+![Track D: build (parts, forward and reverse CSR, blob BFS renumbering) and query (bidirectional Dijkstra, 4-ary heap, paged distances)](docs/img/arch-d.webp)
+
+### Techniques that decided the result
+
+- **One compare per lookup.** B's term table is made of 32-byte buckets with four 64-bit slots. One AVX2 compare settles a hit or a miss with the same instructions, so there is no branch to mispredict.
+
+![One AVX2 compare on a 32-byte bucket of four slots; a hit and a miss run the same instructions](docs/img/bucket.webp)
+
+- **Mispredicts, not instruction counts, set B's pace.** A 23% instruction cut did nothing on the board; branch-free buckets and a branch-free unit write did.
+
+![A wrong branch prediction flushes the pipeline and refills it, roughly 15 to 20 cycles (a general figure for modern CPUs)](docs/img/mispredict.webp)
+
+- **Give pages back early.** Releasing each piece's input pages as it finished took A from 0.0267 s to 0.0220 s on the board, and we could not see it locally.
+
+![One core tearing down every mapped page at exit, against each thread releasing its own pages as it finishes](docs/img/page-release.webp)
+
+- **Use the board as a profiler.** C's diagnostic builds (correct or deliberately wrong output, read once) split its time: setup 5.5 ms, streaming 5.8, parsing 14.3, table lookup 2.2, and 2.1 more in the real program.
+
+![Track C diagnostic builds on the board, in milliseconds](docs/img/c-diagnostics.webp)
+
+- **A local result is a hypothesis.** Several changes had the wrong sign or size on the laptop.
+
+![Local versus board, as percentage change in time, for A, B and C changes](docs/img/local-vs-board.webp)
+
+- **Every experiment lives on a branch and every failure is its own revert.** The repository has 539 commits, 51 `best-N` tags, 36 reverts and 74 cloud-session branches.
+
+![Schematic of the repository: main line with best tags, agent, codex, experiment and cloud branches, and revert arrows](docs/img/git-topology.webp)
 
 ## What we learned
 
